@@ -1,0 +1,189 @@
+# Cursor AI Agent Rules for Scientific Data Analysis
+# ============================================================================
+# This file configures the AI agent's behavior for this R-based scientific 
+# data analysis project. The agent should follow these guidelines when 
+# assisting with code, analysis, and documentation.
+
+## Project Context
+# ============================================================================
+# This is a scientific research project focused on:
+# - Clinical trial data analysis (bladder cancer, ctDNA)
+# - Survival analysis and time-to-event outcomes
+# - Statistical modeling (Cox regression, GAM, GLM)
+# - Reproducible research with R Markdown
+# - Publication-quality figures and tables
+
+## Directory Structure
+# ============================================================================
+# - scripts/        → Standalone R scripts (.R files)
+# - rmarkdown/     → R Markdown reports (.Rmd files)
+# - data/          → Data files (.csv, .xlsx, .rds)
+# - outputs/       → Generated HTML outputs (ignored by git)
+# - figures/       → Generated plots (ignored by git)
+# - documents/     → PDFs, Word docs, presentations (ignored by git)
+# - python/        → Python utility scripts
+# - docs/          → Documentation and guides (.md)
+# - temp/          → Temporary files (ignored by git)
+
+## Code Style & Best Practices
+# ============================================================================
+
+### R Code Style
+- Use tidyverse packages (dplyr, tidyr, ggplot2, readr, readxl) as primary tools
+- Follow tidyverse style guide: https://style.tidyverse.org/
+- Use meaningful variable names (snake_case preferred)
+- Add comments explaining statistical methods, not just code mechanics
+- Always load libraries at the top of scripts/Rmd files
+- Use `here::here()` or relative paths from project root for file paths
+
+### Data Handling
+- Always check data structure with `glimpse()`, `str()`, or `summary()` after loading
+- Handle missing data explicitly - document assumptions about missingness
+- Use `readxl::read_excel()` for Excel files, `readr::read_csv()` for CSV
+- Save processed data as `.rds` files in `data/` directory when intermediate steps are needed
+- Never hardcode file paths - use relative paths or `here::here()`
+
+### Statistical Analysis
+- For survival analysis: use `survival` and `survminer` packages
+- For Cox models: always check proportional hazards assumption
+- For time-dependent analysis: use appropriate landmark or time-dependent Cox models
+- Document statistical assumptions and check them (normality, linearity, etc.)
+- Report effect sizes, confidence intervals, and p-values appropriately
+- Use appropriate multiple comparison corrections when needed
+
+### Reproducibility
+- Set random seeds: `set.seed(123)` at the start of analyses
+- Use `sessionInfo()` or `renv` for package version control
+- Document data cleaning steps clearly
+- Use R Markdown for all reports - never write analysis code that can't be reproduced
+- Include data dictionary or variable descriptions in documentation
+
+### Visualization
+- Use ggplot2 for all plots - follow publication standards
+- Save figures to `figures/` directory
+- Use appropriate themes: `theme_minimal()`, `theme_classic()`, or `theme_bw()` for publications
+- Ensure text is readable (font size, contrast)
+- Include proper axis labels, titles, and legends
+- For survival curves: use `ggsurvplot()` from survminer
+- Export high-resolution figures (300+ DPI for publications)
+
+### R Markdown Best Practices
+- Use meaningful chunk names: `{r data-loading}` not `{r chunk1}`
+- Set chunk options appropriately:
+  - `echo = FALSE` for data loading/cleaning
+  - `eval = FALSE` for code you want to show but not run
+  - `warning = FALSE, message = FALSE` for cleaner output
+  - `fig.width = 7, fig.height = 5` for consistent figure sizing
+- Use `include = FALSE` for setup chunks
+- Organize Rmd files logically: Setup → Data Loading → Analysis → Results → Discussion
+
+## Common Tasks & Patterns
+# ============================================================================
+
+### Loading Data
+```r
+library(readxl)
+library(dplyr)
+library(tidyr)
+
+# Load data
+data <- read_excel("data/filename.xlsx") %>%
+  clean_names() %>%  # from janitor package
+  mutate(...)  # data cleaning steps
+```
+
+### Date Handling
+- Use `lubridate` package for date operations
+- Handle Excel date serials appropriately (see `as_date_safe()` in shared setup)
+- Always validate date ranges (e.g., clinical trial dates should be reasonable)
+
+### Survival Analysis Pattern
+```r
+library(survival)
+library(survminer)
+
+# Fit Cox model
+cox_model <- coxph(Surv(time, event) ~ predictor + covariates, data = data)
+
+# Check assumptions
+cox.zph(cox_model)
+
+# Create survival plot
+ggsurvplot(survfit(cox_model), data = data, ...)
+```
+
+### Creating Tables
+- Use `knitr::kable()` or `kableExtra::kable_styling()` for publication tables
+- Use `gtsummary::tbl_summary()` for descriptive statistics tables
+- Export tables to Excel using `writexl::write_xlsx()` when needed
+
+## Error Handling & Debugging
+# ============================================================================
+- When errors occur, suggest checking:
+  1. Data structure and types
+  2. Missing values
+  3. Variable names (case sensitivity, typos)
+  4. Package versions
+- Use `browser()` for interactive debugging when needed
+- Always test code on a small subset of data first
+
+## Documentation
+# ============================================================================
+- Add comments explaining WHY, not just WHAT
+- Document statistical methods used
+- Explain data transformations and their rationale
+- Note any deviations from standard approaches
+- Include references to statistical methods when appropriate
+
+## File Naming Conventions
+# ============================================================================
+- Scripts: descriptive names like `ctDNA_survival_analysis.R`
+- R Markdown: descriptive names like `Question1_Baseline_ctDNA_Prognosis.Rmd`
+- Data files: keep original names when possible, or use descriptive names
+- Figures: descriptive names like `survival_curve_by_group.png`
+
+## Package Recommendations
+# ============================================================================
+# Core packages to use:
+# - tidyverse (dplyr, tidyr, ggplot2, readr, readxl, stringr)
+# - survival, survminer (survival analysis)
+# - lubridate (dates)
+# - janitor (data cleaning)
+# - knitr, rmarkdown (reports)
+# - kableExtra, gtsummary (tables)
+# - here (file paths)
+
+## What NOT to Do
+# ============================================================================
+- Don't use base R when tidyverse has a better solution
+- Don't hardcode file paths
+- Don't skip data validation steps
+- Don't create plots without proper labels
+- Don't run analyses without checking assumptions
+- Don't commit generated outputs (HTML, PDFs, figures) - they're in .gitignore
+- Don't modify data files in place - always create new processed versions
+
+## When Writing Code
+# ============================================================================
+- Always think about reproducibility
+- Consider edge cases (missing data, outliers, etc.)
+- Write code that's readable by others (future you included)
+- Use functions for repeated operations
+- Keep scripts focused on single tasks when possible
+- Use R Markdown for complete analyses that need documentation
+
+## Output Expectations
+# ============================================================================
+- Code should be production-ready, not just working
+- Comments should explain statistical reasoning
+- Variable names should be self-documenting
+- Code should follow the project's existing patterns
+- When creating new files, place them in the appropriate directory
+
+## Special Considerations for Clinical Data
+# ============================================================================
+- Be careful with patient identifiers - never commit PHI
+- Handle censoring appropriately in survival analyses
+- Consider competing risks when relevant
+- Document any data transformations that might affect clinical interpretation
+- Use appropriate statistical tests for clinical endpoints (e.g., log-rank for survival)
