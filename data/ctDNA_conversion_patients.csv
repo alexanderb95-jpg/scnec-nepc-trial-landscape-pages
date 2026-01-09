@@ -1,0 +1,3 @@
+"patient_id","first_positive_date_formatted","metastatic_ever","alive_status","cancer_death","race","ethnicity","cancer_stage_natera","pathology_t_stage","pathology_n_stage","neoadjuvant_systemic_therapy_yes_no"
+"159","2023-05-31","Yes","Deceased","Unknown","White","Not Hispanic","IV","T1","N0","Yes"
+"51","2023-06-16","Unknown","Alive","N/A","Other","Hispanic","II","T2a","N/A or other","Yes"

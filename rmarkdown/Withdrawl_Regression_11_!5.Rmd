@@ -1,0 +1,15 @@
+---
+title: "Withdrawl_Regression_Predict"
+author: "Alex Karol"
+date: "2024-11-15"
+output: html_document
+---
+
+```{r}
+
+
+
+
+
+```
+

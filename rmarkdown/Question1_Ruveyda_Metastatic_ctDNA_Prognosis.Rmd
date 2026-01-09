@@ -1,0 +1,3815 @@
+---
+title: "Metastatic Disease - ctDNA Level at Diagnosis and On-treatment"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Research Question
+
+**What is the association between circulating tumor DNA (ctDNA) level before starting a new line of therapy and duration of complete response?**
+
+This analysis examines whether ctDNA levels measured before starting each new line of metastatic therapy are prognostic for duration of complete response in patients with metastatic urothelial carcinoma. The analysis includes all lines of therapy (1L, 2L, 3L+, not limited to first-line), with each line of therapy as a separate observation and time 0 defined as the start of each new line of therapy.
+
+**Note on Endpoint Definition:** We analyze "Duration of Complete Response" (DCR), which represents the time from therapy initiation until loss of complete response or death. **Events** occur when: (1) the patient dies, OR (2) the patient is alive but has obvious disease present on most recent imaging (i.e., loss of complete response, similar to RECIST progression from CR). **Patients are censored** when they are alive and have no obvious disease on most recent imaging (i.e., maintaining complete response, similar to RECIST CR). This endpoint captures both survival and maintenance of complete response, which is clinically meaningful in the metastatic setting. Note: Patients with stable disease or partial response (but with disease still present on imaging) are considered events, as they have lost or never achieved complete response. **Important:** Patients who died do NOT require imaging data for inclusion (death is an event). Only alive patients require imaging data to determine complete response status.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, comment = "")
+knitr::opts_knit$set(root.dir = "~/R")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load shared setup
+source("ctDNA_Research_Questions_Shared_Setup.R")
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(ggplot2)
+  library(survival)
+  library(survminer)
+  library(knitr)
+  library(kableExtra)
+})
+```
+
+```{r load_data, include=FALSE}
+# Load minimal data
+data_list <- load_minimal_data(include_survival = TRUE)
+dat_combined <- data_list$dat_combined
+ctdna_long <- data_list$ctdna_long
+survival_data <- data_list$survival_data
+```
+
+```{r load_bajorin_data, include=FALSE}
+# ====================================================================================
+# Load Bajorin Risk Factors Data (KPS and Visceral Metastases)
+# ====================================================================================
+# Load data from ctDNA_Bajorin_Lexi.xlsx
+# KPS: >=80% = 1, <80% = 0
+# Visceral Mets: Yes/No
+
+bajorin_data <- tryCatch({
+  # Read Excel file - skip first row which is header
+  bajorin_raw <- read_excel("ctDNA_Bajorin_Lexi.xlsx", sheet = 1, skip = 1)
+  
+  # Based on structure: Screener, Patient_ID, MRN, Therapy_Line, Baseline_ctDNA_Date, KPS, Visceral_Mets, Column8
+  # Use column positions
+  if (nrow(bajorin_raw) > 0 && ncol(bajorin_raw) >= 7) {
+    # Extract columns by position
+    bajorin_clean <- tibble(
+      patient_id_raw = as.character(bajorin_raw[[2]]),  # Column 2: Patient ID
+      therapy_line_raw = as.character(bajorin_raw[[4]]),  # Column 4: Therapy Line
+      kps_raw = as.character(bajorin_raw[[6]]),  # Column 6: KPS
+      visceral_mets_raw = as.character(bajorin_raw[[7]])  # Column 7: Visceral Mets
+    ) %>%
+      # Remove header rows (rows that contain "Patient", "ID", "Screener", etc.)
+      filter(!str_detect(tolower(patient_id_raw), "patient|id|screener|mrn|therapy")) %>%
+      filter(!is.na(patient_id_raw), patient_id_raw != "", patient_id_raw != "NA") %>%
+      # Convert patient_id - may be numeric or character
+      mutate(
+        patient_id = as.character(patient_id_raw),
+        # Convert therapy line: "1L" -> 1, "2L" -> 2, "3L" -> 3, "4L+" -> 4
+        therapy_line = case_when(
+          str_detect(toupper(therapy_line_raw), "^1L$") ~ 1,
+          str_detect(toupper(therapy_line_raw), "^2L$") ~ 2,
+          str_detect(toupper(therapy_line_raw), "^3L$") ~ 3,
+          str_detect(toupper(therapy_line_raw), "^4L\\+") ~ 4,
+          str_detect(therapy_line_raw, "^\\d+") ~ as.numeric(str_extract(therapy_line_raw, "^\\d+")),
+          TRUE ~ NA_real_
+        ),
+        # KPS: 1 = >=80%, 0 = <80%
+        kps_binary = case_when(
+          kps_raw == "1" | kps_raw == 1 ~ 1,
+          kps_raw == "0" | kps_raw == 0 ~ 0,
+          TRUE ~ NA_real_
+        ),
+        # Visceral metastases: Yes = 1, No = 0
+        visceral_mets_binary = case_when(
+          str_detect(tolower(visceral_mets_raw), "^yes$|^y$") ~ 1,
+          str_detect(tolower(visceral_mets_raw), "^no$|^n$") ~ 0,
+          TRUE ~ NA_real_
+        )
+      ) %>%
+      filter(!is.na(patient_id), !is.na(therapy_line), patient_id != "") %>%
+      select(patient_id, therapy_line, kps_binary, visceral_mets_binary)
+    
+    cat("Loaded Bajorin risk factors data:\n")
+    cat("  Total observations:", nrow(bajorin_clean), "\n")
+    cat("  Unique patients:", length(unique(bajorin_clean$patient_id)), "\n")
+    cat("  KPS available:", sum(!is.na(bajorin_clean$kps_binary)), "\n")
+    cat("  Visceral mets available:", sum(!is.na(bajorin_clean$visceral_mets_binary)), "\n")
+    
+    bajorin_clean
+  } else {
+    cat("Warning: Bajorin data file is empty or has insufficient columns.\n")
+    tibble(patient_id = character(0), therapy_line = numeric(0), 
+           kps_binary = numeric(0), visceral_mets_binary = numeric(0))
+  }
+}, error = function(e) {
+  cat("Warning: Could not load Bajorin data file:", e$message, "\n")
+  tibble(patient_id = character(0), therapy_line = numeric(0), 
+         kps_binary = numeric(0), visceral_mets_binary = numeric(0))
+})
+
+# Check patient_id format matching
+if (nrow(bajorin_data) > 0 && exists("universe") && nrow(universe) > 0) {
+  sample_outcome_ids <- head(unique(universe$patient_id), 5)
+  sample_bajorin_ids <- head(unique(bajorin_data$patient_id), 5)
+  cat("\nSample patient IDs from outcomes:", paste(sample_outcome_ids, collapse = ", "), "\n")
+  cat("Sample patient IDs from Bajorin data:", paste(sample_bajorin_ids, collapse = ", "), "\n")
+  
+  # Check if formats match
+  if (any(sample_bajorin_ids %in% sample_outcome_ids)) {
+    cat("Patient ID formats appear to match.\n")
+  } else {
+    cat("Note: Patient ID formats may differ. Will attempt to match.\n")
+  }
+}
+```
+
+```{r define_universe, include=FALSE}
+# ==============================
+# Universe: Patients at initial diagnosis of metastatic disease
+# Either: (1) without prior treatment, OR (2) >6 months from anti-cancer directed therapy (radiation or systemic)
+# ==============================
+
+# Note: We no longer use "ctDNA at diagnosis" as a single anchor point
+# Instead, we find ctDNA before each line of therapy (see universe definition below)
+
+# Extract all therapy start dates and settings (systemic)
+therapy_start_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*start.*date", ignore_case = TRUE))]
+therapy_setting_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*treatment.*setting", ignore_case = TRUE))]
+
+# Get all systemic therapy dates and identify palliative therapy
+all_systemic_therapy_dates <- tibble(patient_id = character(0), therapy_date = as.Date(character(0)), is_palliative = logical(0))
+if (length(therapy_start_cols) > 0) {
+  # Get therapy dates
+  therapy_dates_long <- dat_combined %>%
+    select(patient_id, any_of(therapy_start_cols)) %>%
+    pivot_longer(-patient_id, names_to = "therapy_var", values_to = "start_date_raw") %>%
+    mutate(
+      start_date = as_date_safe(start_date_raw),
+      therapy_num = str_extract(therapy_var, "\\d+")
+    ) %>%
+    filter(!is.na(start_date)) %>%
+    select(patient_id, therapy_num, therapy_date = start_date)
+  
+  # Get therapy settings if available
+  if (length(therapy_setting_cols) > 0) {
+    therapy_settings_long <- dat_combined %>%
+      select(patient_id, any_of(therapy_setting_cols)) %>%
+      pivot_longer(-patient_id, names_to = "setting_var", values_to = "setting_raw") %>%
+      mutate(
+        setting = as.character(setting_raw),
+        therapy_num = str_extract(setting_var, "\\d+")
+      ) %>%
+      select(patient_id, therapy_num, setting)
+    
+    # Join and identify palliative therapy
+    all_systemic_therapy_dates <- therapy_dates_long %>%
+      left_join(therapy_settings_long, by = c("patient_id", "therapy_num")) %>%
+      mutate(
+        setting_lower = tolower(setting),
+        is_palliative = str_detect(setting_lower, "palliative|metastatic|1l.*metastatic|2l.*metastatic")
+      ) %>%
+      select(patient_id, therapy_date, is_palliative)
+  } else {
+    # If no setting columns, assume all are potentially palliative for metastatic patients
+    all_systemic_therapy_dates <- therapy_dates_long %>%
+      mutate(is_palliative = TRUE) %>%
+      select(patient_id, therapy_date, is_palliative)
+  }
+}
+
+# Get ALL palliative therapy lines with their line numbers
+# We need to identify which therapy number each palliative therapy corresponds to
+all_palliative_therapy_lines <- tibble(patient_id = character(0), therapy_line = integer(0), therapy_start_date = as.Date(character(0)))
+
+if (length(therapy_start_cols) > 0 && length(therapy_setting_cols) > 0) {
+  # Get therapy dates with line numbers
+  therapy_dates_with_lines <- dat_combined %>%
+    select(patient_id, any_of(therapy_start_cols)) %>%
+    pivot_longer(-patient_id, names_to = "therapy_var", values_to = "start_date_raw") %>%
+    mutate(
+      start_date = as_date_safe(start_date_raw),
+      therapy_line = as.integer(str_extract(therapy_var, "\\d+"))
+    ) %>%
+    filter(!is.na(start_date), !is.na(therapy_line)) %>%
+    select(patient_id, therapy_line, therapy_start_date = start_date)
+  
+  # Get therapy settings with line numbers
+  therapy_settings_with_lines <- dat_combined %>%
+    select(patient_id, any_of(therapy_setting_cols)) %>%
+    pivot_longer(-patient_id, names_to = "setting_var", values_to = "setting_raw") %>%
+    mutate(
+      setting = as.character(setting_raw),
+      therapy_line = as.integer(str_extract(setting_var, "\\d+"))
+    ) %>%
+    filter(!is.na(therapy_line)) %>%
+    select(patient_id, therapy_line, setting)
+  
+  # Join and identify palliative therapy lines
+  all_palliative_therapy_lines <- therapy_dates_with_lines %>%
+    left_join(therapy_settings_with_lines, by = c("patient_id", "therapy_line")) %>%
+    mutate(
+      setting_lower = tolower(setting),
+      is_palliative = str_detect(setting_lower, "palliative|metastatic|1l.*metastatic|2l.*metastatic|3l.*metastatic")
+    ) %>%
+    filter(is_palliative) %>%
+    select(patient_id, therapy_line, therapy_start_date) %>%
+    arrange(patient_id, therapy_line)
+}
+
+# Also get first palliative therapy for metastatic status check
+first_palliative_therapy <- all_palliative_therapy_lines %>%
+  group_by(patient_id) %>%
+  summarise(first_palliative_start = min(therapy_start_date, na.rm = TRUE), .groups = "drop")
+
+# Extract radiation dates
+radiation_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("radiation.*date|radiotherapy.*date|rt.*date", ignore_case = TRUE))]
+therapy_regimen_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*regimen|treatment.*regimen", ignore_case = TRUE))]
+
+all_radiation_dates <- tibble(patient_id = character(0), radiation_date = as.Date(character(0)))
+if (length(radiation_date_cols) > 0) {
+  all_radiation_dates <- dat_combined %>%
+    select(patient_id, all_of(radiation_date_cols[1])) %>%
+    rename(radiation_date_raw = all_of(radiation_date_cols[1])) %>%
+    mutate(radiation_date = as_date_safe(radiation_date_raw)) %>%
+    filter(!is.na(radiation_date)) %>%
+    select(patient_id, radiation_date)
+} else if (length(therapy_regimen_cols) > 0 && length(therapy_start_cols) > 0) {
+  # Check therapy regimens for radiation
+  all_radiation_dates <- dat_combined %>%
+    select(patient_id, all_of(therapy_regimen_cols), all_of(therapy_start_cols)) %>%
+    pivot_longer(-patient_id, names_to = "var", values_to = "value") %>%
+    mutate(
+      var_type = if_else(str_detect(var, "regimen"), "regimen", "start_date"),
+      therapy_num = str_extract(var, "\\d+")
+    ) %>%
+    pivot_wider(id_cols = c(patient_id, therapy_num), names_from = var_type, values_from = value) %>%
+    mutate(
+      regimen_lower = tolower(as.character(regimen)),
+      start_date = as_date_safe(start_date),
+      is_radiation = str_detect(regimen_lower, "radiation|radiotherapy|rt|sbrt|stereotactic")
+    ) %>%
+    filter(is_radiation, !is.na(start_date)) %>%
+    group_by(patient_id) %>%
+    summarise(radiation_date = min(start_date, na.rm = TRUE), .groups = "drop")
+}
+
+# Combine all anti-cancer therapy dates (systemic or radiation)
+all_anti_cancer_therapy <- bind_rows(
+  all_systemic_therapy_dates %>% rename(therapy_date = therapy_date),
+  all_radiation_dates %>% rename(therapy_date = radiation_date)
+) %>%
+  group_by(patient_id) %>%
+  summarise(earliest_therapy_date = min(therapy_date, na.rm = TRUE), .groups = "drop")
+
+# Identify patients with confirmed metastatic disease
+# Criteria (any of the following):
+# 1. Clinical disease state at first ctDNA contains "metastatic" or "advanced" OR
+# 2. Patient started palliative therapy (palliative therapy is for metastatic disease) OR
+# 3. Pathology M stage = M1 OR
+# 4. metastatic_disease_ever_diagnosed_yes_no = "Yes"
+clinical_state_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("clinical_disease_state.*metastatic|clinical_disease_state.*first.*ct", ignore_case = TRUE))]
+metastatic_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("metastatic_disease_ever_diagnosed|metastatic.*yes.*no", ignore_case = TRUE))]
+m_stage_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("pathology_m_stage", ignore_case = TRUE))]
+
+# Get metastatic status based on multiple criteria
+metastatic_status <- dat_combined %>%
+  select(patient_id, 
+         any_of(clinical_state_cols),
+         any_of(metastatic_cols),
+         any_of(m_stage_cols)) %>%
+  mutate(
+    # Check clinical disease state at first ctDNA
+    metastatic_at_ctdna = if (length(clinical_state_cols) > 0) {
+      str_detect(tolower(as.character(.data[[clinical_state_cols[1]]])), "metastatic|advanced")
+    } else {
+      NA
+    },
+    # Check metastatic_disease_ever_diagnosed_yes_no
+    metastatic_ever_diagnosed = if (length(metastatic_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[metastatic_cols[1]]])), "yes|y|1") ~ TRUE,
+        str_detect(tolower(as.character(.data[[metastatic_cols[1]]])), "no|n|0") ~ FALSE,
+        TRUE ~ NA
+      )
+    } else {
+      NA
+    },
+    # Check M stage (M1 = metastatic)
+    m_stage_metastatic = if (length(m_stage_cols) > 0) {
+      str_detect(toupper(as.character(.data[[m_stage_cols[1]]])), "M1")
+    } else {
+      NA
+    }
+  ) %>%
+  select(patient_id, metastatic_at_ctdna, metastatic_ever_diagnosed, m_stage_metastatic)
+
+# Also check if patient has palliative therapy (indicates metastatic disease)
+# We already have first_palliative_therapy from earlier, so we can use that
+# Patient has confirmed metastatic disease if ANY of the criteria are met:
+# - Clinical state at first ctDNA indicates metastatic/advanced, OR
+# - Patient has palliative therapy, OR
+# - Pathology M stage = M1, OR
+# - metastatic_disease_ever_diagnosed_yes_no = "Yes"
+metastatic_status <- metastatic_status %>%
+  left_join(first_palliative_therapy, by = "patient_id") %>%
+  mutate(
+    has_palliative_therapy = !is.na(first_palliative_start),
+    # Patient has confirmed metastatic disease if any criterion is met
+    has_metastatic_disease = case_when(
+      !is.na(metastatic_at_ctdna) & metastatic_at_ctdna == TRUE ~ TRUE,
+      has_palliative_therapy == TRUE ~ TRUE,
+      !is.na(m_stage_metastatic) & m_stage_metastatic == TRUE ~ TRUE,
+      !is.na(metastatic_ever_diagnosed) & metastatic_ever_diagnosed == TRUE ~ TRUE,
+      # If we have negative indicators for all criteria, mark as FALSE
+      !is.na(metastatic_at_ctdna) & metastatic_at_ctdna == FALSE & 
+      has_palliative_therapy == FALSE & 
+      !is.na(m_stage_metastatic) & m_stage_metastatic == FALSE & 
+      !is.na(metastatic_ever_diagnosed) & metastatic_ever_diagnosed == FALSE ~ FALSE,
+      TRUE ~ NA
+    )
+  ) %>%
+  select(patient_id, has_metastatic_disease, metastatic_at_ctdna, has_palliative_therapy, m_stage_metastatic, metastatic_ever_diagnosed)
+
+# Define universe: ALL lines of metastatic therapy
+# For each line of palliative therapy, find the most recent ctDNA before that line starts (within 21 days)
+# Each patient can contribute multiple observations (one per line of therapy)
+
+# First, identify patients with confirmed metastatic disease
+patients_with_metastatic <- metastatic_status %>%
+  filter(has_metastatic_disease == TRUE) %>%
+  select(patient_id)
+
+# For each palliative therapy line, find the most recent ctDNA before that line starts
+universe_by_line <- all_palliative_therapy_lines %>%
+  inner_join(patients_with_metastatic, by = "patient_id") %>%
+  # For each therapy line, find ctDNA before that line starts (within 21 days)
+  left_join(ctdna_long, by = "patient_id") %>%
+  filter(
+    !is.na(ctdna_date),
+    ctdna_date <= therapy_start_date,  # ctDNA must be before or at therapy start
+    ctdna_date >= (therapy_start_date - days(21))  # ctDNA within 21 days before therapy start
+  ) %>%
+  # For each patient-line combination, take the most recent ctDNA before that line
+  arrange(patient_id, therapy_line, desc(ctdna_date)) %>%
+  group_by(patient_id, therapy_line, therapy_start_date) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(patient_id, therapy_line, therapy_start_date, 
+         ctdna_date, ctdna_value) %>%
+  rename(
+    ctdna_before_line_date = ctdna_date,
+    ctdna_before_line_value = ctdna_value
+  )
+
+# Create universe dataset with one row per patient-line combination
+universe <- universe_by_line %>%
+  mutate(
+    # Time 0 is the therapy start date (not ctDNA date)
+    time_zero_date = therapy_start_date,
+    # Calculate days from ctDNA to therapy start
+    days_from_ctdna_to_therapy = as.numeric(therapy_start_date - ctdna_before_line_date)
+  ) %>%
+  select(patient_id, therapy_line, time_zero_date, 
+         ctdna_before_line_date, ctdna_before_line_value, 
+         days_from_ctdna_to_therapy)
+
+# Diagnostic output
+cat("Universe size: n =", nrow(universe), " patient-line observations\n")
+cat("Unique patients: n =", length(unique(universe$patient_id)), "\n")
+cat("Population studied: Patients with metastatic disease starting a new line of therapy\n")
+cat("  - Includes all lines of palliative/metastatic therapy (not just first-line)\n")
+cat("  - ctDNA measured within 21 days before starting each new line of therapy\n")
+cat("  - Time 0 = start of each new line of therapy\n")
+cat("  - With confirmed metastatic disease diagnosis\n")
+
+# OPTIMIZATION: Cache universe for faster subsequent runs
+if (!dir.exists("cache")) dir.create("cache")
+saveRDS(universe, "cache/universe.rds")
+```
+
+```{r population_description}
+# Display population description at top
+# Note: N shown here is universe size; final analysis N (after survival data filtering) is shown in descriptive table below
+cat("## Population Studied\n\n")
+cat("**Universe:** Patients with metastatic disease starting a new line of therapy\n\n")
+cat("**N =", nrow(universe), " patient-line observations (", length(unique(universe$patient_id)), " unique patients)\n\n")
+cat("**Note:** Final analysis N (after excluding observations due to missing survival data) is shown in the exclusion and descriptive tables below.\n\n")
+cat("**Inclusion Criteria:**\n")
+cat("- Confirmed metastatic disease\n")
+cat("- Starting a new line of palliative/metastatic therapy (includes 1L, 2L, 3L+, not limited to first-line)\n")
+cat("- Had ctDNA level measured within 21 days before starting that line of therapy\n")
+cat("- Time 0 = start of each new line of therapy\n\n")
+cat("**Note:** Each patient can contribute multiple observations (one per line of therapy). Line of therapy is included as a covariate in the analysis.\n\n")
+```
+
+```{r patient_ids_table}
+# Display patient IDs with baseline ctDNA dates and therapy lines
+# Show all patient-line combinations with baseline ctDNA date
+
+patient_ids_with_dates <- universe %>%
+  arrange(patient_id, therapy_line) %>%
+  mutate(
+    therapy_line_label = case_when(
+      therapy_line == 1 ~ "1L",
+      therapy_line == 2 ~ "2L",
+      therapy_line == 3 ~ "3L",
+      therapy_line >= 4 ~ "4L+",
+      TRUE ~ as.character(therapy_line)
+    ),
+    baseline_ctdna_date_formatted = format(ctdna_before_line_date, "%Y-%m-%d")
+  )
+
+patient_ids_table_data <- patient_ids_with_dates %>%
+  select(patient_id, therapy_line_label, baseline_ctdna_date_formatted) %>%
+  rename(
+    `Patient ID` = patient_id,
+    `Therapy Line` = therapy_line_label,
+    `Baseline ctDNA Date` = baseline_ctdna_date_formatted
+  )
+
+# Create table
+patient_ids_table <- patient_ids_table_data %>%
+  kable(caption = paste0("Patient IDs with Baseline ctDNA Dates by Therapy Line (N = ", length(unique(patient_ids_with_dates$patient_id)), " patients, ", nrow(patient_ids_with_dates), " patient-line observations)"), 
+        align = "l") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE, font_size = 9)
+
+patient_ids_table
+```
+
+```{r palliative_therapy_distribution}
+# Distribution of palliative systemic therapy regimens (for later classification)
+# Try explicit regimen columns; if none, fall back to systemic_therapy_X columns as regimen
+regimen_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*regimen|treatment.*regimen", ignore_case = TRUE))]
+if (length(regimen_cols) == 0) {
+  regimen_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^systemic_therapy_\\d+$", ignore_case = TRUE))]
+}
+
+# Therapy notes for regimen clarification (broader pattern)
+note_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*note|treatment.*note", ignore_case = TRUE))]
+
+palliative_regimen_table <- NULL
+
+# If no setting columns, assume metastatic cohort → treat all systemic therapy as palliative
+settings_available <- length(therapy_setting_cols) > 0
+
+if (length(regimen_cols) > 0) {
+  therapy_settings_long <- if (settings_available) {
+    dat_combined %>%
+      select(patient_id, any_of(therapy_setting_cols)) %>%
+      pivot_longer(-patient_id, names_to = "setting_var", values_to = "setting_raw") %>%
+      mutate(
+        therapy_num = str_extract(setting_var, "\\d+"),
+        therapy_num = ifelse(is.na(therapy_num) | therapy_num == "", "all", therapy_num),
+        setting_lower = tolower(as.character(setting_raw)),
+        is_palliative = str_detect(setting_lower, "palliative|metastatic|1l.*metastatic|2l.*metastatic")
+      ) %>%
+      select(patient_id, therapy_num, is_palliative, setting_raw)
+  } else {
+    dat_combined %>%
+      transmute(patient_id, across(any_of(regimen_cols))) %>%
+      pivot_longer(-patient_id, names_to = "setting_var", values_to = "setting_raw") %>%
+      mutate(
+        therapy_num = str_extract(setting_var, "\\d+"),
+        therapy_num = ifelse(is.na(therapy_num) | therapy_num == "", "all", therapy_num),
+        is_palliative = TRUE
+      ) %>%
+      select(patient_id, therapy_num, is_palliative, setting_raw)
+  }
+  
+  regimen_long <- dat_combined %>%
+    select(patient_id, any_of(regimen_cols)) %>%
+    pivot_longer(-patient_id, names_to = "regimen_var", values_to = "regimen_raw") %>%
+    mutate(
+      therapy_num = str_extract(regimen_var, "\\d+"),
+      therapy_num = ifelse(is.na(therapy_num) | therapy_num == "", "all", therapy_num),
+      regimen_orig = str_squish(as.character(regimen_raw)),
+      regimen_clean = tolower(str_squish(as.character(regimen_raw))),
+      regimen_clean = ifelse(is.na(regimen_clean) | regimen_clean == "", "unknown/not recorded", regimen_clean)
+    ) %>%
+    select(patient_id, therapy_num, regimen_clean, regimen_orig)
+
+  if (length(note_cols) > 0) {
+    notes_long <- dat_combined %>%
+      select(patient_id, any_of(note_cols)) %>%
+      pivot_longer(-patient_id, names_to = "note_var", values_to = "note_raw") %>%
+      mutate(
+        therapy_num = str_extract(note_var, "\\d+"),
+        therapy_num = ifelse(is.na(therapy_num) | therapy_num == "", "all", therapy_num),
+        note_clean = str_squish(as.character(note_raw)),
+        note_clean = ifelse(is.na(note_clean) | note_clean == "", NA_character_, note_clean)
+      ) %>%
+      select(patient_id, therapy_num, note_clean)
+    
+    notes_any <- notes_long %>%
+      group_by(patient_id) %>%
+      summarise(note_any = first(note_clean[!is.na(note_clean)]), .groups = "drop")
+    
+    regimen_notes <- regimen_long %>%
+      left_join(notes_long, by = c("patient_id", "therapy_num")) %>%
+      left_join(notes_any, by = "patient_id") %>%
+      mutate(note_filled = coalesce(note_clean, note_any))
+  } else {
+    regimen_notes <- regimen_long %>%
+      mutate(note_clean = NA_character_, note_any = NA_character_, note_filled = NA_character_)
+  }
+  
+  palliative_regimen_table <- regimen_notes %>%
+    inner_join(therapy_settings_long, by = c("patient_id", "therapy_num")) %>%
+    filter(is_palliative) %>%
+    mutate(
+      flag_other = str_detect(regimen_clean, regex("other.*note", ignore_case = TRUE)),
+      flag_trial = str_detect(regimen_clean, regex("clinical.*trial", ignore_case = TRUE)),
+      flag_see_note = str_detect(regimen_clean, regex("see\\s*note", ignore_case = TRUE)),
+      regimen_final = case_when(
+        (flag_other | flag_trial | flag_see_note) ~ coalesce(str_squish(note_filled), "unspecified from notes"),
+        TRUE ~ regimen_clean
+      ),
+      regimen_final = ifelse(is.na(regimen_final) | regimen_final == "", "unknown/not recorded", regimen_final),
+      # final guard: strip any lingering "see note" text
+      regimen_final = ifelse(str_detect(regimen_final, regex("see\\s*note", ignore_case = TRUE)),
+                             coalesce(str_squish(note_filled), "unspecified from notes"),
+                             regimen_final)
+    ) %>%
+    # Classify regimen_final into ADC / ICI / Chemo / Targeted / Other, allowing combos
+    rowwise() %>%
+    mutate(
+      lower_final = tolower(regimen_final),
+      is_adc = str_detect(lower_final, regex("enfortumab|disitimab|sacituzumab|trastuzumab\\s*deruxtecan|dato|bt8009|adc", ignore_case = TRUE)),
+      is_ici = str_detect(lower_final, regex("pembro|pembrolizumab|nivolumab|nivo\\b|atezo|atezolizumab|durva|durvalumab|relatlimab|pd-1|pd1|pd-l1|pdl1", ignore_case = TRUE)),
+      is_chemo = str_detect(lower_final, regex("gem\\b|gemcitabine|cis\\b|cisplatin|carbo|carboplatin|oxaliplatin|taxol|docetaxel|cabazitaxel|folfox|folfiri", ignore_case = TRUE)),
+      is_targeted = str_detect(lower_final, regex("erdafitinib|olaparib|loxo|fgfr", ignore_case = TRUE)),
+      is_other = str_detect(lower_final, regex("vaccine|peptide|unspecified", ignore_case = TRUE)),
+      class_vec = list(c(
+        if (is_adc) "ADC",
+        if (is_ici) "ICI",
+        if (is_chemo) "Chemo",
+        if (is_targeted) "Targeted"
+      )),
+      therapy_class = {
+        cv <- class_vec[[1]]
+        if (length(cv) == 0) {
+          if (is_other) "Other" else "unspecified"
+        } else {
+          paste(cv, collapse = " + ")
+        }
+      },
+      therapy_line_match = suppressWarnings(as.integer(therapy_num))
+    ) %>%
+    ungroup()
+  
+  regimen_summary <- palliative_regimen_table %>%
+    group_by(regimen_final) %>%
+    summarise(
+      n_lines = n(),
+      n_patients = n_distinct(patient_id),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(n_lines))
+  
+  class_summary <- palliative_regimen_table %>%
+    group_by(therapy_class) %>%
+    summarise(
+      n_lines = n(),
+      n_patients = n_distinct(patient_id),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(n_lines))
+  
+  regimen_summary %>%
+    kable(caption = "Palliative Systemic Therapy Regimens (counts by regimen; palliative setting only)") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  
+  class_summary %>%
+    kable(caption = "Palliative Systemic Therapy Classes (ADC/ICI/Chemo/Targeted/Other). Note: patients can appear in multiple classes if they received combination regimens (e.g., ADC + ICI).") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+} else {
+  cat("No palliative therapy regimen information available (regimen columns not found).\n")
+}
+```
+
+```{r extract_outcomes, include=FALSE}
+# ====================================================================================
+# DURATION OF COMPLETE RESPONSE (DCR) DEFINITION
+# ====================================================================================
+# Note: We analyze "Duration of Complete Response" (DCR), which represents the time from 
+# therapy initiation until loss of complete response or death. This endpoint focuses on 
+# patients who achieve and maintain complete response (similar to RECIST CR).
+#
+# DCR EVENT (dcr_event = 1, stored as mfs_event for backward compatibility) occurs when:
+#   1. Patient has died (death_date is not NA), OR
+#   2. Patient is deceased (alive_status = "No"), OR
+#   3. Patient is alive BUT has obvious disease on most recent imaging
+#      (imaging_disease_present = "Yes")
+#      Note: This represents loss of complete response (similar to RECIST progression from CR).
+#      This includes patients with stable disease, partial response, or progressive disease - 
+#      any patient with disease visible on imaging is considered an event.
+#
+# DCR CENSORED (dcr_event = 0) occurs when:
+#   - Patient is alive (alive_status = "Yes") AND
+#   - Patient has NO obvious disease on most recent imaging
+#     (imaging_disease_present = "No")
+#     Note: This represents maintenance of complete response (similar to RECIST CR)
+#
+# SPECIAL HANDLING:
+#   - If imaging field is BLANK or MISSING AND patient is ALIVE: EXCLUDE patient (imaging data is required for alive patients)
+#   - If patient DIED: Imaging data is NOT required (death is an event)
+#   - Rationale: Imaging data is required for DCR definition only for alive patients
+#
+# DCR TIME (dcr_time, stored as mfs_time for backward compatibility):
+#   - Calculated from time_zero_date (therapy start date) to event_or_censor_date
+#   - event_or_censor_date = death_date (if available) OR last_fu_date (if no death)
+#   - Units: days
+#   - NOTE: Time 0 is the start of each new line of therapy, not ctDNA date
+#
+# Note: This will filter universe to only patients with valid survival data
+# ====================================================================================
+death_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                       !str_detect(names(dat_combined), regex("cause|reason", ignore_case = TRUE))]
+survival_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                     !str_detect(names(dat_combined), regex("death", ignore_case = TRUE))]
+alive_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^alive_yes_no$|alive.*yes.*no", ignore_case = TRUE))]
+imaging_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("obvious.*disease.*imaging|disease.*present.*imaging", ignore_case = TRUE))]
+
+# Outcomes: join universe with survival data
+# Note: universe already has therapy_line, so we preserve it
+outcomes <- universe %>%
+  left_join(
+    dat_combined %>%
+      select(patient_id, all_of(c(death_date_cols, survival_cols, alive_cols, imaging_cols))),
+    by = "patient_id"
+  ) %>%
+  mutate(
+    death_date = if (length(death_date_cols) > 0) {
+      as_date_safe(.data[[death_date_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    last_fu_date = if (length(survival_cols) > 0) {
+      as_date_safe(.data[[survival_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    alive_status = if (length(alive_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_
+      )
+    } else {
+      NA_character_
+    },
+    # ========================================================================
+    # STEP 1: Determine imaging disease status
+    # ========================================================================
+    # Column: "if_alive_is_obvious_disease_still_present_on_most_recent_imaging"
+    # If blank/missing AND patient is alive: will be excluded (imaging data is required for alive patients)
+    # If patient died: imaging data is not required (death is an event)
+    imaging_disease_present = if (length(imaging_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[imaging_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[imaging_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_  # Missing/blank = NA (will be excluded)
+      )
+    } else {
+      NA_character_  # If column doesn't exist, mark as missing
+    },
+    
+    # ========================================================================
+    # STEP 2: Calculate MFS time (days from therapy start to event/censor)
+    # ========================================================================
+    # Time 0 is the start of each new line of therapy (time_zero_date)
+    event_or_censor_date = case_when(
+      !is.na(death_date) ~ death_date,      # Use death date if available
+      !is.na(last_fu_date) ~ last_fu_date,  # Otherwise use last follow-up date
+      TRUE ~ as.Date(NA)
+    ),
+    mfs_time = as.numeric(event_or_censor_date - time_zero_date),
+    
+    # ========================================================================
+    # STEP 3: Determine MFS event status
+    # ========================================================================
+    # mfs_event = 1 (EVENT) if:
+    #   - Patient died (death_date exists), OR
+    #   - Patient is deceased (alive_status = "No"), OR
+    #   - Patient is alive BUT has obvious disease on imaging
+    #
+    # mfs_event = 0 (CENSORED) if:
+    #   - Patient is alive AND has no obvious disease on imaging
+    mfs_event = case_when(
+      !is.na(death_date) ~ 1,  # Death = DCR event
+      alive_status == "No" ~ 1,  # Deceased = DCR event
+      alive_status == "Yes" & imaging_disease_present == "Yes" ~ 1,  # Alive with disease = DCR event
+      alive_status == "Yes" & imaging_disease_present == "No" ~ 0,  # Alive without disease = CENSORED
+      alive_status == "Yes" & is.na(imaging_disease_present) ~ NA_real_,  # Alive but missing imaging = exclude
+      TRUE ~ NA_real_  # Other missing data = exclude
+    ),
+    
+    # Determine if imaging data is required (only for alive patients)
+    imaging_required = case_when(
+      !is.na(death_date) ~ FALSE,  # Dead patients don't need imaging
+      alive_status == "No" ~ FALSE,  # Deceased patients don't need imaging
+      alive_status == "Yes" ~ TRUE,  # Alive patients need imaging
+      TRUE ~ TRUE  # Default: require imaging if status unknown
+    ),
+    
+  ) %>%
+  # Filter: require valid DCR time
+  # For imaging: only exclude if patient is alive AND imaging is missing
+  filter(!is.na(mfs_time), mfs_time > 0, 
+         !(imaging_required == TRUE & is.na(imaging_disease_present)))
+
+# Identify excluded observations and reasons
+# Note: exclusions are at the patient-line level, not just patient level
+excluded_patients <- universe %>%
+  left_join(
+    dat_combined %>%
+      select(patient_id, all_of(c(death_date_cols, survival_cols, alive_cols, imaging_cols))),
+    by = "patient_id"
+  ) %>%
+  mutate(
+    death_date = if (length(death_date_cols) > 0) {
+      as_date_safe(.data[[death_date_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    last_fu_date = if (length(survival_cols) > 0) {
+      as_date_safe(.data[[survival_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    alive_status = if (length(alive_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_
+      )
+    } else {
+      NA_character_
+    },
+    imaging_disease_present = if (length(imaging_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[imaging_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[imaging_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_  # Missing/blank = NA
+      )
+    } else {
+      NA_character_
+    },
+    event_or_censor_date = case_when(
+      !is.na(death_date) ~ death_date,
+      !is.na(last_fu_date) ~ last_fu_date,
+      TRUE ~ as.Date(NA)
+    ),
+    mfs_time = as.numeric(event_or_censor_date - time_zero_date),
+    imaging_required = case_when(
+      !is.na(death_date) ~ FALSE,  # Dead patients don't need imaging
+      alive_status == "No" ~ FALSE,  # Deceased patients don't need imaging
+      alive_status == "Yes" ~ TRUE,  # Alive patients need imaging
+      TRUE ~ TRUE  # Default: require imaging if status unknown
+    )
+  ) %>%
+  filter(is.na(mfs_time) | mfs_time <= 0 | (imaging_required == TRUE & is.na(imaging_disease_present))) %>%
+  mutate(
+    exclusion_reason = case_when(
+      is.na(event_or_censor_date) ~ "Missing both death_date and last_fu_date",
+      !is.na(mfs_time) & mfs_time <= 0 ~ "Invalid survival time (event/censor date before or equal to therapy start date)",
+      imaging_required == TRUE & is.na(imaging_disease_present) ~ "Missing imaging data (required for alive patients)",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  select(patient_id, therapy_line, exclusion_reason, death_date, last_fu_date, alive_status, 
+         imaging_disease_present, time_zero_date, event_or_censor_date, mfs_time)
+
+# Diagnostic: Check how many patients were excluded
+cat("Universe size before survival data extraction: n =", nrow(universe), " patient-line observations\n")
+cat("Outcomes size after filtering for valid survival data: n =", nrow(outcomes), " patient-line observations\n")
+cat("Observations excluded due to missing survival data: n =", nrow(universe) - nrow(outcomes), "\n")
+
+# OPTIMIZATION: Cache outcomes for faster subsequent runs
+if (!dir.exists("cache")) dir.create("cache")
+saveRDS(outcomes, "cache/outcomes.rds")
+
+# OPTIMIZATION: Pre-compute therapy_line_factor once for reuse
+outcomes <- outcomes %>%
+  mutate(
+    therapy_line_grouped = case_when(
+      therapy_line == 1 ~ "1L",
+      therapy_line == 2 ~ "2L",
+      therapy_line == 3 ~ "3L",
+      therapy_line >= 4 ~ "4L+",
+      TRUE ~ as.character(therapy_line)
+    ),
+    therapy_line_factor = factor(therapy_line_grouped, levels = c("1L", "2L", "3L", "4L+"))
+  )
+```
+
+```{r exclusion_reasons_table}
+# Table showing reasons for exclusion
+if (nrow(excluded_patients) > 0) {
+  exclusion_summary <- excluded_patients %>%
+    count(exclusion_reason) %>%
+    mutate(Percentage = round(n / sum(n) * 100, 1)) %>%
+    rename(`Exclusion Reason` = exclusion_reason, `N` = n) %>%
+    kable(caption = paste0("Reasons for Exclusion from Analysis (N = ", nrow(excluded_patients), " patient-line observations excluded from N = ", nrow(universe), " screened)")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  
+  exclusion_summary
+} else {
+  cat("No observations excluded - all", nrow(universe), "patient-line observations had valid survival data.\n")
+}
+```
+
+```{r excluded_patients_imaging_missing}
+# List patient IDs excluded due to missing imaging data (for alive patients only)
+# Note: Patients who died do NOT need imaging data - only alive patients require imaging
+
+# Question 1 exclusions
+# Compare universe (all patients) with outcomes (included patients) to find who was excluded
+# due to missing imaging data for alive patients
+universe_with_status <- universe %>%
+  left_join(
+    dat_combined %>%
+      select(patient_id, all_of(c(death_date_cols, alive_cols, imaging_cols))),
+    by = "patient_id"
+  ) %>%
+  mutate(
+    death_date = if (length(death_date_cols) > 0) {
+      as_date_safe(.data[[death_date_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    alive_status = if (length(alive_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_
+      )
+    } else {
+      NA_character_
+    },
+    imaging_disease_present = if (length(imaging_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[imaging_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[imaging_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_
+      )
+    } else {
+      NA_character_
+    },
+    imaging_required = case_when(
+      !is.na(death_date) ~ FALSE,
+      alive_status == "No" ~ FALSE,
+      alive_status == "Yes" ~ TRUE,
+      TRUE ~ TRUE
+    )
+  )
+
+# Find patients in universe but not in outcomes due to missing imaging (alive patients only)
+excluded_q1_imaging <- universe_with_status %>%
+  anti_join(
+    outcomes %>% select(patient_id, therapy_line),
+    by = c("patient_id", "therapy_line")
+  ) %>%
+  filter(imaging_required == TRUE & is.na(imaging_disease_present)) %>%
+  select(patient_id, therapy_line, alive_status, imaging_disease_present) %>%
+  mutate(exclusion_reason = "Missing imaging data (required for alive patients)") %>%
+  distinct()
+
+# Question 2 exclusions (landmark analysis)
+# Compare landmark_data (universe) with landmark_outcomes (included) to find who was excluded
+if (exists("landmark_data") && nrow(landmark_data) > 0) {
+  # Get status information for landmark_data
+  landmark_data_with_status <- landmark_data %>%
+    left_join(
+      outcomes %>% 
+        select(patient_id, therapy_line, mfs_time, mfs_event, time_zero_date, imaging_disease_present),
+      by = c("patient_id", "therapy_line", "time_zero_date")
+    ) %>%
+    left_join(
+      dat_combined %>%
+        select(patient_id, all_of(c(death_date_cols, alive_cols))),
+      by = "patient_id"
+    ) %>%
+    mutate(
+      death_date = if (length(death_date_cols) > 0) {
+        as_date_safe(.data[[death_date_cols[1]]])
+      } else {
+        as.Date(NA)
+      },
+      alive_status = if (length(alive_cols) > 0) {
+        case_when(
+          str_detect(tolower(as.character(.data[[alive_cols[1]]])), "yes|y|1") ~ "Yes",
+          str_detect(tolower(as.character(.data[[alive_cols[1]]])), "no|n|0") ~ "No",
+          TRUE ~ NA_character_
+        )
+      } else {
+        NA_character_
+      },
+      survived_to_landmark = !is.na(mfs_time) & mfs_time >= landmark_time,
+      mfs_time_from_landmark = mfs_time - landmark_time,
+      imaging_required = case_when(
+        !is.na(death_date) ~ FALSE,
+        alive_status == "No" ~ FALSE,
+        alive_status == "Yes" ~ TRUE,
+        TRUE ~ TRUE
+      )
+    )
+  
+  # Find patients in landmark_data but not in landmark_outcomes due to missing imaging (alive patients only)
+  if (exists("landmark_outcomes") && nrow(landmark_outcomes) > 0) {
+    excluded_q2_imaging <- landmark_data_with_status %>%
+      anti_join(
+        landmark_outcomes %>% select(patient_id, therapy_line, time_zero_date),
+        by = c("patient_id", "therapy_line", "time_zero_date")
+      ) %>%
+      filter(survived_to_landmark, 
+             !is.na(mfs_time_from_landmark) & mfs_time_from_landmark > 0,
+             imaging_required == TRUE & is.na(imaging_disease_present)) %>%
+      select(patient_id, therapy_line, alive_status, imaging_disease_present) %>%
+      mutate(exclusion_reason = "Missing imaging data (required for alive patients)") %>%
+      distinct()
+  } else {
+    # If landmark_outcomes doesn't exist, check all landmark_data patients
+    excluded_q2_imaging <- landmark_data_with_status %>%
+      filter(survived_to_landmark, 
+             !is.na(mfs_time_from_landmark) & mfs_time_from_landmark > 0,
+             imaging_required == TRUE & is.na(imaging_disease_present)) %>%
+      select(patient_id, therapy_line, alive_status, imaging_disease_present) %>%
+      mutate(exclusion_reason = "Missing imaging data (required for alive patients)") %>%
+      distinct()
+  }
+} else {
+  excluded_q2_imaging <- tibble(patient_id = character(0), therapy_line = integer(0), 
+                                 exclusion_reason = character(0), alive_status = character(0),
+                                 imaging_disease_present = character(0))
+}
+
+# Combine and display
+if (nrow(excluded_q1_imaging) > 0 || nrow(excluded_q2_imaging) > 0) {
+  cat("## Patient IDs Excluded Due to Missing Imaging Data\n\n")
+  cat("**Note:** Only alive patients require imaging data. Patients who died do not need imaging data for inclusion.\n\n")
+  
+  if (nrow(excluded_q1_imaging) > 0) {
+    cat("### Question 1 (Baseline ctDNA Analysis)\n\n")
+    cat("**N =", nrow(excluded_q1_imaging), "patient-line observations excluded**\n\n")
+    
+    excluded_q1_table <- excluded_q1_imaging %>%
+      arrange(patient_id, therapy_line) %>%
+      mutate(
+        therapy_line_label = case_when(
+          therapy_line == 1 ~ "1L",
+          therapy_line == 2 ~ "2L",
+          therapy_line == 3 ~ "3L",
+          therapy_line >= 4 ~ "4L+",
+          TRUE ~ as.character(therapy_line)
+        )
+      ) %>%
+      select(`Patient ID` = patient_id, `Therapy Line` = therapy_line_label, 
+             `Alive Status` = alive_status) %>%
+      kable(caption = "Question 1: Patient IDs Excluded Due to Missing Imaging Data (Alive Patients Only)") %>%
+      kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+    
+    excluded_q1_table
+    cat("\n")
+  } else {
+    cat("### Question 1 (Baseline ctDNA Analysis)\n\n")
+    cat("**No patients excluded due to missing imaging data.**\n\n")
+  }
+  
+  if (nrow(excluded_q2_imaging) > 0) {
+    cat("### Question 2 (Landmark Analysis)\n\n")
+    cat("**N =", nrow(excluded_q2_imaging), "patient-line observations excluded**\n\n")
+    
+    excluded_q2_table <- excluded_q2_imaging %>%
+      arrange(patient_id, therapy_line) %>%
+      mutate(
+        therapy_line_label = case_when(
+          therapy_line == 1 ~ "1L",
+          therapy_line == 2 ~ "2L",
+          therapy_line == 3 ~ "3L",
+          therapy_line >= 4 ~ "4L+",
+          TRUE ~ as.character(therapy_line)
+        )
+      ) %>%
+      select(`Patient ID` = patient_id, `Therapy Line` = therapy_line_label,
+             `Alive Status` = alive_status) %>%
+      kable(caption = "Question 2: Patient IDs Excluded Due to Missing Imaging Data (Alive Patients Only)") %>%
+      kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+    
+    excluded_q2_table
+  } else {
+    cat("### Question 2 (Landmark Analysis)\n\n")
+    cat("**No patients excluded due to missing imaging data.**\n\n")
+  }
+  
+  # Summary of unique patients
+  all_excluded_patients <- bind_rows(
+    excluded_q1_imaging %>% select(patient_id),
+    excluded_q2_imaging %>% select(patient_id)
+  ) %>%
+    distinct()
+  
+  cat("\n**Total unique patients excluded from either question due to missing imaging data:**", 
+      nrow(all_excluded_patients), "\n")
+} else {
+  cat("## Patient IDs Excluded Due to Missing Imaging Data\n\n")
+  cat("**No patients excluded due to missing imaging data in either Question 1 or Question 2.**\n")
+  cat("(All alive patients had imaging data available, or all excluded patients had died and did not require imaging data.)\n")
+}
+```
+
+```{r descriptive_table_combined}
+# Combined descriptive table for universe and outcomes
+# Note: This table shows the final analysis N (outcomes) after filtering for valid survival data
+desc_table_combined <- universe %>%
+  left_join(
+    outcomes %>% select(patient_id, therapy_line, mfs_event, mfs_time),
+    by = c("patient_id", "therapy_line")
+  ) %>%
+  filter(!is.na(mfs_time)) %>%  # Only include observations with valid survival data
+  mutate(
+    therapy_line_label = case_when(
+      therapy_line == 1 ~ "1L",
+      therapy_line == 2 ~ "2L",
+      therapy_line == 3 ~ "3L",
+      therapy_line >= 4 ~ "4L+",
+      TRUE ~ "Unknown"
+    )
+  ) %>%
+  summarise(
+    `N (Patient-Line Observations)` = n(),
+    `N (Unique Patients)` = length(unique(patient_id)),
+    `1L` = sum(therapy_line == 1, na.rm = TRUE),
+    `2L` = sum(therapy_line == 2, na.rm = TRUE),
+    `3L` = sum(therapy_line == 3, na.rm = TRUE),
+    `4L+` = sum(therapy_line >= 4, na.rm = TRUE),
+    `ctDNA Before Therapy (median, IQR)` = paste0(
+      round(median(ctdna_before_line_value, na.rm = TRUE), 2), 
+      " (", 
+      round(quantile(ctdna_before_line_value, 0.25, na.rm = TRUE), 2), 
+      "-", 
+      round(quantile(ctdna_before_line_value, 0.75, na.rm = TRUE), 2), 
+      ")"
+    ),
+    `Days from ctDNA to Therapy Start (median, IQR)` = paste0(
+      round(median(days_from_ctdna_to_therapy, na.rm = TRUE), 0), 
+      " (", 
+      round(quantile(days_from_ctdna_to_therapy, 0.25, na.rm = TRUE), 0), 
+      "-", 
+      round(quantile(days_from_ctdna_to_therapy, 0.75, na.rm = TRUE), 0), 
+      ")"
+    ),
+    `DCR Events` = sum(mfs_event, na.rm = TRUE),
+    `Median DCR (months)` = round(median(mfs_time, na.rm = TRUE) / 30.44, 1),
+    `1-year DCR %` = round(100 * (1 - sum(mfs_event[mfs_time <= 365.25], na.rm = TRUE) / sum(mfs_time <= 365.25, na.rm = TRUE)), 1)
+  ) %>%
+  kable(caption = "Descriptive Characteristics of Study Population") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+
+desc_table_combined
+```
+
+```{r data_completeness_diagnostic, include=FALSE}
+# Diagnostic: Check data completeness for event classification
+data_completeness <- outcomes %>%
+  mutate(
+    has_death_date = !is.na(death_date),
+    has_last_fu_date = !is.na(last_fu_date),
+    has_alive_status = !is.na(alive_status),
+    alive_status_value = alive_status,
+    has_imaging_status = !is.na(imaging_disease_present),
+    imaging_status_value = imaging_disease_present,
+    # Classify MFS events: death OR (alive with disease on imaging)
+    event_classification = case_when(
+      !is.na(death_date) ~ "Event: Death (has death_date)",
+      alive_status == "No" ~ "Event: Death (alive_status=No)",
+      alive_status == "Yes" & imaging_disease_present == "Yes" ~ "Event: Imaging shows disease (alive with disease)",
+      alive_status == "Yes" & imaging_disease_present == "No" ~ "Censored: Alive without disease on imaging",
+      is.na(alive_status) & !is.na(last_fu_date) ~ "Censored: Missing alive_status, has FU date",
+      TRUE ~ "Censored: Other"
+    )
+  ) %>%
+  select(patient_id, has_death_date, has_last_fu_date, has_alive_status, 
+         alive_status_value, has_imaging_status, imaging_status_value,
+         event_classification, mfs_event, mfs_time)
+
+# Summary of data completeness
+completeness_summary <- data_completeness %>%
+  summarise(
+    N = n(),
+    `Has Death Date` = sum(has_death_date),
+    `Has Last FU Date` = sum(has_last_fu_date),
+    `Has Alive Status` = sum(has_alive_status),
+    `Alive Status = Yes` = sum(alive_status_value == "Yes", na.rm = TRUE),
+    `Alive Status = No` = sum(alive_status_value == "No", na.rm = TRUE),
+    `Alive Status Missing` = sum(is.na(alive_status_value)),
+    `Events` = sum(mfs_event),
+    `Censored` = sum(1 - mfs_event),
+    `Censoring Rate` = round(mean(1 - mfs_event), 3)
+  )
+
+# Breakdown by classification
+classification_breakdown <- data_completeness %>%
+  count(event_classification) %>%
+  mutate(percentage = round(n / sum(n) * 100, 1))
+
+cat("Data Completeness Summary:\n")
+print(completeness_summary)
+cat("\nEvent Classification Breakdown:\n")
+print(classification_breakdown)
+```
+
+```{r censoring_analysis, include=FALSE}
+# Censoring rate analysis - similar to descriptive analysis
+# 
+# ====================================================================================
+# CENSORING CRITERIA FOR DURATION OF COMPLETE RESPONSE (DCR)
+# ====================================================================================
+# 
+# DCR EVENT (dcr_event = 1, stored as mfs_event) occurs when ANY of the following:
+#   1. Patient has died (death_date is not NA)
+#   2. Patient is deceased (alive_status = "No")
+#   3. Patient is alive BUT has obvious disease on most recent imaging
+#      (imaging_disease_present = "Yes")
+#      Note: This represents loss of complete response (similar to RECIST progression from CR).
+#      This includes stable disease, partial response, or progressive disease.
+#
+# DCR CENSORED (dcr_event = 0) occurs when:
+#   - Patient is alive (alive_status = "Yes") AND
+#   - Patient has NO obvious disease on most recent imaging
+#     (imaging_disease_present = "No")
+#     Note: This represents maintenance of complete response (similar to RECIST CR)
+#   - NOTE: If imaging field is BLANK or MISSING AND patient is ALIVE, patient is EXCLUDED (imaging data is required for alive patients only)
+#   - NOTE: If patient DIED, imaging data is NOT required (death is an event)
+#
+# DCR TIME CALCULATION:
+#   - Censoring time = last_fu_date (last follow-up date)
+#   - Event time = death_date (if available) OR last_fu_date (if imaging shows disease)
+#   - Time is calculated from time_zero_date (therapy start) to event_or_censor_date
+# ====================================================================================
+#
+# Create censoring indicator
+outcomes_with_cens <- outcomes %>%
+  filter(!is.na(ctdna_before_line_value)) %>%  # Remove NA values before creating tertiles
+  mutate(
+    censored = 1 - mfs_event,  # 1 = censored, 0 = event
+    ctdna_tertile = ntile(ctdna_before_line_value, 3),
+    ctdna_group = case_when(
+      ctdna_tertile == 1 ~ "T1 (Lowest)",
+      ctdna_tertile == 2 ~ "T2",
+      ctdna_tertile == 3 ~ "T3 (Highest)"
+    )
+  )
+
+# Calculate censoring rates by ctDNA tertile
+censoring_rates <- outcomes_with_cens %>%
+  group_by(ctdna_group) %>%
+  summarise(
+    n = n(),
+    n_events = sum(mfs_event, na.rm = TRUE),
+    n_censored = sum(censored, na.rm = TRUE),
+    censoring_rate = mean(censored, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Chi-square test for independence of censoring and group
+if (nrow(censoring_rates) > 1 && sum(censoring_rates$n_censored) > 0 && sum(censoring_rates$n_events) > 0) {
+  censoring_table <- table(outcomes_with_cens$ctdna_group, outcomes_with_cens$censored)
+  chi_square_test <- tryCatch(
+    chisq.test(censoring_table),
+    error = function(e) NULL
+  )
+} else {
+  chi_square_test <- NULL
+}
+
+# Kruskal-Wallis test for censoring times (for censored patients only)
+censored_patients <- outcomes_with_cens %>%
+  filter(censored == 1)
+
+if (nrow(censored_patients) > 0 && length(unique(censored_patients$ctdna_group)) > 1) {
+  kruskal_test <- tryCatch(
+    kruskal.test(mfs_time ~ ctdna_group, data = censored_patients),
+    error = function(e) NULL
+  )
+} else {
+  kruskal_test <- NULL
+}
+
+cat("Censoring analysis completed.\n")
+if (!is.null(chi_square_test)) {
+  cat("Chi-square p-value:", chi_square_test$p.value, "\n")
+  if (chi_square_test$p.value >= 0.05) {
+    cat("Censoring appears non-informative (p >= 0.05)\n")
+  } else {
+    cat("Censoring may be informative (p < 0.05)\n")
+  }
+}
+```
+
+
+```{r data_completeness_table}
+# Display data completeness diagnostic
+completeness_display <- completeness_summary %>%
+  pivot_longer(everything(), names_to = "Metric", values_to = "Value") %>%
+  kable(caption = "Data Completeness for Event Classification") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+
+completeness_display
+
+classification_display <- classification_breakdown %>%
+  rename(`Classification` = event_classification, `N` = n, `%` = percentage) %>%
+      kable(caption = "Breakdown of DCR Event vs. Censored Classification\n\nNote: DCR Events include: (1) Death (death_date or alive_status=No), OR (2) Alive with obvious disease on most recent imaging (loss of complete response, includes stable disease, partial response, or progressive disease). DCR Censored = Alive without obvious disease on imaging (maintaining complete response, similar to RECIST CR). Only alive patients with missing imaging data are excluded (imaging data is required for alive patients only; patients who died do not require imaging data).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+
+classification_display
+```
+
+```{r censoring_analysis_table}
+# Display censoring analysis results
+# Ensure all tertiles are represented even if they have 0 observations
+all_tertiles_df <- tibble(ctdna_group = c("T1 (Lowest)", "T2", "T3 (Highest)"))
+
+# Create complete summary with all tertiles - use full_join to ensure all are included
+censoring_summary <- all_tertiles_df %>%
+  full_join(censoring_rates, by = "ctdna_group") %>%
+  mutate(
+    n = replace_na(n, 0),
+    n_events = replace_na(n_events, 0),
+    n_censored = replace_na(n_censored, 0),
+    censoring_rate = ifelse(n == 0, 0, replace_na(censoring_rate, 0)),
+    `Censoring Rate` = ifelse(n == 0, "N/A", paste0(round(censoring_rate * 100, 1), "%")),
+    `Interpretation` = ifelse(n == 0, "N/A",
+                             ifelse(!is.null(chi_square_test) && !is.null(chi_square_test$p.value) &&
+                                    chi_square_test$p.value < 0.05,
+                                    "⚠️ Potentially informative",
+                                    "✓ Non-informative likely"))
+  ) %>%
+  arrange(match(ctdna_group, c("T1 (Lowest)", "T2", "T3 (Highest)"))) %>%
+  select(Group = ctdna_group, N = n, `N Events` = n_events, 
+         `N Censored` = n_censored, `Censoring Rate`, Interpretation)
+
+# Add Chi-square P-value to first row only
+if (!is.null(chi_square_test) && !is.null(chi_square_test$p.value)) {
+  censoring_summary <- censoring_summary %>%
+    mutate(`Chi-square P-value` = ifelse(row_number() == 1, as.character(round(chi_square_test$p.value, 4)), ""))
+} else {
+  censoring_summary <- censoring_summary %>%
+    mutate(`Chi-square P-value` = "")
+}
+
+censoring_table_display <- censoring_summary %>%
+  kable(caption = "Censoring Rate Analysis by ctDNA Tertile") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+
+censoring_table_display
+
+if (!is.null(chi_square_test)) {
+  if (chi_square_test$p.value >= 0.05) {
+    cat("\n**Interpretation:** Censoring appears non-informative (p =", 
+        round(chi_square_test$p.value, 4), 
+        "). This supports the assumption that censoring is independent of ctDNA level.\n")
+  } else {
+    cat("\n**Interpretation:** Censoring may be informative (p =", 
+        round(chi_square_test$p.value, 4), 
+        "). Consider sensitivity analyses.\n")
+  }
+}
+```
+
+```{r ctDNA_prognosis_analysis}
+# Quantitative association between ctDNA level and prognosis
+# Cox proportional hazards model
+# Cox model with ctDNA and line of therapy as covariates
+# Combine lines 4+ into one category
+outcomes_for_model <- outcomes %>%
+  left_join(
+    palliative_regimen_table %>%
+      mutate(therapy_line_match = ifelse(is.na(therapy_line_match), NA_integer_, therapy_line_match)) %>%
+      select(patient_id, therapy_line_match, therapy_class) %>%
+      distinct(),
+    by = c("patient_id", "therapy_line" = "therapy_line_match")
+  ) %>%
+  mutate(
+    therapy_line_grouped = case_when(
+      therapy_line == 1 ~ "1L",
+      therapy_line == 2 ~ "2L",
+      therapy_line == 3 ~ "3L",
+      therapy_line >= 4 ~ "4L+",
+      TRUE ~ as.character(therapy_line)
+    ),
+    therapy_line_factor = factor(therapy_line_grouped, levels = c("1L", "2L", "3L", "4L+")),
+    therapy_class = replace_na(therapy_class, "unspecified"),
+    therapy_class_factor = factor(therapy_class)
+  )
+
+# Join Bajorin risk factors if available
+if (exists("bajorin_data") && nrow(bajorin_data) > 0) {
+  outcomes_for_model <- outcomes_for_model %>%
+    left_join(
+      bajorin_data %>% select(patient_id, therapy_line, kps_binary, visceral_mets_binary),
+      by = c("patient_id", "therapy_line")
+    ) %>%
+    mutate(
+      # Create factor variables for Bajorin risk factors
+      kps_factor = factor(kps_binary, levels = c(0, 1), labels = c("KPS <80%", "KPS ≥80%")),
+      visceral_mets_factor = factor(visceral_mets_binary, levels = c(0, 1), labels = c("No Visceral Mets", "Visceral Mets"))
+    )
+} else {
+  outcomes_for_model <- outcomes_for_model %>%
+    mutate(
+      kps_binary = NA_real_,
+      visceral_mets_binary = NA_real_,
+      kps_factor = factor(NA, levels = c(0, 1), labels = c("KPS <80%", "KPS ≥80%")),
+      visceral_mets_factor = factor(NA, levels = c(0, 1), labels = c("No Visceral Mets", "Visceral Mets"))
+    )
+}
+
+# Model 1: Unadjusted (ctDNA only)
+cox_model_unadj <- coxph(Surv(mfs_time, mfs_event) ~ log(ctdna_before_line_value + 1), data = outcomes_for_model)
+cox_summary_unadj <- summary(cox_model_unadj)
+
+# Model 2: Adjusted for line of therapy
+cox_model_line <- coxph(Surv(mfs_time, mfs_event) ~ log(ctdna_before_line_value + 1) + therapy_line_factor, data = outcomes_for_model)
+cox_summary_line <- summary(cox_model_line)
+
+# Model 3: Adjusted for KPS only (if available)
+cox_model_kps <- NULL
+cox_summary_kps <- NULL
+if (sum(!is.na(outcomes_for_model$kps_binary)) > 0) {
+  outcomes_kps <- outcomes_for_model %>%
+    filter(!is.na(kps_binary))
+  
+  if (nrow(outcomes_kps) > 0) {
+    cox_model_kps <- tryCatch({
+      coxph(Surv(mfs_time, mfs_event) ~ log(ctdna_before_line_value + 1) + kps_factor, 
+            data = outcomes_kps)
+    }, error = function(e) NULL)
+    
+    if (!is.null(cox_model_kps)) {
+      cox_summary_kps <- summary(cox_model_kps)
+    }
+  }
+}
+
+# Model 4: Adjusted for visceral metastases only (if available)
+cox_model_visceral <- NULL
+cox_summary_visceral <- NULL
+if (sum(!is.na(outcomes_for_model$visceral_mets_binary)) > 0) {
+  outcomes_visceral <- outcomes_for_model %>%
+    filter(!is.na(visceral_mets_binary))
+  
+  if (nrow(outcomes_visceral) > 0) {
+    cox_model_visceral <- tryCatch({
+      coxph(Surv(mfs_time, mfs_event) ~ log(ctdna_before_line_value + 1) + visceral_mets_factor, 
+            data = outcomes_visceral)
+    }, error = function(e) NULL)
+    
+    if (!is.null(cox_model_visceral)) {
+      cox_summary_visceral <- summary(cox_model_visceral)
+    }
+  }
+}
+
+# Model 5: Multivariate with all covariates (if available)
+cox_model_multiv <- NULL
+cox_summary_multiv <- NULL
+outcomes_multiv <- outcomes_for_model %>% filter(FALSE)  # Initialize as empty
+if (sum(!is.na(outcomes_for_model$kps_binary)) > 0 && sum(!is.na(outcomes_for_model$visceral_mets_binary)) > 0) {
+  # Filter to observations with complete Bajorin data
+  outcomes_multiv <- outcomes_for_model %>%
+    filter(!is.na(kps_binary), !is.na(visceral_mets_binary))
+  
+  if (nrow(outcomes_multiv) > 0) {
+    cox_model_multiv <- tryCatch({
+      coxph(Surv(mfs_time, mfs_event) ~ log(ctdna_before_line_value + 1) + therapy_line_factor + 
+            kps_factor + visceral_mets_factor, 
+            data = outcomes_multiv)
+    }, error = function(e) NULL)
+    
+    if (!is.null(cox_model_multiv)) {
+      cox_summary_multiv <- summary(cox_model_multiv)
+    }
+  }
+}
+
+# Create results table showing ctDNA HR progression across models
+results_table_list <- list()
+
+# 1. Unadjusted model
+hr_unadj <- cox_summary_unadj$conf.int[1, "exp(coef)"]
+hr_unadj_lower <- cox_summary_unadj$conf.int[1, "lower .95"]
+hr_unadj_upper <- cox_summary_unadj$conf.int[1, "upper .95"]
+p_unadj <- cox_summary_unadj$coefficients[1, "Pr(>|z|)"]
+results_table_list[[length(results_table_list) + 1]] <- tibble(
+  `Model` = "Unadjusted",
+  `HR (95% CI)` = paste0(round(hr_unadj, 2), " (", round(hr_unadj_lower, 2), "-", round(hr_unadj_upper, 2), ")"),
+  `P-value` = ifelse(p_unadj < 0.001, "<0.001", as.character(round(p_unadj, 3))),
+  `N` = nrow(outcomes_for_model)
+)
+
+# 2. Adjusted for line of therapy
+hr_line <- cox_summary_line$conf.int[1, "exp(coef)"]
+hr_line_lower <- cox_summary_line$conf.int[1, "lower .95"]
+hr_line_upper <- cox_summary_line$conf.int[1, "upper .95"]
+p_line <- cox_summary_line$coefficients[1, "Pr(>|z|)"]
+results_table_list[[length(results_table_list) + 1]] <- tibble(
+  `Model` = "Adjusted for line of therapy",
+  `HR (95% CI)` = paste0(round(hr_line, 2), " (", round(hr_line_lower, 2), "-", round(hr_line_upper, 2), ")"),
+  `P-value` = ifelse(p_line < 0.001, "<0.001", as.character(round(p_line, 3))),
+  `N` = nrow(outcomes_for_model)
+)
+
+# 3. Adjusted for KPS only
+if (!is.null(cox_model_kps) && !is.null(cox_summary_kps)) {
+  hr_kps <- cox_summary_kps$conf.int[1, "exp(coef)"]
+  hr_kps_lower <- cox_summary_kps$conf.int[1, "lower .95"]
+  hr_kps_upper <- cox_summary_kps$conf.int[1, "upper .95"]
+  p_kps <- cox_summary_kps$coefficients[1, "Pr(>|z|)"]
+  results_table_list[[length(results_table_list) + 1]] <- tibble(
+    `Model` = "Adjusted for KPS",
+    `HR (95% CI)` = paste0(round(hr_kps, 2), " (", round(hr_kps_lower, 2), "-", round(hr_kps_upper, 2), ")"),
+    `P-value` = ifelse(p_kps < 0.001, "<0.001", as.character(round(p_kps, 3))),
+    `N` = nrow(outcomes_kps)
+  )
+}
+
+# 4. Adjusted for visceral metastases only
+if (!is.null(cox_model_visceral) && !is.null(cox_summary_visceral)) {
+  hr_visceral <- cox_summary_visceral$conf.int[1, "exp(coef)"]
+  hr_visceral_lower <- cox_summary_visceral$conf.int[1, "lower .95"]
+  hr_visceral_upper <- cox_summary_visceral$conf.int[1, "upper .95"]
+  p_visceral <- cox_summary_visceral$coefficients[1, "Pr(>|z|)"]
+  results_table_list[[length(results_table_list) + 1]] <- tibble(
+    `Model` = "Adjusted for visceral metastases",
+    `HR (95% CI)` = paste0(round(hr_visceral, 2), " (", round(hr_visceral_lower, 2), "-", round(hr_visceral_upper, 2), ")"),
+    `P-value` = ifelse(p_visceral < 0.001, "<0.001", as.character(round(p_visceral, 3))),
+    `N` = nrow(outcomes_visceral)
+  )
+}
+
+# 5. Adjusted for all (line of therapy + KPS + visceral metastases)
+if (!is.null(cox_model_multiv) && !is.null(cox_summary_multiv)) {
+  hr_multiv <- cox_summary_multiv$conf.int[1, "exp(coef)"]
+  hr_multiv_lower <- cox_summary_multiv$conf.int[1, "lower .95"]
+  hr_multiv_upper <- cox_summary_multiv$conf.int[1, "upper .95"]
+  p_multiv <- cox_summary_multiv$coefficients[1, "Pr(>|z|)"]
+  results_table_list[[length(results_table_list) + 1]] <- tibble(
+    `Model` = "Adjusted for line of therapy, KPS, and visceral metastases",
+    `HR (95% CI)` = paste0(round(hr_multiv, 2), " (", round(hr_multiv_lower, 2), "-", round(hr_multiv_upper, 2), ")"),
+    `P-value` = ifelse(p_multiv < 0.001, "<0.001", as.character(round(p_multiv, 3))),
+    `N` = nrow(outcomes_multiv)
+  )
+}
+
+# 6. Add tertile comparisons (T2 vs T1, T3 vs T1)
+# Create tertiles for comparison
+if (nrow(outcomes_for_model) >= 3) {
+  outcomes_for_tertiles <- outcomes_for_model %>%
+    filter(!is.na(ctdna_before_line_value)) %>%
+    mutate(
+      ctdna_tertile = ntile(ctdna_before_line_value, 3),
+      ctdna_tertile_label = case_when(
+        ctdna_tertile == 1 ~ "T1 (Lowest)",
+        ctdna_tertile == 2 ~ "T2",
+        ctdna_tertile == 3 ~ "T3 (Highest)"
+      ),
+      ctdna_tertile_factor = factor(ctdna_tertile_label, 
+                                      levels = c("T1 (Lowest)", "T2", "T3 (Highest)"))
+    )
+  
+  # Unadjusted tertile model
+  cox_tertiles_unadj <- tryCatch({
+    coxph(Surv(mfs_time, mfs_event) ~ ctdna_tertile_factor, data = outcomes_for_tertiles)
+  }, error = function(e) NULL)
+  
+  # Adjusted tertile model (for line of therapy)
+  cox_tertiles_adj <- tryCatch({
+    coxph(Surv(mfs_time, mfs_event) ~ ctdna_tertile_factor + therapy_line_factor, 
+          data = outcomes_for_tertiles)
+  }, error = function(e) NULL)
+  
+  # Fully adjusted tertile model (line of therapy + KPS + visceral metastases)
+  cox_tertiles_multiv <- NULL
+  if (sum(!is.na(outcomes_for_tertiles$kps_binary)) > 0 && 
+      sum(!is.na(outcomes_for_tertiles$visceral_mets_binary)) > 0) {
+    outcomes_tertiles_multiv <- outcomes_for_tertiles %>%
+      filter(!is.na(kps_binary), !is.na(visceral_mets_binary))
+    
+    if (nrow(outcomes_tertiles_multiv) > 0) {
+      cox_tertiles_multiv <- tryCatch({
+        coxph(Surv(mfs_time, mfs_event) ~ ctdna_tertile_factor + therapy_line_factor + 
+              kps_factor + visceral_mets_factor, 
+              data = outcomes_tertiles_multiv)
+      }, error = function(e) NULL)
+    }
+  }
+  
+  if (!is.null(cox_tertiles_unadj)) {
+    cox_tertiles_unadj_summary <- summary(cox_tertiles_unadj)
+    
+    # T2 vs T1 (unadjusted)
+    if (nrow(cox_tertiles_unadj_summary$coefficients) >= 1) {
+      hr_t2_unadj <- exp(cox_tertiles_unadj_summary$coefficients[1, "coef"])
+      hr_t2_unadj_lower <- cox_tertiles_unadj_summary$conf.int[1, "lower .95"]
+      hr_t2_unadj_upper <- cox_tertiles_unadj_summary$conf.int[1, "upper .95"]
+      p_t2_unadj <- cox_tertiles_unadj_summary$coefficients[1, "Pr(>|z|)"]
+      
+      results_table_list[[length(results_table_list) + 1]] <- tibble(
+        `Model` = "T2 vs T1 (Unadjusted)",
+        `HR (95% CI)` = paste0(round(hr_t2_unadj, 2), " (", round(hr_t2_unadj_lower, 2), "-", round(hr_t2_unadj_upper, 2), ")"),
+        `P-value` = ifelse(p_t2_unadj < 0.001, "<0.001", as.character(round(p_t2_unadj, 3))),
+        `N` = nrow(outcomes_for_tertiles)
+      )
+    }
+    
+    # T3 vs T1 (unadjusted)
+    if (nrow(cox_tertiles_unadj_summary$coefficients) >= 2) {
+      hr_t3_unadj <- exp(cox_tertiles_unadj_summary$coefficients[2, "coef"])
+      hr_t3_unadj_lower <- cox_tertiles_unadj_summary$conf.int[2, "lower .95"]
+      hr_t3_unadj_upper <- cox_tertiles_unadj_summary$conf.int[2, "upper .95"]
+      p_t3_unadj <- cox_tertiles_unadj_summary$coefficients[2, "Pr(>|z|)"]
+      
+      results_table_list[[length(results_table_list) + 1]] <- tibble(
+        `Model` = "T3 vs T1 (Unadjusted)",
+        `HR (95% CI)` = paste0(round(hr_t3_unadj, 2), " (", round(hr_t3_unadj_lower, 2), "-", round(hr_t3_unadj_upper, 2), ")"),
+        `P-value` = ifelse(p_t3_unadj < 0.001, "<0.001", as.character(round(p_t3_unadj, 3))),
+        `N` = nrow(outcomes_for_tertiles)
+      )
+    }
+  }
+  
+  if (!is.null(cox_tertiles_adj)) {
+    cox_tertiles_adj_summary <- summary(cox_tertiles_adj)
+    
+    # Find tertile coefficient indices
+    tertile_idx <- which(str_detect(rownames(cox_tertiles_adj_summary$coefficients), "ctdna_tertile_factor"))
+    
+    # T2 vs T1 (adjusted)
+    if (length(tertile_idx) >= 1) {
+      hr_t2_adj <- exp(cox_tertiles_adj_summary$coefficients[tertile_idx[1], "coef"])
+      hr_t2_adj_lower <- cox_tertiles_adj_summary$conf.int[tertile_idx[1], "lower .95"]
+      hr_t2_adj_upper <- cox_tertiles_adj_summary$conf.int[tertile_idx[1], "upper .95"]
+      p_t2_adj <- cox_tertiles_adj_summary$coefficients[tertile_idx[1], "Pr(>|z|)"]
+      
+      results_table_list[[length(results_table_list) + 1]] <- tibble(
+        `Model` = "T2 vs T1 (Adjusted for line of therapy)",
+        `HR (95% CI)` = paste0(round(hr_t2_adj, 2), " (", round(hr_t2_adj_lower, 2), "-", round(hr_t2_adj_upper, 2), ")"),
+        `P-value` = ifelse(p_t2_adj < 0.001, "<0.001", as.character(round(p_t2_adj, 3))),
+        `N` = nrow(outcomes_for_tertiles)
+      )
+    }
+    
+    # T3 vs T1 (adjusted)
+    if (length(tertile_idx) >= 2) {
+      hr_t3_adj <- exp(cox_tertiles_adj_summary$coefficients[tertile_idx[2], "coef"])
+      hr_t3_adj_lower <- cox_tertiles_adj_summary$conf.int[tertile_idx[2], "lower .95"]
+      hr_t3_adj_upper <- cox_tertiles_adj_summary$conf.int[tertile_idx[2], "upper .95"]
+      p_t3_adj <- cox_tertiles_adj_summary$coefficients[tertile_idx[2], "Pr(>|z|)"]
+      
+      results_table_list[[length(results_table_list) + 1]] <- tibble(
+        `Model` = "T3 vs T1 (Adjusted for line of therapy)",
+        `HR (95% CI)` = paste0(round(hr_t3_adj, 2), " (", round(hr_t3_adj_lower, 2), "-", round(hr_t3_adj_upper, 2), ")"),
+        `P-value` = ifelse(p_t3_adj < 0.001, "<0.001", as.character(round(p_t3_adj, 3))),
+        `N` = nrow(outcomes_for_tertiles)
+      )
+    }
+  }
+  
+  # Fully adjusted tertile models (line of therapy + KPS + visceral metastases)
+  if (!is.null(cox_tertiles_multiv)) {
+    # Safely check convergence
+    model_converged <- tryCatch({
+      isTRUE(cox_tertiles_multiv$converged)
+    }, error = function(e) FALSE)
+    
+    if (model_converged) {
+      cox_tertiles_multiv_summary <- summary(cox_tertiles_multiv)
+      tertile_idx_multiv <- which(str_detect(rownames(cox_tertiles_multiv_summary$coefficients), "ctdna_tertile_factor"))
+      
+      # T2 vs T1 (fully adjusted)
+      if (length(tertile_idx_multiv) >= 1) {
+        hr_t2_multiv <- exp(cox_tertiles_multiv_summary$coefficients[tertile_idx_multiv[1], "coef"])
+        hr_t2_multiv_lower <- cox_tertiles_multiv_summary$conf.int[tertile_idx_multiv[1], "lower .95"]
+        hr_t2_multiv_upper <- cox_tertiles_multiv_summary$conf.int[tertile_idx_multiv[1], "upper .95"]
+        p_t2_multiv <- cox_tertiles_multiv_summary$coefficients[tertile_idx_multiv[1], "Pr(>|z|)"]
+        
+        # Check for extreme values that suggest convergence issues
+        if (!is.na(hr_t2_multiv) && is.finite(hr_t2_multiv) && hr_t2_multiv > 0 && hr_t2_multiv < 1e10 &&
+            !is.na(hr_t2_multiv_lower) && is.finite(hr_t2_multiv_lower) &&
+            !is.na(hr_t2_multiv_upper) && is.finite(hr_t2_multiv_upper)) {
+          results_table_list[[length(results_table_list) + 1]] <- tibble(
+            `Model` = "T2 vs T1 (Adjusted for line of therapy, KPS, and visceral metastases)",
+            `HR (95% CI)` = paste0(round(hr_t2_multiv, 2), " (", round(hr_t2_multiv_lower, 2), "-", round(hr_t2_multiv_upper, 2), ")"),
+            `P-value` = ifelse(p_t2_multiv < 0.001, "<0.001", as.character(round(p_t2_multiv, 3))),
+            `N` = nrow(outcomes_tertiles_multiv)
+          )
+        }
+      }
+      
+      # T3 vs T1 (fully adjusted)
+      if (length(tertile_idx_multiv) >= 2) {
+        hr_t3_multiv <- exp(cox_tertiles_multiv_summary$coefficients[tertile_idx_multiv[2], "coef"])
+        hr_t3_multiv_lower <- cox_tertiles_multiv_summary$conf.int[tertile_idx_multiv[2], "lower .95"]
+        hr_t3_multiv_upper <- cox_tertiles_multiv_summary$conf.int[tertile_idx_multiv[2], "upper .95"]
+        p_t3_multiv <- cox_tertiles_multiv_summary$coefficients[tertile_idx_multiv[2], "Pr(>|z|)"]
+        
+        # Check for extreme values that suggest convergence issues
+        if (!is.na(hr_t3_multiv) && is.finite(hr_t3_multiv) && hr_t3_multiv > 0 && hr_t3_multiv < 1e10 &&
+            !is.na(hr_t3_multiv_lower) && is.finite(hr_t3_multiv_lower) &&
+            !is.na(hr_t3_multiv_upper) && is.finite(hr_t3_multiv_upper)) {
+          results_table_list[[length(results_table_list) + 1]] <- tibble(
+            `Model` = "T3 vs T1 (Adjusted for line of therapy, KPS, and visceral metastases)",
+            `HR (95% CI)` = paste0(round(hr_t3_multiv, 2), " (", round(hr_t3_multiv_lower, 2), "-", round(hr_t3_multiv_upper, 2), ")"),
+            `P-value` = ifelse(p_t3_multiv < 0.001, "<0.001", as.character(round(p_t3_multiv, 3))),
+            `N` = nrow(outcomes_tertiles_multiv)
+          )
+        }
+      }
+    }
+  }
+}
+
+# Get therapy line labels for use in other chunks
+therapy_line_labels <- c("2L vs 1L", "3L vs 1L", "4L+ vs 1L")
+
+# Keep hr_value for backward compatibility with other chunks
+hr_value <- hr_line
+hr_lower <- hr_line_lower
+hr_upper <- hr_line_upper
+p_value_ctdna <- p_line
+cox_model <- cox_model_line
+cox_summary <- cox_summary_line
+
+# Combine all results
+results_table <- bind_rows(results_table_list) %>%
+  kable(caption = "Cox Proportional Hazards Model: ctDNA Level Before Therapy and Duration of Complete Response. Top section shows continuous ctDNA (Ln(ctDNA + 1)) with HR progression as covariates are added. Bottom section shows tertile comparisons (T2 vs T1, T3 vs T1) with T1 (Lowest) as reference. HR > 1 indicates shorter duration of complete response (higher risk of loss of CR or death) compared to reference.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+
+results_table
+```
+
+```{r multivariate_cox_pretreatment}
+# ====================================================================================
+# Multivariate Cox Model: Pre-treatment Analysis with Bajorin Risk Factors
+# ====================================================================================
+# Model includes: ctDNA + Line of Therapy + KPS + Visceral Metastases
+
+if (!is.null(cox_model_multiv) && exists("cox_summary_multiv") && !is.null(cox_summary_multiv)) {
+  # Extract coefficients from multivariate model
+  n_coef <- nrow(cox_summary_multiv$coefficients)
+  
+  # Create results table - build as list first, then convert to tibble
+  multiv_results_list <- list()
+  
+  # Add ctDNA coefficient
+  if (n_coef > 0) {
+    p_val_ctdna <- cox_summary_multiv$coefficients[1, "Pr(>|z|)"]
+    p_val_ctdna_char <- if (p_val_ctdna < 0.001) "<0.001" else as.character(round(p_val_ctdna, 3))
+    multiv_results_list[[length(multiv_results_list) + 1]] <- tibble(
+      `Variable` = "Ln(ctDNA + 1)",
+      `HR (95% CI)` = paste0(
+        round(cox_summary_multiv$conf.int[1, "exp(coef)"], 2), " (",
+        round(cox_summary_multiv$conf.int[1, "lower .95"], 2), "-",
+        round(cox_summary_multiv$conf.int[1, "upper .95"], 2), ")"
+      ),
+      `P-value` = p_val_ctdna_char
+    )
+  }
+  
+  # Add therapy line coefficients
+  therapy_line_idx <- which(str_detect(rownames(cox_summary_multiv$coefficients), "therapy_line_factor"))
+  if (length(therapy_line_idx) > 0) {
+    for (i in seq_along(therapy_line_idx)) {
+      idx <- therapy_line_idx[i]
+      if (idx <= nrow(cox_summary_multiv$conf.int)) {
+        p_val_line <- cox_summary_multiv$coefficients[idx, "Pr(>|z|)"]
+        p_val_line_char <- if (p_val_line < 0.001) "<0.001" else as.character(round(p_val_line, 3))
+        multiv_results_list[[length(multiv_results_list) + 1]] <- tibble(
+          `Variable` = therapy_line_labels[i],
+          `HR (95% CI)` = paste0(
+            round(cox_summary_multiv$conf.int[idx, "exp(coef)"], 2), " (",
+            round(cox_summary_multiv$conf.int[idx, "lower .95"], 2), "-",
+            round(cox_summary_multiv$conf.int[idx, "upper .95"], 2), ")"
+          ),
+          `P-value` = p_val_line_char
+        )
+      }
+    }
+  }
+  
+  # Add KPS coefficient
+  kps_idx <- which(str_detect(rownames(cox_summary_multiv$coefficients), "kps_factor"))
+  if (length(kps_idx) > 0) {
+    idx <- kps_idx[1]
+    if (idx <= nrow(cox_summary_multiv$conf.int)) {
+      p_val_kps <- cox_summary_multiv$coefficients[idx, "Pr(>|z|)"]
+      p_val_kps_char <- if (p_val_kps < 0.001) "<0.001" else as.character(round(p_val_kps, 3))
+      multiv_results_list[[length(multiv_results_list) + 1]] <- tibble(
+        `Variable` = "KPS ≥80% vs <80%",
+        `HR (95% CI)` = paste0(
+          round(cox_summary_multiv$conf.int[idx, "exp(coef)"], 2), " (",
+          round(cox_summary_multiv$conf.int[idx, "lower .95"], 2), "-",
+          round(cox_summary_multiv$conf.int[idx, "upper .95"], 2), ")"
+        ),
+        `P-value` = p_val_kps_char
+      )
+    }
+  }
+  
+  # Add Visceral Metastases coefficient
+  visceral_idx <- which(str_detect(rownames(cox_summary_multiv$coefficients), "visceral_mets_factor"))
+  if (length(visceral_idx) > 0) {
+    idx <- visceral_idx[1]
+    if (idx <= nrow(cox_summary_multiv$conf.int)) {
+      p_val_visceral <- cox_summary_multiv$coefficients[idx, "Pr(>|z|)"]
+      p_val_visceral_char <- if (p_val_visceral < 0.001) "<0.001" else as.character(round(p_val_visceral, 3))
+      multiv_results_list[[length(multiv_results_list) + 1]] <- tibble(
+        `Variable` = "Visceral Mets vs No Visceral Mets",
+        `HR (95% CI)` = paste0(
+          round(cox_summary_multiv$conf.int[idx, "exp(coef)"], 2), " (",
+          round(cox_summary_multiv$conf.int[idx, "lower .95"], 2), "-",
+          round(cox_summary_multiv$conf.int[idx, "upper .95"], 2), ")"
+        ),
+        `P-value` = p_val_visceral_char
+      )
+    }
+  }
+  
+  # Combine all results
+  multiv_results <- bind_rows(multiv_results_list)
+  
+  # Display table
+  multiv_table <- multiv_results %>%
+    kable(caption = "Multivariate Cox Model: Pre-treatment ctDNA and Metastasis-Free Survival (adjusted for line of therapy, KPS, and visceral metastases)") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  
+  multiv_table
+  
+  cat("\n**N for multivariate model:**", nrow(outcomes_multiv), "observations\n")
+  cat("**Note:** This model includes Bajorin risk factors (KPS and visceral metastases) in addition to ctDNA level and line of therapy.\n")
+} else {
+  cat("Multivariate Cox model with Bajorin risk factors could not be fitted.\n")
+  cat("This may be due to missing KPS or visceral metastases data, or insufficient sample size.\n")
+  if (exists("bajorin_data")) {
+    cat("Bajorin data loaded:", nrow(bajorin_data), "observations\n")
+  } else {
+    cat("Bajorin data file not found or could not be loaded.\n")
+  }
+}
+```
+
+```{r identify_clinical_variables, include=FALSE}
+# Identify available clinical variables for multivariate analysis
+# This helps determine what variables can be included in a multivariate Cox model
+
+# Key variables to check for
+key_vars <- c("race", "ethnicity", "cancer_stage_natera", 
+              "pathology_t_stage_2", "pathology_n_stage_2", "pathology_m_stage_2",
+              "neoadjuvant_systemic_therapy_yes_no", "dataset")
+
+# Check data completeness for outcomes population
+if (exists("outcomes") && nrow(outcomes) > 0) {
+  outcomes_with_clinical <- outcomes %>%
+    left_join(dat_combined %>% select(patient_id, any_of(key_vars)), by = "patient_id")
+  
+  # Check completeness for key variables
+  var_completeness <- tibble()
+  for (var_name in key_vars) {
+    if (var_name %in% names(outcomes_with_clinical)) {
+      n_complete <- sum(!is.na(outcomes_with_clinical[[var_name]]))
+      pct_complete <- round(n_complete / nrow(outcomes_with_clinical) * 100, 1)
+      var_completeness <- bind_rows(
+        var_completeness,
+        tibble(
+          Variable = var_name,
+          N_Complete = n_complete,
+          N_Total = nrow(outcomes_with_clinical),
+          Percent_Complete = pct_complete,
+          Suitable = pct_complete >= 80
+        )
+      )
+    }
+  }
+  
+  # Also check for age, sex if they exist
+  age_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^age$|age_at", ignore_case = TRUE))]
+  sex_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^sex$|^gender$", ignore_case = TRUE))]
+  
+  if (length(age_cols) > 0) {
+    age_var <- age_cols[1]
+    outcomes_with_clinical <- outcomes_with_clinical %>%
+      left_join(dat_combined %>% select(patient_id, !!sym(age_var)), by = "patient_id")
+    n_complete_age <- sum(!is.na(outcomes_with_clinical[[age_var]]))
+    var_completeness <- bind_rows(
+      var_completeness,
+      tibble(
+        Variable = age_var,
+        N_Complete = n_complete_age,
+        N_Total = nrow(outcomes_with_clinical),
+        Percent_Complete = round(n_complete_age / nrow(outcomes_with_clinical) * 100, 1),
+        Suitable = n_complete_age / nrow(outcomes_with_clinical) >= 0.8
+      )
+    )
+  }
+  
+  if (length(sex_cols) > 0) {
+    sex_var <- sex_cols[1]
+    outcomes_with_clinical <- outcomes_with_clinical %>%
+      left_join(dat_combined %>% select(patient_id, !!sym(sex_var)), by = "patient_id")
+    n_complete_sex <- sum(!is.na(outcomes_with_clinical[[sex_var]]))
+    var_completeness <- bind_rows(
+      var_completeness,
+      tibble(
+        Variable = sex_var,
+        N_Complete = n_complete_sex,
+        N_Total = nrow(outcomes_with_clinical),
+        Percent_Complete = round(n_complete_sex / nrow(outcomes_with_clinical) * 100, 1),
+        Suitable = n_complete_sex / nrow(outcomes_with_clinical) >= 0.8
+      )
+    )
+  }
+  
+  cat("Available clinical variables for multivariate analysis:\n")
+  if (nrow(var_completeness) > 0) {
+    print(var_completeness %>% arrange(desc(Percent_Complete)))
+  } else {
+    cat("No matching clinical variables found in dataset.\n")
+  }
+}
+```
+
+```{r survival_curves_by_ctdna_tertiles}
+# Create tertiles of ctDNA
+if (nrow(outcomes) >= 3) {
+  outcomes_tertiles <- outcomes %>%
+    mutate(
+      mfs_time_months = mfs_time / 30.44,
+      ctdna_tertile = ntile(ctdna_before_line_value, 3),
+      ctdna_tertile_label = case_when(
+        ctdna_tertile == 1 ~ "T1 (Lowest)",
+        ctdna_tertile == 2 ~ "T2",
+        ctdna_tertile == 3 ~ "T3 (Highest)"
+      )
+    )
+  
+  # Check if we have enough events per tertile
+  events_per_tertile <- outcomes_tertiles %>%
+    group_by(ctdna_tertile_label) %>%
+    summarise(n_events = sum(mfs_event, na.rm = TRUE), .groups = "drop")
+  
+  if (all(events_per_tertile$n_events > 0) && nrow(events_per_tertile) > 1) {
+    # Fit survival curves (months)
+    surv_fit <- survfit(Surv(mfs_time_months, mfs_event) ~ ctdna_tertile_label, data = outcomes_tertiles)
+    
+    # Plot with 95% confidence intervals
+    p <- ggsurvplot(
+      surv_fit,
+      data = outcomes_tertiles,
+      pval = TRUE,
+      conf.int = TRUE,
+      conf.int.style = "ribbon",
+      risk.table = TRUE,
+      xlab = "Time (months)",
+      ylab = "Duration of Complete Response Probability",
+      title = "Duration of Complete Response by ctDNA Tertile Before Therapy",
+      legend.title = "ctDNA Tertile",
+      legend.labs = c("T1 (Lowest)", "T2", "T3 (Highest)"),
+      xlim = c(0, 36)
+    )
+    
+    p$plot
+  } else {
+    cat("Insufficient events for tertile analysis. Showing overall DCR curve instead.\n")
+    surv_fit_overall <- survfit(Surv(mfs_time / 30.44, mfs_event) ~ 1, data = outcomes)
+    p_overall <- ggsurvplot(
+      surv_fit_overall,
+      data = outcomes,
+      conf.int = TRUE,
+      xlab = "Time (months)",
+      ylab = "Duration of Complete Response Probability",
+      title = "Duration of Complete Response",
+      xlim = c(0, 36)
+    )
+    p_overall$plot
+  }
+} else {
+  cat("Insufficient sample size (n < 3) for tertile analysis.\n")
+}
+```
+
+```{r cox_model_tertiles_comparison, include=FALSE}
+# Cox model comparing ctDNA tertiles for DCR
+# Note: Tertile comparisons are now included in the main Cox model table above
+# This chunk is kept for backward compatibility but results are shown in ctDNA_prognosis_analysis
+if (nrow(outcomes) >= 3) {
+  # Create tertiles if not already created
+  if (!exists("outcomes_tertiles") || nrow(outcomes_tertiles) == 0) {
+    outcomes_tertiles <- outcomes %>%
+      mutate(
+        mfs_time_months = mfs_time / 30.44,
+        ctdna_tertile = ntile(ctdna_before_line_value, 3),
+        ctdna_tertile_label = case_when(
+          ctdna_tertile == 1 ~ "T1 (Lowest)",
+          ctdna_tertile == 2 ~ "T2",
+          ctdna_tertile == 3 ~ "T3 (Highest)"
+        )
+      )
+  }
+  
+  if (exists("outcomes_tertiles") && nrow(outcomes_tertiles) >= 3) {
+  # Fit Cox model with tertiles as factor (T1 as reference)
+  outcomes_tertiles_factor <- outcomes_tertiles %>%
+    mutate(
+      ctdna_tertile_factor = factor(ctdna_tertile_label, 
+                                      levels = c("T1 (Lowest)", "T2", "T3 (Highest)")),
+      therapy_line_grouped = case_when(
+        therapy_line == 1 ~ "1L",
+        therapy_line == 2 ~ "2L",
+        therapy_line == 3 ~ "3L",
+        therapy_line >= 4 ~ "4L+",
+        TRUE ~ as.character(therapy_line)
+      ),
+      therapy_line_factor = factor(therapy_line_grouped, levels = c("1L", "2L", "3L", "4L+"))
+    )
+  
+  # Unadjusted model
+  cox_model_tertiles_unadj <- coxph(Surv(mfs_time, mfs_event) ~ ctdna_tertile_factor, 
+                                     data = outcomes_tertiles_factor)
+  cox_summary_tertiles_unadj <- summary(cox_model_tertiles_unadj)
+  
+  # Adjusted model (for line of therapy)
+  cox_model_tertiles_adj <- coxph(Surv(mfs_time, mfs_event) ~ ctdna_tertile_factor + therapy_line_factor, 
+                                   data = outcomes_tertiles_factor)
+  cox_summary_tertiles_adj <- summary(cox_model_tertiles_adj)
+  
+  # Extract HRs and CIs for each tertile vs T1 (unadjusted)
+  hr_t2_unadj <- exp(cox_summary_tertiles_unadj$coefficients[1, "coef"])
+  hr_t2_unadj_lower <- cox_summary_tertiles_unadj$conf.int[1, "lower .95"]
+  hr_t2_unadj_upper <- cox_summary_tertiles_unadj$conf.int[1, "upper .95"]
+  p_t2_unadj <- cox_summary_tertiles_unadj$coefficients[1, "Pr(>|z|)"]
+  
+  hr_t3_unadj <- exp(cox_summary_tertiles_unadj$coefficients[2, "coef"])
+  hr_t3_unadj_lower <- cox_summary_tertiles_unadj$conf.int[2, "lower .95"]
+  hr_t3_unadj_upper <- cox_summary_tertiles_unadj$conf.int[2, "upper .95"]
+  p_t3_unadj <- cox_summary_tertiles_unadj$coefficients[2, "Pr(>|z|)"]
+  
+  # Extract HRs and CIs for each tertile vs T1 (adjusted)
+  # Find indices for tertile coefficients (they come after intercept if present)
+  tertile_idx_adj <- which(str_detect(rownames(cox_summary_tertiles_adj$coefficients), "ctdna_tertile_factor"))
+  hr_t2_adj <- exp(cox_summary_tertiles_adj$coefficients[tertile_idx_adj[1], "coef"])
+  hr_t2_adj_lower <- cox_summary_tertiles_adj$conf.int[tertile_idx_adj[1], "lower .95"]
+  hr_t2_adj_upper <- cox_summary_tertiles_adj$conf.int[tertile_idx_adj[1], "upper .95"]
+  p_t2_adj <- cox_summary_tertiles_adj$coefficients[tertile_idx_adj[1], "Pr(>|z|)"]
+  
+  hr_t3_adj <- exp(cox_summary_tertiles_adj$coefficients[tertile_idx_adj[2], "coef"])
+  hr_t3_adj_lower <- cox_summary_tertiles_adj$conf.int[tertile_idx_adj[2], "lower .95"]
+  hr_t3_adj_upper <- cox_summary_tertiles_adj$conf.int[tertile_idx_adj[2], "upper .95"]
+  p_t3_adj <- cox_summary_tertiles_adj$coefficients[tertile_idx_adj[2], "Pr(>|z|)"]
+  
+  # Create comparison table
+  tertile_comparisons <- tibble(
+    `Comparison` = c("T2 vs T1 (Unadjusted)", "T3 vs T1 (Unadjusted)", 
+                      "T2 vs T1 (Adjusted for line of therapy)", "T3 vs T1 (Adjusted for line of therapy)"),
+    `HR (95% CI)` = c(
+      paste0(round(hr_t2_unadj, 2), " (", round(hr_t2_unadj_lower, 2), "-", round(hr_t2_unadj_upper, 2), ")"),
+      paste0(round(hr_t3_unadj, 2), " (", round(hr_t3_unadj_lower, 2), "-", round(hr_t3_unadj_upper, 2), ")"),
+      paste0(round(hr_t2_adj, 2), " (", round(hr_t2_adj_lower, 2), "-", round(hr_t2_adj_upper, 2), ")"),
+      paste0(round(hr_t3_adj, 2), " (", round(hr_t3_adj_lower, 2), "-", round(hr_t3_adj_upper, 2), ")")
+    ),
+    `P-value` = c(
+      ifelse(p_t2_unadj < 0.001, "<0.001", as.character(round(p_t2_unadj, 3))),
+      ifelse(p_t3_unadj < 0.001, "<0.001", as.character(round(p_t3_unadj, 3))),
+      ifelse(p_t2_adj < 0.001, "<0.001", as.character(round(p_t2_adj, 3))),
+      ifelse(p_t3_adj < 0.001, "<0.001", as.character(round(p_t3_adj, 3)))
+    )
+  )
+  
+  # Note: Tertile comparisons are now shown in the main Cox model table
+  # This section is kept for diagnostic purposes
+  cat("Tertile comparisons are included in the main Cox model table above.\n")
+  
+  # Overall test for trend
+  cat("\n**Overall Test for Trend (Unadjusted):**\n")
+  overall_p_unadj <- cox_summary_tertiles_unadj$sctest["pvalue"]
+  cat("Wald test p-value:", 
+      ifelse(overall_p_unadj < 0.001, 
+             "<0.001", 
+             round(overall_p_unadj, 3)), "\n")
+  
+  cat("\n**Overall Test for Trend (Adjusted for line of therapy):**\n")
+  overall_p_adj <- cox_summary_tertiles_adj$sctest["pvalue"]
+  cat("Wald test p-value:", 
+      ifelse(overall_p_adj < 0.001, 
+             "<0.001", 
+             round(overall_p_adj, 3)), "\n")
+  
+  } else {
+    cat("Insufficient data for tertile Cox model comparisons.\n")
+  }
+} else {
+  cat("Insufficient sample size (n < 3) for tertile Cox model comparisons.\n")
+}
+```
+
+```{r pairwise_tertile_comparisons}
+# Pairwise comparisons between tertiles using Cox models
+if (exists("outcomes_tertiles") && nrow(outcomes_tertiles) >= 3) {
+  # Fit Cox model with tertiles as factor (T1 as reference)
+  outcomes_tertiles_factor <- outcomes_tertiles %>%
+    mutate(
+      ctdna_tertile_factor = factor(ctdna_tertile_label, 
+                                      levels = c("T1 (Lowest)", "T2", "T3 (Highest)"))
+    )
+  
+  cox_model_tertiles <- coxph(Surv(mfs_time, mfs_event) ~ ctdna_tertile_factor, 
+                                data = outcomes_tertiles_factor)
+  cox_summary_tertiles <- summary(cox_model_tertiles)
+  
+  # Extract HRs and CIs for each tertile vs T1
+  hr_t2 <- exp(cox_summary_tertiles$coefficients[1, "coef"])
+  hr_t2_lower <- cox_summary_tertiles$conf.int[1, "lower .95"]
+  hr_t2_upper <- cox_summary_tertiles$conf.int[1, "upper .95"]
+  p_t2 <- cox_summary_tertiles$coefficients[1, "Pr(>|z|)"]
+  
+  hr_t3 <- exp(cox_summary_tertiles$coefficients[2, "coef"])
+  hr_t3_lower <- cox_summary_tertiles$conf.int[2, "lower .95"]
+  hr_t3_upper <- cox_summary_tertiles$conf.int[2, "upper .95"]
+  p_t3 <- cox_summary_tertiles$coefficients[2, "Pr(>|z|)"]
+  
+  tertile_comparisons <- tibble(
+    `Comparison` = c("T2 vs T1", "T3 vs T1"),
+    `HR (95% CI)` = c(
+      paste0(round(hr_t2, 2), " (", round(hr_t2_lower, 2), "-", round(hr_t2_upper, 2), ")"),
+      paste0(round(hr_t3, 2), " (", round(hr_t3_lower, 2), "-", round(hr_t3_upper, 2), ")")
+    ),
+    `P-value` = c(
+      ifelse(p_t2 < 0.001, "<0.001", round(p_t2, 3)),
+      ifelse(p_t3 < 0.001, "<0.001", round(p_t3, 3))
+    )
+  )
+  
+  # Also do pairwise log-rank tests
+  pairwise_logrank <- tryCatch(
+    pairwise_survdiff(Surv(mfs_time, mfs_event) ~ ctdna_tertile_label, 
+                      data = outcomes_tertiles),
+    error = function(e) NULL
+  )
+  
+  # Create pairwise comparison table with log-rank p-values
+  if (!is.null(pairwise_logrank) && !is.null(pairwise_logrank$p.value)) {
+    pval_matrix <- pairwise_logrank$p.value
+    # Extract p-values safely - check matrix dimensions
+    n_rows <- nrow(pval_matrix)
+    n_cols <- ncol(pval_matrix)
+    
+    # Get p-values for T2, T3 vs T1 (row 1, columns 2, 3)
+    pval_t2 <- if (n_rows >= 1 && n_cols >= 2 && !is.na(pval_matrix[1, 2])) {
+      if (pval_matrix[1, 2] < 0.001) "<0.001" else as.character(round(pval_matrix[1, 2], 3))
+    } else "N/A"
+    pval_t3 <- if (n_rows >= 1 && n_cols >= 3 && !is.na(pval_matrix[1, 3])) {
+      if (pval_matrix[1, 3] < 0.001) "<0.001" else as.character(round(pval_matrix[1, 3], 3))
+    } else "N/A"
+    
+    pairwise_table <- tertile_comparisons %>%
+      mutate(`Log-rank P-value` = c(pval_t2, pval_t3))
+  } else {
+    pairwise_table <- tertile_comparisons %>%
+      mutate(`Log-rank P-value` = c("N/A", "N/A"))
+  }
+  
+  pairwise_table_display <- pairwise_table %>%
+    kable(caption = "Pairwise Comparisons: ctDNA Tertiles vs. T1 (Lowest)") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  
+  pairwise_table_display
+  
+  # Overall test for trend
+  cat("\n**Overall Test for Trend:**\n")
+  overall_p <- cox_summary_tertiles$sctest["pvalue"]
+  cat("Wald test p-value:", 
+      ifelse(overall_p < 0.001, 
+             "<0.001", 
+             round(overall_p, 3)), "\n")
+  
+} else {
+  cat("Insufficient data for pairwise tertile comparisons.\n")
+}
+```
+
+```{r sensitivity_analysis_censored_as_events}
+# Sensitivity Analysis: Treat censored observations as events (worst-case scenario)
+# This addresses the question: "What if all censored patients had events?"
+
+outcomes_sensitivity <- outcomes %>%
+  mutate(
+    mfs_event_sensitivity = 1,  # Treat all as events
+    mfs_time_sensitivity = mfs_time  # Keep same time
+  )
+
+# Cox model treating all censored as events
+outcomes_sensitivity <- outcomes_sensitivity %>%
+  mutate(
+    therapy_line_grouped = case_when(
+      therapy_line == 1 ~ "1L",
+      therapy_line == 2 ~ "2L",
+      therapy_line == 3 ~ "3L",
+      therapy_line >= 4 ~ "4L+",
+      TRUE ~ as.character(therapy_line)
+    ),
+    therapy_line_factor = factor(therapy_line_grouped, levels = c("1L", "2L", "3L", "4L+"))
+  )
+
+cox_model_sensitivity <- coxph(Surv(mfs_time_sensitivity, mfs_event_sensitivity) ~ log(ctdna_before_line_value + 1) + therapy_line_factor,
+                                data = outcomes_sensitivity)
+cox_summary_sensitivity <- summary(cox_model_sensitivity)
+
+# Extract HR and CI for sensitivity analysis
+hr_sens_value <- exp(cox_summary_sensitivity$coefficients[1, "coef"])
+hr_sens_lower <- cox_summary_sensitivity$conf.int[1, "lower .95"]
+hr_sens_upper <- cox_summary_sensitivity$conf.int[1, "upper .95"]
+
+# Compare results
+sensitivity_comparison <- tibble(
+  `Analysis` = c("Standard (Censored)", "Sensitivity (All Events)"),
+  `HR (95% CI)` = c(
+    paste0(
+      round(hr_value, 2),
+      " (",
+      round(hr_lower, 2),
+      "-",
+      round(hr_upper, 2),
+      ")"
+    ),
+    paste0(
+      round(hr_sens_value, 2),
+      " (",
+      round(hr_sens_lower, 2),
+      "-",
+      round(hr_sens_upper, 2),
+      ")"
+    )
+  ),
+  `P-value` = c(
+    ifelse(cox_summary$coefficients[1, "Pr(>|z|)"] < 0.001, 
+           "<0.001", 
+           round(cox_summary$coefficients[1, "Pr(>|z|)"], 3)),
+    ifelse(cox_summary_sensitivity$coefficients[1, "Pr(>|z|)"] < 0.001, 
+           "<0.001", 
+           round(cox_summary_sensitivity$coefficients[1, "Pr(>|z|)"], 3))
+  ),
+    `N Events` = c(
+    sum(outcomes$mfs_event, na.rm = TRUE),
+    nrow(outcomes_sensitivity)
+  )
+) %>%
+  kable(caption = "Sensitivity Analysis: Treating Censored Observations as Events (Worst-Case Scenario)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+
+sensitivity_comparison
+
+cat("\n**Note:** This sensitivity analysis assumes all censored patients had events at their censoring time.\n")
+cat("This provides a worst-case scenario to assess robustness of findings.\n")
+```
+
+```{r continuous_association_plot}
+# Scatter plot: ctDNA vs PFS time (with events colored)
+# Calculate median for reference line
+median_log_ctdna <- log(median(outcomes$ctdna_before_line_value, na.rm = TRUE) + 1)
+
+# Get range of log(ctDNA+1) values for better axis breaks
+log_ctdna_range <- range(log(outcomes$ctdna_before_line_value + 1), na.rm = TRUE)
+log_ctdna_min <- floor(log_ctdna_range[1])
+log_ctdna_max <- ceiling(log_ctdna_range[2])
+
+# Create custom breaks for X axis
+x_breaks <- seq(log_ctdna_min, log_ctdna_max, by = 0.5)
+# Ensure median is included if not already in breaks
+if (!any(abs(x_breaks - median_log_ctdna) < 0.1)) {
+  x_breaks <- sort(c(x_breaks, median_log_ctdna))
+}
+
+p_scatter <- outcomes %>%
+  mutate(mfs_time_months = mfs_time / 30.44) %>%
+  ggplot(aes(x = mfs_time_months, y = log(ctdna_before_line_value + 1), color = factor(mfs_event))) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  geom_hline(yintercept = median_log_ctdna, linetype = "dashed", color = "gray50", size = 0.8) +
+  annotate("text", x = max(outcomes$mfs_time / 30.44, na.rm = TRUE) * 0.95, y = median_log_ctdna,
+           label = paste0("Median\n", round(median_log_ctdna, 2)),
+           hjust = 1, vjust = -0.1, size = 3, color = "gray30") +
+  scale_x_continuous(
+    expand = expansion(mult = c(0.05, 0.03)),
+    limits = c(-1, NA)  # Start slightly before 0 to see dots better
+  ) +
+  scale_y_continuous(
+    limits = c(-0.2, NA),  # Start slightly before 0 to see dots better
+    breaks = x_breaks,
+    labels = round(x_breaks, 2),
+    expand = expansion(mult = c(0.05, 0.03))
+  ) +
+  scale_color_manual(values = c("0" = "blue", "1" = "red"), 
+                     labels = c("0" = "Censored", "1" = "Event"),
+                     name = "Status") +
+  labs(
+    x = "Duration of Complete Response (months)",
+    y = "Ln(ctDNA + 1) Before Therapy",
+    title = "Association between ctDNA Level Before Therapy and Duration of Complete Response"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1))
+
+p_scatter
+```
+
+## Research Question 2
+
+**What is the association between early on-treatment ctDNA response (cleared vs not cleared) at 6-16 weeks after therapy initiation and subsequent duration of complete response?**
+
+This analysis examines whether early ctDNA clearance (within 6-16 weeks after starting therapy) is associated with improved duration of complete response. The landmark analysis uses the latest ctDNA measurement available within the 6-16 week window to assess clearance status, and analyzes duration of complete response from that landmark time point forward. **Note:** Only alive patients require imaging data for inclusion (to determine complete response status, similar to RECIST CR). Patients who died do NOT require imaging data (death is an event).
+
+```{r landmark_analysis_early_response, include=FALSE}
+# ====================================================================================
+# LANDMARK ANALYSIS: Early On-Treatment ctDNA Response
+# ====================================================================================
+# This analysis examines the significance of early on-treatment ctDNA response
+# at a landmark time point (e.g., 6-12 weeks after therapy start)
+# 
+# Approach:
+# 1. For each patient-line observation, find ctDNA before therapy (baseline)
+# 2. Find LATEST on-treatment ctDNA within landmark window (6-16 weeks) for response assessment
+# 3. Determine clearance status (binary: cleared vs not cleared) at landmark time
+# 4. Perform landmark analysis: only include patients who survived to landmark
+# 5. Compare survival from landmark time point between cleared and not cleared groups
+# ====================================================================================
+
+# Define landmark window: 6-16 weeks after therapy start
+landmark_window_start_weeks <- 6
+landmark_window_end_weeks <- 16
+landmark_window_start_days <- landmark_window_start_weeks * 7
+landmark_window_end_days <- landmark_window_end_weeks * 7
+
+# For each patient-line observation, get baseline ctDNA (already have this from universe)
+# and find on-treatment ctDNA within landmark window
+landmark_data <- outcomes %>%
+  select(patient_id, therapy_line, time_zero_date, ctdna_before_line_date, 
+         ctdna_before_line_value, mfs_time, mfs_event) %>%
+  # Get on-treatment ctDNA measurements
+  left_join(
+    ctdna_long %>%
+      select(patient_id, ctdna_date, ctdna_value),
+    by = "patient_id"
+  ) %>%
+  mutate(
+    # Calculate days from therapy start to on-treatment ctDNA
+    days_from_therapy_start = as.numeric(ctdna_date - time_zero_date),
+    # Check if on-treatment ctDNA is within landmark window (6-16 weeks)
+    in_landmark_window = days_from_therapy_start >= landmark_window_start_days & 
+                         days_from_therapy_start <= landmark_window_end_days
+  ) %>%
+  filter(in_landmark_window) %>%
+  # For each patient-line, take the LATEST on-treatment ctDNA in the window (for response assessment)
+  arrange(patient_id, therapy_line, desc(days_from_therapy_start)) %>%
+  group_by(patient_id, therapy_line) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  mutate(
+    # Calculate % decline from baseline
+    baseline_ctdna = ctdna_before_line_value,
+    on_tx_ctdna = ctdna_value,
+    # % decline = (baseline - on_tx) / baseline * 100
+    # Handle case where baseline = 0 (use absolute change instead)
+    pct_decline = case_when(
+      baseline_ctdna > 0 ~ ((baseline_ctdna - on_tx_ctdna) / baseline_ctdna) * 100,
+      baseline_ctdna == 0 & on_tx_ctdna == 0 ~ 0,  # Both 0 = no change
+      baseline_ctdna == 0 & on_tx_ctdna > 0 ~ -Inf,  # New positive = increase
+      TRUE ~ NA_real_
+    ),
+    # Binary clearance: ctDNA cleared at landmark time (on_tx = 0 and baseline > 0)
+    ctdna_cleared_at_landmark = case_when(
+      baseline_ctdna > 0 & on_tx_ctdna == 0 ~ TRUE,
+      baseline_ctdna > 0 & on_tx_ctdna > 0 ~ FALSE,
+      baseline_ctdna == 0 ~ NA,  # Can't clear if already negative
+      TRUE ~ NA
+    ),
+    # Response categories based on % decline
+    response_category = case_when(
+      ctdna_cleared_at_landmark == TRUE ~ "Cleared (100% decline)",
+      pct_decline >= 50 ~ "Major Response (≥50% decline)",
+      pct_decline >= 0 & pct_decline < 50 ~ "Minor Response (0-50% decline)",
+      pct_decline < 0 ~ "Progression (increase)",
+      TRUE ~ "Unknown"
+    ),
+    # Landmark time point: use the actual ctDNA measurement time within 6-16 weeks
+    landmark_time = days_from_therapy_start
+  ) %>%
+  select(patient_id, therapy_line, time_zero_date, landmark_time,
+         baseline_ctdna, on_tx_ctdna, pct_decline, ctdna_cleared_at_landmark, response_category)
+
+# Now perform landmark analysis: only include patients who survived to landmark
+# and calculate survival from landmark time point
+landmark_outcomes <- landmark_data %>%
+  left_join(
+    outcomes %>% 
+      select(patient_id, therapy_line, mfs_time, mfs_event, time_zero_date, imaging_disease_present),
+    by = c("patient_id", "therapy_line", "time_zero_date")
+  ) %>%
+  left_join(
+    dat_combined %>%
+      select(patient_id, all_of(c(death_date_cols, alive_cols))),
+    by = "patient_id"
+  ) %>%
+  mutate(
+    death_date = if (length(death_date_cols) > 0) {
+      as_date_safe(.data[[death_date_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    alive_status = if (length(alive_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_
+      )
+    } else {
+      NA_character_
+    },
+    # Only include patients who survived to landmark (mfs_time >= landmark_time)
+    survived_to_landmark = mfs_time >= landmark_time,
+    # Survival time from landmark = mfs_time - landmark_time
+    mfs_time_from_landmark = mfs_time - landmark_time,
+    # Event status remains the same (if they had event, it's still an event)
+    mfs_event_from_landmark = mfs_event,
+    # Determine if imaging data is required (only for alive patients)
+    imaging_required = case_when(
+      !is.na(death_date) ~ FALSE,  # Dead patients don't need imaging
+      alive_status == "No" ~ FALSE,  # Deceased patients don't need imaging
+      alive_status == "Yes" ~ TRUE,  # Alive patients need imaging
+      TRUE ~ TRUE  # Default: require imaging if status unknown
+    )
+  ) %>%
+  # Filter: require valid survival time
+  # For imaging: only exclude if patient is alive AND imaging is missing
+  filter(survived_to_landmark, mfs_time_from_landmark > 0,
+         !(imaging_required == TRUE & is.na(imaging_disease_present)))
+  
+# Track overall landmark events to enable fallback plotting if no post-landmark events by group
+landmark_has_events <- sum(landmark_outcomes$mfs_event_from_landmark, na.rm = TRUE) > 0
+
+cat("Landmark analysis: Early on-treatment ctDNA response\n")
+cat("Landmark window: 6-16 weeks after therapy start\n")
+cat("Response assessment: Uses LATEST ctDNA measurement available within 6-16 week window\n")
+cat("Patients with on-treatment ctDNA in landmark window:", nrow(landmark_data), "\n")
+cat("Patients who survived to their landmark time:", nrow(landmark_outcomes), "\n")
+if (exists("landmark_outcomes") && nrow(landmark_outcomes) > 0) {
+  cat("Landmark time distribution (weeks from therapy start):\n")
+  cat("  Min:", round(min(landmark_outcomes$landmark_time, na.rm = TRUE) / 7, 1), 
+      "Median:", round(median(landmark_outcomes$landmark_time, na.rm = TRUE) / 7, 1),
+      "Max:", round(max(landmark_outcomes$landmark_time, na.rm = TRUE) / 7, 1), "\n")
+  cat("MFS time distribution (days from therapy start):\n")
+  cat("  Min:", round(min(landmark_outcomes$mfs_time, na.rm = TRUE), 1),
+      "Median:", round(median(landmark_outcomes$mfs_time, na.rm = TRUE), 1),
+      "Max:", round(max(landmark_outcomes$mfs_time, na.rm = TRUE), 1), "\n")
+  cat("MFS time from landmark distribution (days):\n")
+  cat("  Min:", round(min(landmark_outcomes$mfs_time_from_landmark, na.rm = TRUE), 1),
+      "Median:", round(median(landmark_outcomes$mfs_time_from_landmark, na.rm = TRUE), 1),
+      "Max:", round(max(landmark_outcomes$mfs_time_from_landmark, na.rm = TRUE), 1), "\n")
+  cat("Total events after landmark:", sum(landmark_outcomes$mfs_event_from_landmark, na.rm = TRUE), "\n")
+  cat("Events before landmark (excluded):", sum(landmark_outcomes$mfs_time < landmark_outcomes$landmark_time, na.rm = TRUE), "\n")
+}
+```
+
+```{r immortal_time_bias_explanation}
+# Explanation of how landmark analysis addresses immortal time bias
+cat("## Addressing Immortal Time Bias\n\n")
+cat("**Immortal time bias** occurs when patients must survive to a certain time to be classified into a group, artificially inflating survival. **Landmark analysis addresses this** by: (1) determining clearance status at the landmark time point (ctDNA measurement date within 6-16 weeks), not requiring survival to a later time; (2) analyzing survival FROM the landmark forward (time 0 = landmark time, not therapy start); and (3) including only patients who survived to landmark, ensuring equal opportunity for classification.\n\n")
+```
+
+```{r landmark_time_distribution_table}
+# Show landmark time distribution by clearance status to demonstrate similar landmark times
+if (exists("landmark_outcomes") && nrow(landmark_outcomes) > 0) {
+  landmark_time_by_clearance <- landmark_outcomes %>%
+    filter(!is.na(ctdna_cleared_at_landmark)) %>%
+    mutate(landmark_time_weeks = landmark_time / 7) %>%
+    group_by(ctdna_cleared_at_landmark) %>%
+    summarise(
+      n = n(),
+      median_landmark_weeks = round(median(landmark_time_weeks, na.rm = TRUE), 1),
+      iqr_lower = round(quantile(landmark_time_weeks, 0.25, na.rm = TRUE), 1),
+      iqr_upper = round(quantile(landmark_time_weeks, 0.75, na.rm = TRUE), 1),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      clearance_status = ifelse(ctdna_cleared_at_landmark, "Cleared at Landmark", "Not Cleared at Landmark"),
+      landmark_time_iqr = paste0(median_landmark_weeks, " (", iqr_lower, "-", iqr_upper, ")")
+    ) %>%
+    select(`Clearance Status` = clearance_status, `N` = n, `Landmark Time (weeks, median IQR)` = landmark_time_iqr)
+  
+  if (nrow(landmark_time_by_clearance) > 0) {
+    landmark_time_by_clearance %>%
+      kable(caption = "Landmark Time Distribution (weeks) by ctDNA Clearance Status (demonstrating similar landmark times across groups)") %>%
+      kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  } else {
+    cat("Insufficient data to create landmark time distribution table.\n")
+  }
+} else {
+  cat("Landmark outcomes data not available.\n")
+}
+```
+
+```{r landmark_analysis_results}
+# Display landmark analysis results
+if (exists("landmark_outcomes") && nrow(landmark_outcomes) > 0) {
+  # Summary of response categories
+  response_summary_table <- landmark_outcomes %>%
+    count(response_category) %>%
+    mutate(Percentage = round(n / sum(n) * 100, 1)) %>%
+    rename(`Response Category` = response_category, `N` = n) %>%
+    kable(caption = "Distribution of Early On-Treatment ctDNA Response (Landmark = ctDNA between 6-16 weeks after start)") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  
+  response_summary_table
+  
+  # Initialize variables
+  hr_cleared <- hr_cleared_lower <- hr_cleared_upper <- p_cleared <- NA
+  landmark_outcomes_cleared <- NULL
+  landmark_results <- NULL
+  
+  # Create results table - unadjusted and adjusted models
+  table_rows <- list()
+  
+  # Cox model: ctDNA Cleared at Landmark vs Not Cleared
+  if (sum(!is.na(landmark_outcomes$ctdna_cleared_at_landmark)) > 10) {
+    landmark_outcomes_cleared <- landmark_outcomes %>%
+      filter(!is.na(ctdna_cleared_at_landmark)) %>%
+      mutate(
+        therapy_line_grouped = case_when(
+          therapy_line == 1 ~ "1L",
+          therapy_line == 2 ~ "2L",
+          therapy_line == 3 ~ "3L",
+          therapy_line >= 4 ~ "4L+",
+          TRUE ~ as.character(therapy_line)
+        ),
+        therapy_line_factor = factor(therapy_line_grouped, levels = c("1L", "2L", "3L", "4L+"))
+      )
+    
+    # Unadjusted Cox model (matches log-rank test from survival curve)
+    cox_cleared_unadj <- tryCatch({
+      coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ ctdna_cleared_at_landmark,
+            data = landmark_outcomes_cleared)
+    }, error = function(e) NULL)
+    
+    # Join therapy class if available
+    if (exists("palliative_regimen_table") && nrow(palliative_regimen_table) > 0) {
+      landmark_outcomes_cleared <- landmark_outcomes_cleared %>%
+        left_join(
+          palliative_regimen_table %>%
+            mutate(therapy_line_match = ifelse(is.na(therapy_line_match), NA_integer_, therapy_line_match)) %>%
+            select(patient_id, therapy_line_match, therapy_class) %>%
+            distinct(),
+          by = c("patient_id", "therapy_line" = "therapy_line_match")
+        ) %>%
+        mutate(
+          therapy_class = replace_na(therapy_class, "unspecified"),
+          therapy_class_factor = factor(therapy_class)
+        )
+    } else {
+      landmark_outcomes_cleared <- landmark_outcomes_cleared %>%
+        mutate(
+          therapy_class = "unspecified",
+          therapy_class_factor = factor("unspecified")
+        )
+    }
+    
+    # Join Bajorin risk factors if available
+    if (exists("bajorin_data") && nrow(bajorin_data) > 0) {
+      landmark_outcomes_cleared <- landmark_outcomes_cleared %>%
+        left_join(
+          bajorin_data %>% select(patient_id, therapy_line, kps_binary, visceral_mets_binary),
+          by = c("patient_id", "therapy_line")
+        ) %>%
+        mutate(
+          kps_factor = factor(kps_binary, levels = c(0, 1), labels = c("KPS <80%", "KPS ≥80%")),
+          visceral_mets_factor = factor(visceral_mets_binary, levels = c(0, 1), labels = c("No Visceral Mets", "Visceral Mets"))
+        )
+    } else {
+      landmark_outcomes_cleared <- landmark_outcomes_cleared %>%
+        mutate(
+          kps_binary = NA_real_,
+          visceral_mets_binary = NA_real_,
+          kps_factor = factor(NA, levels = c(0, 1), labels = c("KPS <80%", "KPS ≥80%")),
+          visceral_mets_factor = factor(NA, levels = c(0, 1), labels = c("No Visceral Mets", "Visceral Mets"))
+        )
+    }
+    
+    # Adjusted Cox model (adjusted for line of therapy and therapy class)
+    cox_cleared <- tryCatch({
+      coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ ctdna_cleared_at_landmark + therapy_line_factor + therapy_class_factor,
+            data = landmark_outcomes_cleared)
+    }, error = function(e) NULL)
+    
+    # Multivariate Cox model (adjusted for line of therapy + Bajorin risk factors)
+    if (sum(!is.na(landmark_outcomes_cleared$kps_binary)) > 0 && 
+        sum(!is.na(landmark_outcomes_cleared$visceral_mets_binary)) > 0) {
+      landmark_outcomes_multiv <- landmark_outcomes_cleared %>%
+        filter(!is.na(kps_binary), !is.na(visceral_mets_binary))
+      
+      if (nrow(landmark_outcomes_multiv) > 0) {
+        cox_cleared_multiv <- tryCatch({
+          coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ 
+                ctdna_cleared_at_landmark + therapy_line_factor + therapy_class_factor + kps_factor + visceral_mets_factor,
+                data = landmark_outcomes_multiv)
+        }, error = function(e) NULL)
+      } else {
+        cox_cleared_multiv <- NULL
+      }
+    } else {
+      cox_cleared_multiv <- NULL
+    }
+    
+    # Add unadjusted model for comparison (should match log-rank test) - FIRST
+    if (!is.null(cox_cleared_unadj)) {
+      model_converged_unadj <- tryCatch({
+        isTRUE(cox_cleared_unadj$converged)
+      }, error = function(e) FALSE)
+      
+      if (model_converged_unadj) {
+        cox_cleared_unadj_summary <- summary(cox_cleared_unadj)
+        hr_cleared_unadj <- cox_cleared_unadj_summary$conf.int[1, "exp(coef)"]
+        hr_cleared_unadj_lower <- cox_cleared_unadj_summary$conf.int[1, "lower .95"]
+        hr_cleared_unadj_upper <- cox_cleared_unadj_summary$conf.int[1, "upper .95"]
+        p_cleared_unadj <- cox_cleared_unadj_summary$coefficients[1, "Pr(>|z|)"]
+        
+        # Check for reasonable HR values (not 0, Inf, or extremely large)
+        if (!is.na(hr_cleared_unadj) && is.finite(hr_cleared_unadj) && hr_cleared_unadj > 0 && hr_cleared_unadj < 1e10 &&
+            !is.na(hr_cleared_unadj_lower) && is.finite(hr_cleared_unadj_lower) &&
+            !is.na(hr_cleared_unadj_upper) && is.finite(hr_cleared_unadj_upper)) {
+          table_rows[[length(table_rows) + 1]] <- tibble(
+            `Variable` = "ctDNA Cleared at Landmark vs Not Cleared (Unadjusted)",
+            `HR (95% CI)` = paste0(round(hr_cleared_unadj, 2), " (", round(hr_cleared_unadj_lower, 2), "-", round(hr_cleared_unadj_upper, 2), ")"),
+            `P-value` = ifelse(p_cleared_unadj < 0.001, "<0.001", as.character(round(p_cleared_unadj, 3))),
+            `N` = nrow(landmark_outcomes_cleared)
+          )
+        }
+      }
+    }
+    
+    if (!is.null(cox_cleared)) {
+      model_converged_adj <- tryCatch({
+        isTRUE(cox_cleared$converged)
+      }, error = function(e) FALSE)
+      
+      if (model_converged_adj) {
+        cox_cleared_summary <- summary(cox_cleared)
+        hr_cleared <- cox_cleared_summary$conf.int[1, "exp(coef)"]
+        hr_cleared_lower <- cox_cleared_summary$conf.int[1, "lower .95"]
+        hr_cleared_upper <- cox_cleared_summary$conf.int[1, "upper .95"]
+        p_cleared <- cox_cleared_summary$coefficients[1, "Pr(>|z|)"]
+        
+        # Check for reasonable HR values
+        if (!is.na(hr_cleared) && is.finite(hr_cleared) && hr_cleared > 0 && hr_cleared < 1e10 &&
+            !is.na(hr_cleared_lower) && is.finite(hr_cleared_lower) &&
+            !is.na(hr_cleared_upper) && is.finite(hr_cleared_upper)) {
+          table_rows[[length(table_rows) + 1]] <- tibble(
+            `Variable` = "ctDNA Cleared at Landmark vs Not Cleared (Adjusted for line of therapy and therapy class)",
+            `HR (95% CI)` = paste0(round(hr_cleared, 2), " (", round(hr_cleared_lower, 2), "-", round(hr_cleared_upper, 2), ")"),
+            `P-value` = ifelse(p_cleared < 0.001, "<0.001", as.character(round(p_cleared, 3))),
+            `N` = nrow(landmark_outcomes_cleared)
+          )
+        }
+      }
+    }
+    
+    # Add multivariate model (adjusted for line of therapy + Bajorin risk factors) - LAST
+    if (!is.null(cox_cleared_multiv)) {
+      model_converged <- tryCatch({
+        isTRUE(cox_cleared_multiv$converged)
+      }, error = function(e) FALSE)
+      
+      if (model_converged) {
+        cox_cleared_multiv_summary <- summary(cox_cleared_multiv)
+        hr_cleared_multiv <- cox_cleared_multiv_summary$conf.int[1, "exp(coef)"]
+        hr_cleared_multiv_lower <- cox_cleared_multiv_summary$conf.int[1, "lower .95"]
+        hr_cleared_multiv_upper <- cox_cleared_multiv_summary$conf.int[1, "upper .95"]
+        p_cleared_multiv <- cox_cleared_multiv_summary$coefficients[1, "Pr(>|z|)"]
+        
+        # Check for reasonable HR values (not 0, Inf, or extremely large)
+        if (!is.na(hr_cleared_multiv) && is.finite(hr_cleared_multiv) && hr_cleared_multiv > 0 && hr_cleared_multiv < 1e10 &&
+            !is.na(hr_cleared_multiv_lower) && is.finite(hr_cleared_multiv_lower) &&
+            !is.na(hr_cleared_multiv_upper) && is.finite(hr_cleared_multiv_upper)) {
+          table_rows[[length(table_rows) + 1]] <- tibble(
+            `Variable` = "ctDNA Cleared at Landmark vs Not Cleared (Adjusted for line of therapy, therapy class, KPS, and visceral metastases)",
+            `HR (95% CI)` = paste0(round(hr_cleared_multiv, 2), " (", round(hr_cleared_multiv_lower, 2), "-", round(hr_cleared_multiv_upper, 2), ")"),
+            `P-value` = ifelse(p_cleared_multiv < 0.001, "<0.001", as.character(round(p_cleared_multiv, 3))),
+            `N` = nrow(landmark_outcomes_multiv)
+          )
+        } else {
+          # Model converged but HR values are extreme - likely due to small sample size or separation
+          cat("Note: Multivariate model converged but HR values are extreme (likely due to small sample size or complete separation). Model not included in results table.\n")
+        }
+      } else {
+        cat("Note: Multivariate model did not converge (likely due to small sample size or too many covariates). Model not included in results table.\n")
+      }
+    }
+  }
+  
+  # Create table if we have any valid models
+  if (length(table_rows) > 0) {
+    landmark_results <- bind_rows(table_rows) %>%
+      kable(caption = "Landmark Analysis: Early On-Treatment ctDNA Response and Duration of Complete Response from Landmark (ctDNA between 6-16 weeks). Unadjusted model p-value should match log-rank test from survival curve; adjusted models account for line of therapy, therapy class (ADC, ICI, Chemo, Targeted, Other, and combinations), and Bajorin risk factors (KPS and visceral metastases).") %>%
+      kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  } else {
+    landmark_results <- NULL
+  }
+  
+  # Create detailed multivariate results table for on-treatment analysis
+  # Only create if model converged and has reasonable HR values
+  if (!is.null(cox_cleared_multiv)) {
+    model_converged <- tryCatch({
+      isTRUE(cox_cleared_multiv$converged)
+    }, error = function(e) FALSE)
+    
+    if (model_converged) {
+      cox_cleared_multiv_summary <- summary(cox_cleared_multiv)
+      n_coef <- nrow(cox_cleared_multiv_summary$coefficients)
+      
+      # Build results as list first
+      multiv_landmark_results_list <- list()
+      
+      # Add ctDNA cleared coefficient
+      if (n_coef > 0) {
+        hr_val_cleared <- cox_cleared_multiv_summary$conf.int[1, "exp(coef)"]
+        hr_lower_cleared <- cox_cleared_multiv_summary$conf.int[1, "lower .95"]
+        hr_upper_cleared <- cox_cleared_multiv_summary$conf.int[1, "upper .95"]
+        p_val_cleared <- cox_cleared_multiv_summary$coefficients[1, "Pr(>|z|)"]
+        
+        # Only add if HR values are reasonable
+        if (!is.na(hr_val_cleared) && is.finite(hr_val_cleared) && hr_val_cleared > 0 && hr_val_cleared < 1e10 &&
+            !is.na(hr_lower_cleared) && is.finite(hr_lower_cleared) &&
+            !is.na(hr_upper_cleared) && is.finite(hr_upper_cleared)) {
+          multiv_landmark_results_list[[length(multiv_landmark_results_list) + 1]] <- tibble(
+            `Variable` = "ctDNA Cleared at Landmark vs Not Cleared",
+            `HR (95% CI)` = paste0(
+              round(hr_val_cleared, 2), " (",
+              round(hr_lower_cleared, 2), "-",
+              round(hr_upper_cleared, 2), ")"
+            ),
+            `P-value` = if (p_val_cleared < 0.001) "<0.001" else as.character(round(p_val_cleared, 3))
+          )
+        }
+      }
+      
+      # Add therapy line coefficients (with convergence checks)
+      therapy_line_idx <- which(str_detect(rownames(cox_cleared_multiv_summary$coefficients), "therapy_line_factor"))
+      if (length(therapy_line_idx) > 0) {
+        for (i in seq_along(therapy_line_idx)) {
+          idx <- therapy_line_idx[i]
+          if (idx <= nrow(cox_cleared_multiv_summary$conf.int) && i <= length(therapy_line_labels)) {
+            hr_val_line <- cox_cleared_multiv_summary$conf.int[idx, "exp(coef)"]
+            hr_lower_line <- cox_cleared_multiv_summary$conf.int[idx, "lower .95"]
+            hr_upper_line <- cox_cleared_multiv_summary$conf.int[idx, "upper .95"]
+            p_val_line <- cox_cleared_multiv_summary$coefficients[idx, "Pr(>|z|)"]
+            
+            # Only add if HR values are reasonable
+            if (!is.na(hr_val_line) && is.finite(hr_val_line) && hr_val_line > 0 && hr_val_line < 1e10 &&
+                !is.na(hr_lower_line) && is.finite(hr_lower_line) &&
+                !is.na(hr_upper_line) && is.finite(hr_upper_line)) {
+              multiv_landmark_results_list[[length(multiv_landmark_results_list) + 1]] <- tibble(
+                `Variable` = therapy_line_labels[i],
+                `HR (95% CI)` = paste0(
+                  round(hr_val_line, 2), " (",
+                  round(hr_lower_line, 2), "-",
+                  round(hr_upper_line, 2), ")"
+                ),
+                `P-value` = as.character(ifelse(p_val_line < 0.001, "<0.001", round(p_val_line, 3)))
+              )
+            }
+          }
+        }
+      }
+      
+      # Add KPS coefficient (with convergence checks)
+      kps_idx <- which(str_detect(rownames(cox_cleared_multiv_summary$coefficients), "kps_factor"))
+      if (length(kps_idx) > 0) {
+        idx <- kps_idx[1]
+        if (idx <= nrow(cox_cleared_multiv_summary$conf.int)) {
+          hr_val_kps <- cox_cleared_multiv_summary$conf.int[idx, "exp(coef)"]
+          hr_lower_kps <- cox_cleared_multiv_summary$conf.int[idx, "lower .95"]
+          hr_upper_kps <- cox_cleared_multiv_summary$conf.int[idx, "upper .95"]
+          p_val_kps <- cox_cleared_multiv_summary$coefficients[idx, "Pr(>|z|)"]
+          
+          # Only add if HR values are reasonable
+          if (!is.na(hr_val_kps) && is.finite(hr_val_kps) && hr_val_kps > 0 && hr_val_kps < 1e10 &&
+              !is.na(hr_lower_kps) && is.finite(hr_lower_kps) &&
+              !is.na(hr_upper_kps) && is.finite(hr_upper_kps)) {
+            multiv_landmark_results_list[[length(multiv_landmark_results_list) + 1]] <- tibble(
+              `Variable` = "KPS ≥80% vs <80%",
+              `HR (95% CI)` = paste0(
+                round(hr_val_kps, 2), " (",
+                round(hr_lower_kps, 2), "-",
+                round(hr_upper_kps, 2), ")"
+              ),
+              `P-value` = if (p_val_kps < 0.001) "<0.001" else as.character(round(p_val_kps, 3))
+            )
+          }
+        }
+      }
+      
+      # Add Visceral Metastases coefficient (with convergence checks)
+      visceral_idx <- which(str_detect(rownames(cox_cleared_multiv_summary$coefficients), "visceral_mets_factor"))
+      if (length(visceral_idx) > 0) {
+        idx <- visceral_idx[1]
+        if (idx <= nrow(cox_cleared_multiv_summary$conf.int)) {
+          hr_val_visceral <- cox_cleared_multiv_summary$conf.int[idx, "exp(coef)"]
+          hr_lower_visceral <- cox_cleared_multiv_summary$conf.int[idx, "lower .95"]
+          hr_upper_visceral <- cox_cleared_multiv_summary$conf.int[idx, "upper .95"]
+          p_val_visceral <- cox_cleared_multiv_summary$coefficients[idx, "Pr(>|z|)"]
+          
+          # Only add if HR values are reasonable
+          if (!is.na(hr_val_visceral) && is.finite(hr_val_visceral) && hr_val_visceral > 0 && hr_val_visceral < 1e10 &&
+              !is.na(hr_lower_visceral) && is.finite(hr_lower_visceral) &&
+              !is.na(hr_upper_visceral) && is.finite(hr_upper_visceral)) {
+            multiv_landmark_results_list[[length(multiv_landmark_results_list) + 1]] <- tibble(
+              `Variable` = "Visceral Mets vs No Visceral Mets",
+              `HR (95% CI)` = paste0(
+                round(hr_val_visceral, 2), " (",
+                round(hr_lower_visceral, 2), "-",
+                round(hr_upper_visceral, 2), ")"
+              ),
+              `P-value` = if (p_val_visceral < 0.001) "<0.001" else as.character(round(p_val_visceral, 3))
+            )
+          }
+        }
+      }
+      
+      # Add Therapy Class coefficients (with convergence checks)
+      therapy_class_idx <- which(str_detect(rownames(cox_cleared_multiv_summary$coefficients), "therapy_class_factor"))
+      if (length(therapy_class_idx) > 0) {
+        for (i in seq_along(therapy_class_idx)) {
+          idx <- therapy_class_idx[i]
+          if (idx <= nrow(cox_cleared_multiv_summary$conf.int)) {
+            term_name <- rownames(cox_cleared_multiv_summary$coefficients)[idx]
+            class_name <- str_replace(term_name, "therapy_class_factor", "")
+            p_val_class <- cox_cleared_multiv_summary$coefficients[idx, "Pr(>|z|)"]
+            hr_val <- cox_cleared_multiv_summary$conf.int[idx, "exp(coef)"]
+            ci_lower <- cox_cleared_multiv_summary$conf.int[idx, "lower .95"]
+            ci_upper <- cox_cleared_multiv_summary$conf.int[idx, "upper .95"]
+            
+            # Only add if HR values are reasonable
+            if (!is.na(hr_val) && is.finite(hr_val) && hr_val > 0 && hr_val < 1e10 &&
+                !is.na(ci_lower) && is.finite(ci_lower) &&
+                !is.na(ci_upper) && is.finite(ci_upper)) {
+              p_val_text <- if (is.na(p_val_class)) {
+                "NA"
+              } else if (p_val_class < 0.001) {
+                "<0.001"
+              } else {
+                as.character(round(p_val_class, 3))
+              }
+              
+              multiv_landmark_results_list[[length(multiv_landmark_results_list) + 1]] <- tibble(
+                `Variable` = paste0("Therapy Class: ", class_name, " vs reference"),
+                `HR (95% CI)` = paste0(
+                  round(hr_val, 2), " (",
+                  round(ci_lower, 2), "-",
+                  round(ci_upper, 2), ")"
+                ),
+                `P-value` = p_val_text
+              )
+            }
+          }
+        }
+      }
+      
+      # Combine all results - only create table if we have at least one row
+      if (length(multiv_landmark_results_list) > 0) {
+        multiv_landmark_results <- bind_rows(multiv_landmark_results_list)
+        
+        # Store for display
+        landmark_multiv_table <- multiv_landmark_results %>%
+          kable(caption = "Multivariate Cox Model: On-Treatment ctDNA Clearance and Duration of Complete Response from Landmark (adjusted for line of therapy, therapy class, KPS, and visceral metastases). Note: Only coefficients with reasonable HR values (converged models) are shown. Models with extreme HR values (0, Inf, or very large) are excluded due to convergence issues, likely due to small sample size or complete separation.") %>%
+          kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+      } else {
+        landmark_multiv_table <- NULL
+      }
+    } else {
+      landmark_multiv_table <- NULL
+    }
+  } else {
+    landmark_multiv_table <- NULL
+  }
+  
+  # Ensure table variables are available for display chunks
+  # (Tables will be displayed in separate chunks below)
+} else {
+  # If landmark_outcomes doesn't exist, set table to NULL
+  landmark_multiv_table <- NULL
+}
+```
+
+```{r landmark_results_table_display, results='asis', echo=FALSE}
+# Explicitly display landmark results table
+# Check if table exists and display it
+if (exists("landmark_results") && !is.null(landmark_results)) {
+  # Display the table - kable objects render when referenced
+  landmark_results
+} else {
+  cat("Landmark analysis results table not available.\n")
+}
+```
+
+```{r landmark_results_note, echo=FALSE}
+cat("\n**Note on therapy class adjustment:** Palliative systemic therapy regimens were classified into therapy classes (ADC, ICI, Chemo, Targeted, Other, and combinations such as ADC + ICI) based on the regimen received. Therapy class was included as a categorical covariate in the adjusted Cox models to account for potential differences in treatment efficacy across therapy types.\n")
+```
+
+```{r landmark_multiv_table_display, results='asis', echo=FALSE}
+# Display detailed multivariate model table for on-treatment analysis
+# Use the table that was already created in landmark_analysis_results chunk
+
+# First, try to use the existing table
+if (exists("landmark_multiv_table") && !is.null(landmark_multiv_table)) {
+  # Display the table - kable objects render when referenced
+  landmark_multiv_table
+} else if (exists("cox_cleared_multiv") && !is.null(cox_cleared_multiv)) {
+  # Try to recreate if it doesn't exist (fallback)
+  if (exists("cox_cleared_multiv") && !is.null(cox_cleared_multiv)) {
+    # Recreate the table using the same logic as landmark_analysis_results
+    cox_cleared_multiv_summary <- summary(cox_cleared_multiv)
+    n_coef <- nrow(cox_cleared_multiv_summary$coefficients)
+    
+    multiv_landmark_results_list <- list()
+    
+    # Add ctDNA cleared coefficient
+    if (n_coef > 0) {
+      p_val_cleared <- cox_cleared_multiv_summary$coefficients[1, "Pr(>|z|)"]
+      multiv_landmark_results_list[[length(multiv_landmark_results_list) + 1]] <- tibble(
+        `Variable` = "ctDNA Cleared at Landmark vs Not Cleared",
+        `HR (95% CI)` = paste0(
+          round(cox_cleared_multiv_summary$conf.int[1, "exp(coef)"], 2), " (",
+          round(cox_cleared_multiv_summary$conf.int[1, "lower .95"], 2), "-",
+          round(cox_cleared_multiv_summary$conf.int[1, "upper .95"], 2), ")"
+        ),
+        `P-value` = if (p_val_cleared < 0.001) "<0.001" else as.character(round(p_val_cleared, 3))
+      )
+    }
+    
+    # Add therapy line coefficients
+    if (exists("therapy_line_labels")) {
+      therapy_line_idx <- which(str_detect(rownames(cox_cleared_multiv_summary$coefficients), "therapy_line_factor"))
+      if (length(therapy_line_idx) > 0) {
+        for (i in seq_along(therapy_line_idx)) {
+          idx <- therapy_line_idx[i]
+          if (idx <= nrow(cox_cleared_multiv_summary$conf.int) && i <= length(therapy_line_labels)) {
+            p_val_line <- cox_cleared_multiv_summary$coefficients[idx, "Pr(>|z|)"]
+            multiv_landmark_results_list[[length(multiv_landmark_results_list) + 1]] <- tibble(
+              `Variable` = therapy_line_labels[i],
+              `HR (95% CI)` = paste0(
+                round(cox_cleared_multiv_summary$conf.int[idx, "exp(coef)"], 2), " (",
+                round(cox_cleared_multiv_summary$conf.int[idx, "lower .95"], 2), "-",
+                round(cox_cleared_multiv_summary$conf.int[idx, "upper .95"], 2), ")"
+              ),
+              `P-value` = as.character(ifelse(p_val_line < 0.001, "<0.001", round(p_val_line, 3)))
+            )
+          }
+        }
+      }
+    }
+    
+    # Add KPS coefficient
+    kps_idx <- which(str_detect(rownames(cox_cleared_multiv_summary$coefficients), "kps_factor"))
+    if (length(kps_idx) > 0) {
+      idx <- kps_idx[1]
+      if (idx <= nrow(cox_cleared_multiv_summary$conf.int)) {
+        p_val_kps <- cox_cleared_multiv_summary$coefficients[idx, "Pr(>|z|)"]
+        multiv_landmark_results_list[[length(multiv_landmark_results_list) + 1]] <- tibble(
+          `Variable` = "KPS ≥80% vs <80%",
+          `HR (95% CI)` = paste0(
+            round(cox_cleared_multiv_summary$conf.int[idx, "exp(coef)"], 2), " (",
+            round(cox_cleared_multiv_summary$conf.int[idx, "lower .95"], 2), "-",
+            round(cox_cleared_multiv_summary$conf.int[idx, "upper .95"], 2), ")"
+          ),
+          `P-value` = if (p_val_kps < 0.001) "<0.001" else as.character(round(p_val_kps, 3))
+        )
+      }
+    }
+    
+    # Add Visceral Metastases coefficient
+    visceral_idx <- which(str_detect(rownames(cox_cleared_multiv_summary$coefficients), "visceral_mets_factor"))
+    if (length(visceral_idx) > 0) {
+      idx <- visceral_idx[1]
+      if (idx <= nrow(cox_cleared_multiv_summary$conf.int)) {
+        p_val_visceral <- cox_cleared_multiv_summary$coefficients[idx, "Pr(>|z|)"]
+        multiv_landmark_results_list[[length(multiv_landmark_results_list) + 1]] <- tibble(
+          `Variable` = "Visceral Mets vs No Visceral Mets",
+          `HR (95% CI)` = paste0(
+            round(cox_cleared_multiv_summary$conf.int[idx, "exp(coef)"], 2), " (",
+            round(cox_cleared_multiv_summary$conf.int[idx, "lower .95"], 2), "-",
+            round(cox_cleared_multiv_summary$conf.int[idx, "upper .95"], 2), ")"
+          ),
+          `P-value` = if (p_val_visceral < 0.001) "<0.001" else as.character(round(p_val_visceral, 3))
+        )
+      }
+    }
+    
+    # Add Therapy Class coefficients
+    therapy_class_idx <- which(str_detect(rownames(cox_cleared_multiv_summary$coefficients), "therapy_class_factor"))
+    if (length(therapy_class_idx) > 0) {
+      for (i in seq_along(therapy_class_idx)) {
+        idx <- therapy_class_idx[i]
+        if (idx <= nrow(cox_cleared_multiv_summary$conf.int)) {
+          term_name <- rownames(cox_cleared_multiv_summary$coefficients)[idx]
+          class_name <- str_replace(term_name, "therapy_class_factor", "")
+          p_val_class <- cox_cleared_multiv_summary$coefficients[idx, "Pr(>|z|)"]
+          hr_val <- cox_cleared_multiv_summary$conf.int[idx, "exp(coef)"]
+          ci_lower <- cox_cleared_multiv_summary$conf.int[idx, "lower .95"]
+          ci_upper <- cox_cleared_multiv_summary$conf.int[idx, "upper .95"]
+          
+          p_val_text <- if (is.na(p_val_class)) {
+            "NA"
+          } else if (p_val_class < 0.001) {
+            "<0.001"
+          } else {
+            as.character(round(p_val_class, 3))
+          }
+          
+          hr_ci_text <- if (is.na(hr_val) || is.na(ci_lower) || is.na(ci_upper)) {
+            "NA (NA-NA)"
+          } else {
+            paste0(
+              round(hr_val, 2), " (",
+              round(ci_lower, 2), "-",
+              round(ci_upper, 2), ")"
+            )
+          }
+          
+          multiv_landmark_results_list[[length(multiv_landmark_results_list) + 1]] <- tibble(
+            `Variable` = paste0("Therapy Class: ", class_name, " vs reference"),
+            `HR (95% CI)` = hr_ci_text,
+            `P-value` = p_val_text
+          )
+        }
+      }
+    }
+    
+    # Create and display table if we have results
+    if (length(multiv_landmark_results_list) > 0) {
+      multiv_landmark_results <- bind_rows(multiv_landmark_results_list)
+      
+      landmark_multiv_table <- multiv_landmark_results %>%
+        kable(caption = "Multivariate Cox Model: On-Treatment ctDNA Clearance and Duration of Complete Response from Landmark (adjusted for line of therapy, therapy class, KPS, and visceral metastases). Note: Only coefficients with reasonable HR values (converged models) are shown. Models with extreme HR values (0, Inf, or very large) are excluded due to convergence issues, likely due to small sample size or complete separation.") %>%
+        kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+      
+      # Display the table - kable objects render when referenced
+      landmark_multiv_table
+    } else {
+      cat("\n\n**Note:** Multivariate model exists but no coefficients could be extracted for display.\n")
+    }
+  } else {
+    cat("\n\n**Multivariate Cox Model Status:**\n")
+    cat("- Multivariate model with Bajorin risk factors for on-treatment analysis could not be fitted.\n")
+    cat("- This may be due to missing KPS or visceral metastases data, or insufficient sample size.\n")
+    cat("- Check that Bajorin risk factors data is available and that there are enough observations with complete data.\n")
+  }
+}
+
+# Add sample size information in a separate output (after table)
+if (exists("landmark_outcomes_multiv") && !is.null(landmark_outcomes_multiv) && 
+    exists("landmark_multiv_table") && !is.null(landmark_multiv_table)) {
+  cat("\n\n**N for multivariate on-treatment model:**", nrow(landmark_outcomes_multiv), "observations\n")
+}
+```
+
+```{r continuous_ctdna_analyses, include=FALSE}
+# ====================================================================================
+# ADDITIONAL ANALYSES: Continuous ctDNA Variables for Research Question 2
+# ====================================================================================
+# These analyses complement the binary clearance analysis by examining continuous
+# ctDNA measures: log-transformed on-treatment ctDNA and percent decline
+# ====================================================================================
+
+# Initialize variables for continuous analyses
+cox_continuous_on_tx <- NULL
+cox_pct_decline_continuous <- NULL
+cox_interaction_baseline <- NULL
+cox_combined_baseline_on_tx <- NULL
+comprehensive_landmark_results <- NULL
+
+# Add continuous variables to landmark_outcomes if not already present
+if (exists("landmark_outcomes") && nrow(landmark_outcomes) > 0) {
+  if (!"log_on_tx_ctdna" %in% names(landmark_outcomes)) {
+    landmark_outcomes <- landmark_outcomes %>%
+      mutate(
+        log_on_tx_ctdna = log(on_tx_ctdna + 1),
+        log_baseline_ctdna = log(baseline_ctdna + 1),
+        baseline_high = log_baseline_ctdna > median(log_baseline_ctdna, na.rm = TRUE),
+        baseline_high_factor = factor(baseline_high, levels = c(FALSE, TRUE), 
+                                       labels = c("Low Baseline", "High Baseline"))
+      )
+  }
+}
+
+if (exists("landmark_outcomes") && nrow(landmark_outcomes) > 0 && 
+    exists("landmark_outcomes_cleared") && !is.null(landmark_outcomes_cleared)) {
+  
+  # Add continuous variables to landmark_outcomes_cleared if not already present
+  if (!"log_on_tx_ctdna" %in% names(landmark_outcomes_cleared)) {
+    landmark_outcomes_cleared <- landmark_outcomes_cleared %>%
+      mutate(
+        log_on_tx_ctdna = log(on_tx_ctdna + 1),
+        log_baseline_ctdna = log(baseline_ctdna + 1),
+        baseline_high = log_baseline_ctdna > median(log_baseline_ctdna, na.rm = TRUE),
+        baseline_high_factor = factor(baseline_high, levels = c(FALSE, TRUE), 
+                                       labels = c("Low Baseline", "High Baseline"))
+      )
+  }
+  
+  # Prepare data with all necessary variables
+  landmark_for_continuous <- landmark_outcomes_cleared %>%
+    filter(!is.na(log_on_tx_ctdna), !is.na(pct_decline))
+  
+  # ANALYSIS 1: Continuous on-treatment ctDNA (log-transformed)
+  if (nrow(landmark_for_continuous) > 10 && 
+      sum(!is.na(landmark_for_continuous$kps_binary)) > 0 && 
+      sum(!is.na(landmark_for_continuous$visceral_mets_binary)) > 0) {
+    
+    landmark_continuous_multiv <- landmark_for_continuous %>%
+      filter(!is.na(kps_binary), !is.na(visceral_mets_binary))
+    
+    if (nrow(landmark_continuous_multiv) > 0) {
+      cox_continuous_on_tx <- tryCatch({
+        coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ 
+              log_on_tx_ctdna + therapy_line_factor + therapy_class_factor + 
+              kps_factor + visceral_mets_factor,
+              data = landmark_continuous_multiv)
+      }, error = function(e) NULL)
+    }
+  }
+  
+  # ANALYSIS 2: Percent decline as continuous variable
+  if (nrow(landmark_for_continuous) > 10 && 
+      sum(!is.na(landmark_for_continuous$kps_binary)) > 0 && 
+      sum(!is.na(landmark_for_continuous$visceral_mets_binary)) > 0) {
+    
+    landmark_pct_multiv <- landmark_for_continuous %>%
+      filter(!is.na(kps_binary), !is.na(visceral_mets_binary), 
+             !is.infinite(pct_decline), !is.na(pct_decline))
+    
+    if (nrow(landmark_pct_multiv) > 0) {
+      cox_pct_decline_continuous <- tryCatch({
+        coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ 
+              pct_decline + therapy_line_factor + therapy_class_factor + 
+              kps_factor + visceral_mets_factor,
+              data = landmark_pct_multiv)
+      }, error = function(e) NULL)
+    }
+  }
+  
+  # ANALYSIS 3: Interaction between baseline and on-treatment ctDNA
+  if (nrow(landmark_for_continuous) > 10 && 
+      sum(!is.na(landmark_for_continuous$kps_binary)) > 0 && 
+      sum(!is.na(landmark_for_continuous$visceral_mets_binary)) > 0 &&
+      sum(!is.na(landmark_for_continuous$baseline_high_factor)) > 0) {
+    
+    landmark_interaction_multiv <- landmark_for_continuous %>%
+      filter(!is.na(kps_binary), !is.na(visceral_mets_binary),
+             !is.na(ctdna_cleared_at_landmark), !is.na(baseline_high_factor))
+    
+    if (nrow(landmark_interaction_multiv) > 0) {
+      cox_interaction_baseline <- tryCatch({
+        coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ 
+              ctdna_cleared_at_landmark * baseline_high_factor + 
+              therapy_line_factor + therapy_class_factor + 
+              kps_factor + visceral_mets_factor,
+              data = landmark_interaction_multiv)
+      }, error = function(e) NULL)
+    }
+  }
+  
+  # ANALYSIS 4: Combined model (baseline + on-treatment)
+  if (nrow(landmark_for_continuous) > 10 && 
+      sum(!is.na(landmark_for_continuous$kps_binary)) > 0 && 
+      sum(!is.na(landmark_for_continuous$visceral_mets_binary)) > 0) {
+    
+    landmark_combined_multiv <- landmark_for_continuous %>%
+      filter(!is.na(kps_binary), !is.na(visceral_mets_binary),
+             !is.na(log_baseline_ctdna), !is.na(ctdna_cleared_at_landmark))
+    
+    if (nrow(landmark_combined_multiv) > 0) {
+      cox_combined_baseline_on_tx <- tryCatch({
+        coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ 
+              log_baseline_ctdna + ctdna_cleared_at_landmark + 
+              therapy_line_factor + therapy_class_factor + 
+              kps_factor + visceral_mets_factor,
+              data = landmark_combined_multiv)
+      }, error = function(e) NULL)
+    }
+  }
+  
+  # Create comprehensive results table
+  results_list_continuous <- list()
+  
+  # Binary clearance (from existing analysis) - only if converged and reasonable HR
+  if (exists("cox_cleared_multiv") && !is.null(cox_cleared_multiv)) {
+    model_converged <- tryCatch({
+      isTRUE(cox_cleared_multiv$converged)
+    }, error = function(e) FALSE)
+    
+    if (model_converged) {
+      cox_cleared_multiv_summary <- summary(cox_cleared_multiv)
+      hr_val <- cox_cleared_multiv_summary$conf.int[1, "exp(coef)"]
+      hr_lower <- cox_cleared_multiv_summary$conf.int[1, "lower .95"]
+      hr_upper <- cox_cleared_multiv_summary$conf.int[1, "upper .95"]
+      
+      if (!is.na(hr_val) && is.finite(hr_val) && hr_val > 0 && hr_val < 1e10 &&
+          !is.na(hr_lower) && is.finite(hr_lower) &&
+          !is.na(hr_upper) && is.finite(hr_upper)) {
+        results_list_continuous[[length(results_list_continuous) + 1]] <- tibble(
+          `Model` = "Binary: Cleared vs Not Cleared",
+          `Variable` = "ctDNA Cleared at Landmark",
+          `HR (95% CI)` = paste0(
+            round(hr_val, 2), " (",
+            round(hr_lower, 2), "-",
+            round(hr_upper, 2), ")"
+          ),
+          `P-value` = ifelse(cox_cleared_multiv_summary$coefficients[1, "Pr(>|z|)"] < 0.001, 
+                             "<0.001", 
+                             as.character(round(cox_cleared_multiv_summary$coefficients[1, "Pr(>|z|)"], 3))),
+          `N` = cox_cleared_multiv$n
+        )
+      }
+    }
+  }
+  
+  # Continuous on-treatment ctDNA - only if converged and reasonable HR
+  if (!is.null(cox_continuous_on_tx)) {
+    model_converged <- tryCatch({
+      isTRUE(cox_continuous_on_tx$converged)
+    }, error = function(e) FALSE)
+    
+    if (model_converged) {
+      cox_cont_summary <- summary(cox_continuous_on_tx)
+      hr_val <- cox_cont_summary$conf.int[1, "exp(coef)"]
+      hr_lower <- cox_cont_summary$conf.int[1, "lower .95"]
+      hr_upper <- cox_cont_summary$conf.int[1, "upper .95"]
+      
+      if (!is.na(hr_val) && is.finite(hr_val) && hr_val > 0 && hr_val < 1e10 &&
+          !is.na(hr_lower) && is.finite(hr_lower) &&
+          !is.na(hr_upper) && is.finite(hr_upper)) {
+        results_list_continuous[[length(results_list_continuous) + 1]] <- tibble(
+          `Model` = "Continuous: Log(On-treatment ctDNA + 1)",
+          `Variable` = "Per log-unit increase in on-treatment ctDNA",
+          `HR (95% CI)` = paste0(
+            round(hr_val, 2), " (",
+            round(hr_lower, 2), "-",
+            round(hr_upper, 2), ")"
+          ),
+          `P-value` = ifelse(cox_cont_summary$coefficients[1, "Pr(>|z|)"] < 0.001, 
+                             "<0.001", 
+                             as.character(round(cox_cont_summary$coefficients[1, "Pr(>|z|)"], 3))),
+          `N` = cox_continuous_on_tx$n
+        )
+      }
+    }
+  }
+  
+  # Percent decline (per 10% unit for interpretability) - only if converged and reasonable HR
+  if (!is.null(cox_pct_decline_continuous)) {
+    model_converged <- tryCatch({
+      isTRUE(cox_pct_decline_continuous$converged)
+    }, error = function(e) FALSE)
+    
+    if (model_converged) {
+      cox_pct_summary <- summary(cox_pct_decline_continuous)
+      # HR per 10% increase in decline
+      hr_per_10pct <- exp(cox_pct_summary$coefficients[1, "coef"] * 10)
+      ci_lower_per_10pct <- exp((cox_pct_summary$coefficients[1, "coef"] - 
+                                 1.96 * cox_pct_summary$coefficients[1, "se(coef)"]) * 10)
+      ci_upper_per_10pct <- exp((cox_pct_summary$coefficients[1, "coef"] + 
+                                 1.96 * cox_pct_summary$coefficients[1, "se(coef)"]) * 10)
+      
+      if (!is.na(hr_per_10pct) && is.finite(hr_per_10pct) && hr_per_10pct > 0 && hr_per_10pct < 1e10 &&
+          !is.na(ci_lower_per_10pct) && is.finite(ci_lower_per_10pct) &&
+          !is.na(ci_upper_per_10pct) && is.finite(ci_upper_per_10pct)) {
+        results_list_continuous[[length(results_list_continuous) + 1]] <- tibble(
+          `Model` = "Continuous: Percent Decline from Baseline",
+          `Variable` = "Per 10% increase in decline",
+          `HR (95% CI)` = paste0(
+            round(hr_per_10pct, 2), " (",
+            round(ci_lower_per_10pct, 2), "-",
+            round(ci_upper_per_10pct, 2), ")"
+          ),
+          `P-value` = ifelse(cox_pct_summary$coefficients[1, "Pr(>|z|)"] < 0.001, 
+                             "<0.001", 
+                             as.character(round(cox_pct_summary$coefficients[1, "Pr(>|z|)"], 3))),
+          `N` = cox_pct_decline_continuous$n
+        )
+      }
+    }
+  }
+  
+  # Combined model (baseline + on-treatment) - only if converged and reasonable HR
+  if (!is.null(cox_combined_baseline_on_tx)) {
+    model_converged <- tryCatch({
+      isTRUE(cox_combined_baseline_on_tx$converged)
+    }, error = function(e) FALSE)
+    
+    if (model_converged) {
+      cox_comb_summary <- summary(cox_combined_baseline_on_tx)
+      
+      # Baseline ctDNA
+      hr_baseline <- cox_comb_summary$conf.int[1, "exp(coef)"]
+      hr_baseline_lower <- cox_comb_summary$conf.int[1, "lower .95"]
+      hr_baseline_upper <- cox_comb_summary$conf.int[1, "upper .95"]
+      
+      if (!is.na(hr_baseline) && is.finite(hr_baseline) && hr_baseline > 0 && hr_baseline < 1e10 &&
+          !is.na(hr_baseline_lower) && is.finite(hr_baseline_lower) &&
+          !is.na(hr_baseline_upper) && is.finite(hr_baseline_upper)) {
+        results_list_continuous[[length(results_list_continuous) + 1]] <- tibble(
+          `Model` = "Combined: Baseline + On-treatment",
+          `Variable` = "Baseline ctDNA (per log-unit)",
+          `HR (95% CI)` = paste0(
+            round(hr_baseline, 2), " (",
+            round(hr_baseline_lower, 2), "-",
+            round(hr_baseline_upper, 2), ")"
+          ),
+          `P-value` = ifelse(cox_comb_summary$coefficients[1, "Pr(>|z|)"] < 0.001, 
+                             "<0.001", 
+                             as.character(round(cox_comb_summary$coefficients[1, "Pr(>|z|)"], 3))),
+          `N` = cox_combined_baseline_on_tx$n
+        )
+      }
+      
+      # On-treatment clearance
+      if (nrow(cox_comb_summary$conf.int) >= 2) {
+        hr_ontx <- cox_comb_summary$conf.int[2, "exp(coef)"]
+        hr_ontx_lower <- cox_comb_summary$conf.int[2, "lower .95"]
+        hr_ontx_upper <- cox_comb_summary$conf.int[2, "upper .95"]
+        
+        if (!is.na(hr_ontx) && is.finite(hr_ontx) && hr_ontx > 0 && hr_ontx < 1e10 &&
+            !is.na(hr_ontx_lower) && is.finite(hr_ontx_lower) &&
+            !is.na(hr_ontx_upper) && is.finite(hr_ontx_upper)) {
+          results_list_continuous[[length(results_list_continuous) + 1]] <- tibble(
+            `Model` = "Combined: Baseline + On-treatment",
+            `Variable` = "On-treatment ctDNA Cleared",
+            `HR (95% CI)` = paste0(
+              round(hr_ontx, 2), " (",
+              round(hr_ontx_lower, 2), "-",
+              round(hr_ontx_upper, 2), ")"
+            ),
+            `P-value` = ifelse(cox_comb_summary$coefficients[2, "Pr(>|z|)"] < 0.001, 
+                               "<0.001", 
+                               as.character(round(cox_comb_summary$coefficients[2, "Pr(>|z|)"], 3))),
+            `N` = cox_combined_baseline_on_tx$n
+          )
+        }
+      }
+    }
+  }
+  
+  # Combine all results
+  if (length(results_list_continuous) > 0) {
+    comprehensive_landmark_results <- bind_rows(results_list_continuous)
+  }
+}
+
+cat("Continuous ctDNA analyses completed.\n")
+```
+
+```{r continuous_landmark_results_display, results='asis', echo=FALSE}
+# Display comprehensive results table with binary and continuous analyses
+if (exists("comprehensive_landmark_results") && !is.null(comprehensive_landmark_results) && 
+    nrow(comprehensive_landmark_results) > 0) {
+  comprehensive_landmark_results %>%
+      kable(caption = "Comprehensive Landmark Analysis: Binary and Continuous ctDNA Measures and Duration of Complete Response from Landmark (adjusted for line of therapy, therapy class, KPS, and visceral metastases). Binary clearance analysis is shown for comparison; continuous analyses examine log-transformed on-treatment ctDNA and percent decline from baseline.") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+} else {
+  cat("\nContinuous ctDNA analyses not available (insufficient data or models could not be fitted).\n")
+}
+```
+
+```{r baseline_vs_landmark_population_comparison, echo=FALSE}
+# Compare baseline and on-treatment populations
+if (exists("outcomes") && exists("landmark_outcomes") && 
+    nrow(outcomes) > 0 && nrow(landmark_outcomes) > 0) {
+  
+  baseline_summary <- outcomes %>%
+    summarise(
+      `Analysis` = "Baseline ctDNA (Research Question 1)",
+      `N (Patient-Line Observations)` = n(),
+      `N (Unique Patients)` = n_distinct(patient_id),
+      `Median Baseline ctDNA (IQR)` = paste0(
+        round(median(ctdna_before_line_value, na.rm = TRUE), 2), " (",
+        round(quantile(ctdna_before_line_value, 0.25, na.rm = TRUE), 2), "-",
+        round(quantile(ctdna_before_line_value, 0.75, na.rm = TRUE), 2), ")"
+      ),
+      `MFS Events` = sum(mfs_event, na.rm = TRUE),
+      `Median MFS (days)` = round(median(mfs_time, na.rm = TRUE), 0),
+      .groups = "drop"
+    )
+  
+  landmark_summary <- landmark_outcomes %>%
+    summarise(
+      `Analysis` = "On-treatment ctDNA (Research Question 2)",
+      `N (Patient-Line Observations)` = n(),
+      `N (Unique Patients)` = n_distinct(patient_id),
+      `Median Baseline ctDNA (IQR)` = paste0(
+        round(median(baseline_ctdna, na.rm = TRUE), 2), " (",
+        round(quantile(baseline_ctdna, 0.25, na.rm = TRUE), 2), "-",
+        round(quantile(baseline_ctdna, 0.75, na.rm = TRUE), 2), ")"
+      ),
+      `MFS Events` = sum(mfs_event_from_landmark, na.rm = TRUE),
+      `Median MFS from Landmark (days)` = round(median(mfs_time_from_landmark, na.rm = TRUE), 0),
+      .groups = "drop"
+    )
+  
+  population_comparison <- bind_rows(baseline_summary, landmark_summary) %>%
+    kable(caption = "Population Comparison: Baseline vs On-Treatment Analysis Cohorts. Note: These are different patient populations - baseline analysis includes all patients with baseline ctDNA, while on-treatment analysis includes only patients who had on-treatment ctDNA measured within 6-16 weeks and survived to landmark.") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  
+  population_comparison
+} else {
+  cat("Population comparison not available.\n")
+}
+```
+
+```{r landmark_interpretation}
+# Interpretation of Hazard Ratios (always show if we have results)
+# Use multivariate HR (adjusted for line of therapy + KPS + visceral metastases)
+if (exists("landmark_results") && !is.null(landmark_results)) {
+  cat("\n**Interpretation of Hazard Ratios (adjusted for line of therapy, KPS, and visceral metastases):**\n\n")
+  
+  # Prefer multivariate HR if available, otherwise fall back to adjusted HR
+  if (exists("hr_cleared_multiv") && !is.na(hr_cleared_multiv)) {
+    hr_to_use <- hr_cleared_multiv
+    hr_lower_to_use <- hr_cleared_multiv_lower
+    hr_upper_to_use <- hr_cleared_multiv_upper
+    p_to_use <- p_cleared_multiv
+    adjustment_note <- " (adjusted for line of therapy, KPS, and visceral metastases)"
+  } else if (exists("hr_cleared") && !is.na(hr_cleared)) {
+    hr_to_use <- hr_cleared
+    hr_lower_to_use <- hr_cleared_lower
+    hr_upper_to_use <- hr_cleared_upper
+    p_to_use <- p_cleared
+    adjustment_note <- " (adjusted for line of therapy)"
+  } else {
+    hr_to_use <- NA
+  }
+  
+  if (!is.na(hr_to_use)) {
+    if (hr_to_use < 1) {
+      cat("- **ctDNA Cleared at Landmark vs Not Cleared (HR = ", round(hr_to_use, 2), ", 95% CI: ", 
+          round(hr_lower_to_use, 2), "-", round(hr_upper_to_use, 2), ", p = ", 
+          ifelse(p_to_use < 0.001, "<0.001", round(p_to_use, 3)), ")", adjustment_note, ":** Patients who cleared ctDNA at the landmark time point (6-16 weeks after therapy initiation) had a ", 
+          round((1 - hr_to_use) * 100, 1), "% lower risk of metastasis or death COMPARED to those who did not clear ctDNA at the landmark. ", sep = "")
+    } else {
+      cat("- **ctDNA Cleared at Landmark vs Not Cleared (HR = ", round(hr_to_use, 2), ", 95% CI: ", 
+          round(hr_lower_to_use, 2), "-", round(hr_upper_to_use, 2), ", p = ", 
+          ifelse(p_to_use < 0.001, "<0.001", round(p_to_use, 3)), ")", adjustment_note, ":** Patients who cleared ctDNA at the landmark time point (6-16 weeks after therapy initiation) had a ", 
+          round((hr_to_use - 1) * 100, 1), "% higher risk of metastasis or death COMPARED to those who did not clear ctDNA at the landmark. ", sep = "")
+    }
+    cat("This suggests that early ctDNA clearance may serve as a pharmacodynamic response biomarker, indicating effective treatment and potentially predicting improved metastasis-free survival.\n\n")
+  }
+}
+```
+<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
+grep
+
+```{r landmark_survival_curves}
+# Survival curves: ctDNA Cleared at Landmark vs Not Cleared
+if (exists("landmark_outcomes") && nrow(landmark_outcomes) > 0) {
+  if (exists("landmark_outcomes_cleared") && 
+      sum(landmark_outcomes_cleared$ctdna_cleared_at_landmark, na.rm = TRUE) > 0 && 
+      sum(!landmark_outcomes_cleared$ctdna_cleared_at_landmark, na.rm = TRUE) > 0) {
+    landmark_outcomes_cleared <- landmark_outcomes_cleared %>%
+      mutate(
+        cleared_label = ifelse(ctdna_cleared_at_landmark, "Cleared at Landmark", "Not Cleared at Landmark"),
+        # Convert time to months for plotting
+        mfs_time_from_landmark_months = mfs_time_from_landmark / 30.44
+      )
+    
+    # Diagnostic: Check event counts
+    cat("\n**Landmark Analysis Diagnostic:**\n")
+    cat("Total patients in cleared analysis:", nrow(landmark_outcomes_cleared), "\n")
+    cat("Events in Cleared group:", sum(landmark_outcomes_cleared$ctdna_cleared_at_landmark & landmark_outcomes_cleared$mfs_event_from_landmark == 1, na.rm = TRUE), "\n")
+    cat("Events in Not Cleared group:", sum(!landmark_outcomes_cleared$ctdna_cleared_at_landmark & landmark_outcomes_cleared$mfs_event_from_landmark == 1, na.rm = TRUE), "\n")
+    cat("Total events:", sum(landmark_outcomes_cleared$mfs_event_from_landmark, na.rm = TRUE), "\n")
+    cat("Median survival time from landmark (months):", round(median(landmark_outcomes_cleared$mfs_time_from_landmark_months, na.rm = TRUE), 1), "\n")
+    
+    surv_fit_cleared <- survfit(Surv(mfs_time_from_landmark_months, mfs_event_from_landmark) ~ cleared_label, 
+                                  data = landmark_outcomes_cleared)
+    
+    # Get adjusted p-value from Cox model (prefer multivariate: adjusted for line of therapy + KPS + visceral metastases)
+    # Use multivariate p-value if available, otherwise fall back to line of therapy only
+    if (exists("p_cleared_multiv") && !is.na(p_cleared_multiv)) {
+      # Use multivariate p-value (adjusted for line of therapy + KPS + visceral metastases)
+      pval_text <- ifelse(p_cleared_multiv < 0.001, "<0.001", round(p_cleared_multiv, 3))
+      pval_numeric <- p_cleared_multiv
+      cat("Using adjusted p-value from Cox model (adjusted for line of therapy, KPS, and visceral metastases):", pval_text, "\n\n")
+    } else if (exists("p_cleared") && !is.na(p_cleared)) {
+      # Fall back to p-value adjusted for line of therapy only
+      pval_text <- ifelse(p_cleared < 0.001, "<0.001", round(p_cleared, 3))
+      pval_numeric <- p_cleared
+      cat("Using adjusted p-value from Cox model (adjusted for line of therapy):", pval_text, "\n\n")
+    } else {
+      # Recalculate if not already available
+      landmark_outcomes_cleared_for_cox <- landmark_outcomes %>%
+        filter(!is.na(ctdna_cleared_at_landmark)) %>%
+        mutate(
+          therapy_line_grouped = case_when(
+            therapy_line == 1 ~ "1L",
+            therapy_line == 2 ~ "2L",
+            therapy_line == 3 ~ "3L",
+            therapy_line >= 4 ~ "4L+",
+            TRUE ~ as.character(therapy_line)
+          ),
+          therapy_line_factor = factor(therapy_line_grouped, levels = c("1L", "2L", "3L", "4L+"))
+        )
+      
+      # Add therapy class if available
+      if (exists("palliative_regimen_table") && nrow(palliative_regimen_table) > 0) {
+        landmark_outcomes_cleared_for_cox <- landmark_outcomes_cleared_for_cox %>%
+          left_join(
+            palliative_regimen_table %>%
+              mutate(therapy_line_match = ifelse(is.na(therapy_line_match), NA_integer_, therapy_line_match)) %>%
+              select(patient_id, therapy_line_match, therapy_class) %>%
+              distinct(),
+            by = c("patient_id", "therapy_line" = "therapy_line_match")
+          ) %>%
+          mutate(
+            therapy_class = replace_na(therapy_class, "unspecified"),
+            therapy_class_factor = factor(therapy_class)
+          )
+      } else {
+        landmark_outcomes_cleared_for_cox <- landmark_outcomes_cleared_for_cox %>%
+          mutate(
+            therapy_class = "unspecified",
+            therapy_class_factor = factor("unspecified")
+          )
+      }
+      
+      # Try multivariate model first if Bajorin data is available
+      if (exists("bajorin_data") && nrow(bajorin_data) > 0) {
+        landmark_outcomes_cleared_for_cox <- landmark_outcomes_cleared_for_cox %>%
+          left_join(
+            bajorin_data %>% select(patient_id, therapy_line, kps_binary, visceral_mets_binary),
+            by = c("patient_id", "therapy_line")
+          ) %>%
+          filter(!is.na(kps_binary), !is.na(visceral_mets_binary)) %>%
+          mutate(
+            kps_factor = factor(kps_binary, levels = c(0, 1), labels = c("KPS <80%", "KPS ≥80%")),
+            visceral_mets_factor = factor(visceral_mets_binary, levels = c(0, 1), labels = c("No Visceral Mets", "Visceral Mets"))
+          )
+        
+        if (nrow(landmark_outcomes_cleared_for_cox) > 0) {
+          cox_cleared_multiv_adj <- tryCatch({
+            coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ 
+                  ctdna_cleared_at_landmark + therapy_line_factor + therapy_class_factor + kps_factor + visceral_mets_factor,
+                  data = landmark_outcomes_cleared_for_cox)
+          }, error = function(e) NULL)
+          
+          if (!is.null(cox_cleared_multiv_adj)) {
+            cox_cleared_multiv_adj_summary <- summary(cox_cleared_multiv_adj)
+            p_cleared_multiv <- cox_cleared_multiv_adj_summary$coefficients[1, "Pr(>|z|)"]
+            pval_text <- ifelse(p_cleared_multiv < 0.001, "<0.001", round(p_cleared_multiv, 3))
+            pval_numeric <- p_cleared_multiv
+            cat("Using adjusted p-value from Cox model (adjusted for line of therapy, therapy class, KPS, and visceral metastases):", pval_text, "\n\n")
+          } else {
+            # Fall back to line of therapy only
+            landmark_outcomes_cleared_for_cox <- landmark_outcomes %>%
+              filter(!is.na(ctdna_cleared_at_landmark)) %>%
+              mutate(
+                therapy_line_grouped = case_when(
+                  therapy_line == 1 ~ "1L",
+                  therapy_line == 2 ~ "2L",
+                  therapy_line == 3 ~ "3L",
+                  therapy_line >= 4 ~ "4L+",
+                  TRUE ~ as.character(therapy_line)
+                ),
+                therapy_line_factor = factor(therapy_line_grouped, levels = c("1L", "2L", "3L", "4L+"))
+              )
+            
+            # Add therapy class if available
+            if (exists("palliative_regimen_table") && nrow(palliative_regimen_table) > 0) {
+              landmark_outcomes_cleared_for_cox <- landmark_outcomes_cleared_for_cox %>%
+                left_join(
+                  palliative_regimen_table %>%
+                    mutate(therapy_line_match = ifelse(is.na(therapy_line_match), NA_integer_, therapy_line_match)) %>%
+                    select(patient_id, therapy_line_match, therapy_class) %>%
+                    distinct(),
+                  by = c("patient_id", "therapy_line" = "therapy_line_match")
+                ) %>%
+                mutate(
+                  therapy_class = replace_na(therapy_class, "unspecified"),
+                  therapy_class_factor = factor(therapy_class)
+                )
+            } else {
+              landmark_outcomes_cleared_for_cox <- landmark_outcomes_cleared_for_cox %>%
+                mutate(
+                  therapy_class = "unspecified",
+                  therapy_class_factor = factor("unspecified")
+                )
+            }
+            
+            cox_cleared_adj <- tryCatch({
+              coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ ctdna_cleared_at_landmark + therapy_line_factor + therapy_class_factor,
+                    data = landmark_outcomes_cleared_for_cox)
+            }, error = function(e) NULL)
+            
+            if (!is.null(cox_cleared_adj)) {
+              cox_cleared_adj_summary <- summary(cox_cleared_adj)
+              p_cleared <- cox_cleared_adj_summary$coefficients[1, "Pr(>|z|)"]
+              pval_text <- ifelse(p_cleared < 0.001, "<0.001", round(p_cleared, 3))
+              pval_numeric <- p_cleared
+              cat("Using adjusted p-value from Cox model (adjusted for line of therapy and therapy class):", pval_text, "\n\n")
+            } else {
+              # Fallback to log-rank test
+              logrank_test <- survdiff(Surv(mfs_time_from_landmark_months, mfs_event_from_landmark) ~ cleared_label, 
+                                       data = landmark_outcomes_cleared)
+              logrank_pvalue <- 1 - pchisq(logrank_test$chisq, length(logrank_test$n) - 1)
+              pval_text <- ifelse(logrank_pvalue < 0.001, "<0.001", round(logrank_pvalue, 3))
+              pval_numeric <- logrank_pvalue
+              cat("Using log-rank test p-value (unadjusted) - adjusted p-value not available.\n\n")
+            }
+          }
+        } else {
+          # Not enough data for multivariate, try line of therapy only
+          landmark_outcomes_cleared_for_cox <- landmark_outcomes %>%
+            filter(!is.na(ctdna_cleared_at_landmark)) %>%
+            mutate(
+              therapy_line_grouped = case_when(
+                therapy_line == 1 ~ "1L",
+                therapy_line == 2 ~ "2L",
+                therapy_line == 3 ~ "3L",
+                therapy_line >= 4 ~ "4L+",
+                TRUE ~ as.character(therapy_line)
+              ),
+              therapy_line_factor = factor(therapy_line_grouped, levels = c("1L", "2L", "3L", "4L+"))
+            )
+          
+          # Add therapy class if available
+          if (exists("palliative_regimen_table") && nrow(palliative_regimen_table) > 0) {
+            landmark_outcomes_cleared_for_cox <- landmark_outcomes_cleared_for_cox %>%
+              left_join(
+                palliative_regimen_table %>%
+                  mutate(therapy_line_match = ifelse(is.na(therapy_line_match), NA_integer_, therapy_line_match)) %>%
+                  select(patient_id, therapy_line_match, therapy_class) %>%
+                  distinct(),
+                by = c("patient_id", "therapy_line" = "therapy_line_match")
+              ) %>%
+              mutate(
+                therapy_class = replace_na(therapy_class, "unspecified"),
+                therapy_class_factor = factor(therapy_class)
+              )
+          } else {
+            landmark_outcomes_cleared_for_cox <- landmark_outcomes_cleared_for_cox %>%
+              mutate(
+                therapy_class = "unspecified",
+                therapy_class_factor = factor("unspecified")
+              )
+          }
+          
+          cox_cleared_adj <- tryCatch({
+            coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ ctdna_cleared_at_landmark + therapy_line_factor + therapy_class_factor,
+                  data = landmark_outcomes_cleared_for_cox)
+          }, error = function(e) NULL)
+          
+          if (!is.null(cox_cleared_adj)) {
+            cox_cleared_adj_summary <- summary(cox_cleared_adj)
+            p_cleared <- cox_cleared_adj_summary$coefficients[1, "Pr(>|z|)"]
+            pval_text <- ifelse(p_cleared < 0.001, "<0.001", round(p_cleared, 3))
+            pval_numeric <- p_cleared
+            cat("Using adjusted p-value from Cox model (adjusted for line of therapy):", pval_text, "\n\n")
+          } else {
+            # Fallback to log-rank test
+            logrank_test <- survdiff(Surv(mfs_time_from_landmark_months, mfs_event_from_landmark) ~ cleared_label, 
+                                     data = landmark_outcomes_cleared)
+            logrank_pvalue <- 1 - pchisq(logrank_test$chisq, length(logrank_test$n) - 1)
+            pval_text <- ifelse(logrank_pvalue < 0.001, "<0.001", round(logrank_pvalue, 3))
+            pval_numeric <- logrank_pvalue
+            cat("Using log-rank test p-value (unadjusted) - adjusted p-value not available.\n\n")
+          }
+        }
+      } else {
+        # No Bajorin data, try line of therapy only
+        cox_cleared_adj <- tryCatch({
+          coxph(Surv(mfs_time_from_landmark, mfs_event_from_landmark) ~ ctdna_cleared_at_landmark + therapy_line_factor + therapy_class_factor,
+                data = landmark_outcomes_cleared_for_cox)
+        }, error = function(e) NULL)
+        
+        if (!is.null(cox_cleared_adj)) {
+          cox_cleared_adj_summary <- summary(cox_cleared_adj)
+          p_cleared <- cox_cleared_adj_summary$coefficients[1, "Pr(>|z|)"]
+          pval_text <- ifelse(p_cleared < 0.001, "<0.001", round(p_cleared, 3))
+          pval_numeric <- p_cleared
+          cat("Using adjusted p-value from Cox model (adjusted for line of therapy):", pval_text, "\n\n")
+        } else {
+          # Fallback to log-rank test
+          logrank_test <- survdiff(Surv(mfs_time_from_landmark_months, mfs_event_from_landmark) ~ cleared_label, 
+                                   data = landmark_outcomes_cleared)
+          logrank_pvalue <- 1 - pchisq(logrank_test$chisq, length(logrank_test$n) - 1)
+          pval_text <- ifelse(logrank_pvalue < 0.001, "<0.001", round(logrank_pvalue, 3))
+          pval_numeric <- logrank_pvalue
+          cat("Using log-rank test p-value (unadjusted) - adjusted p-value not available.\n\n")
+        }
+      }
+    }
+    
+    # Create custom p-value text
+    # Check if we used multivariate p-value
+    if (exists("p_cleared_multiv") && !is.na(p_cleared_multiv) && pval_numeric == p_cleared_multiv) {
+      pval_display <- paste0("p = ", pval_text, " (adjusted for line of therapy, KPS, and visceral metastases)")
+    } else if (!is.null(p_cleared) && !is.na(p_cleared) && pval_numeric == p_cleared) {
+      pval_display <- paste0("p = ", pval_text, " (adjusted for line of therapy)")
+    } else {
+      pval_display <- paste0("p = ", pval_text)
+    }
+    
+    p_landmark <- ggsurvplot(
+      surv_fit_cleared,
+      data = landmark_outcomes_cleared,
+      pval = pval_display,
+      pval.size = 4,
+      conf.int = TRUE,
+      risk.table = TRUE,
+      xlab = "Time from Landmark (months)",
+      ylab = "Duration of Complete Response Probability",
+      title = "Duration of Complete Response from Landmark (ctDNA between 6-16 weeks) by ctDNA Clearance Status at Landmark",
+      xlim = c(0, 12),
+      legend.title = "ctDNA Status at Landmark",
+      legend.labs = c("Cleared at Landmark", "Not Cleared at Landmark")
+    )
+    
+    p_landmark$plot
+  } else {
+    # Fallback: overall landmark curve (ignoring clearance) to show any events
+    if (exists("landmark_outcomes") && nrow(landmark_outcomes) > 0) {
+      landmark_outcomes_overall <- landmark_outcomes %>%
+        mutate(mfs_time_from_landmark_months = mfs_time_from_landmark / 30.44)
+      
+      # Diagnostic: Check event counts for overall
+      cat("\n**Landmark Analysis Diagnostic (Overall Fallback):**\n")
+      cat("Total patients:", nrow(landmark_outcomes_overall), "\n")
+      cat("Total events:", sum(landmark_outcomes_overall$mfs_event_from_landmark, na.rm = TRUE), "\n")
+      cat("Median time from landmark (months):", round(median(landmark_outcomes_overall$mfs_time_from_landmark_months, na.rm = TRUE), 1), "\n")
+      
+      surv_fit_overall <- survfit(Surv(mfs_time_from_landmark_months, mfs_event_from_landmark) ~ 1, 
+                                   data = landmark_outcomes_overall)
+      p_landmark_overall <- ggsurvplot(
+        surv_fit_overall,
+        data = landmark_outcomes_overall,
+        pval = FALSE,
+        conf.int = TRUE,
+        risk.table = TRUE,
+        xlab = "Time from Landmark (months)",
+        ylab = "Duration of Complete Response Probability",
+        title = "Duration of Complete Response from Landmark (ctDNA between 6-16 weeks) - Overall",
+        xlim = c(0, 36)
+      )
+      p_landmark_overall$plot
+      if (sum(landmark_outcomes_overall$mfs_event_from_landmark, na.rm = TRUE) == 0) {
+        cat("Note: No post-landmark events; overall curve shown.\n")
+      } else if (sum(!is.na(landmark_outcomes$ctdna_cleared_at_landmark)) <= 10) {
+        cat("Note: Only one ctDNA clearance group available or <10 with clearance data; overall curve shown.\n")
+      }
+    } else {
+      cat("Insufficient data for landmark analysis (need at least 10 patients with clearance data).\n")
+    }
+  }
+} else {
+  cat("No patients with on-treatment ctDNA measurements in landmark window (", landmark_weeks, " weeks, window: 10-14 weeks).\n", sep = "")
+}
+```
+
+```{r summary}
+# Summary statistics
+cat("## Summary\n\n")
+cat("**Universe - Prognostic Cohort (Baseline ctDNA Analysis):** Patients with metastatic disease starting a new line of therapy\n")
+cat("  - Includes all lines of therapy (1L, 2L, 3L+, not limited to first-line)\n")
+cat("  - ctDNA measured within 21 days before starting each new line\n")
+cat("  - Time 0 = start of each new line of therapy\n")
+cat("  - **N =", nrow(outcomes), " patient-line observations\n\n")
+
+# Get universe size for on-treatment response
+landmark_universe_n <- if (exists("landmark_data") && nrow(landmark_data) > 0) {
+  nrow(landmark_data)
+} else if (exists("landmark_outcomes") && nrow(landmark_outcomes) > 0) {
+  nrow(landmark_outcomes)
+} else {
+  NA
+}
+
+if (!is.na(landmark_universe_n)) {
+  cat("**Universe - On-Treatment Cohort (Landmark Analysis):** Patients with metastatic disease starting a new line of therapy\n")
+  cat("  - Includes all lines of therapy (1L, 2L, 3L+, not limited to first-line)\n")
+  cat("  - Had on-treatment ctDNA measurement within 6-16 weeks after starting each new line\n")
+  cat("  - Landmark time = ctDNA measurement date within 6-16 week window\n")
+  cat("  - Time 0 for landmark analysis = landmark time (ctDNA measurement date)\n")
+  cat("  - **N =", landmark_universe_n, " patient-line observations\n\n")
+}
+cat("**Key Findings - Prognostic (Baseline ctDNA):**\n")
+cat("- Median ctDNA before therapy:", round(median(outcomes$ctdna_before_line_value, na.rm = TRUE), 2), "\n")
+# Use fully adjusted model (line of therapy + KPS + visceral metastases) if available
+if (!is.null(cox_model_multiv) && exists("hr_multiv") && !is.na(hr_multiv)) {
+  cat("- Hazard Ratio per log-unit increase in ctDNA (adjusted for line of therapy, KPS, and visceral metastases):", 
+      round(hr_multiv, 2), 
+      " (95% CI: ", 
+      round(hr_multiv_lower, 2), 
+      "-", 
+      round(hr_multiv_upper, 2), 
+      ")\n")
+  cat("- P-value:", ifelse(p_multiv < 0.001, 
+                            "<0.001", 
+                            round(p_multiv, 3)), "\n\n")
+} else {
+  # Fall back to model adjusted for line of therapy only
+  cat("- Hazard Ratio per log-unit increase in ctDNA (adjusted for line of therapy):", 
+      round(hr_value, 2), 
+      " (95% CI: ", 
+      round(hr_lower, 2), 
+      "-", 
+      round(hr_upper, 2), 
+      ")\n")
+  cat("- P-value:", ifelse(cox_summary$coefficients[1, "Pr(>|z|)"] < 0.001, 
+                            "<0.001", 
+                            round(cox_summary$coefficients[1, "Pr(>|z|)"], 3)), "\n\n")
+}
+
+# On-treatment findings - use fully adjusted model if available
+if (exists("hr_cleared_multiv") && !is.na(hr_cleared_multiv)) {
+  cat("**Key Findings - On-Treatment (Early Response):**\n")
+  cat("- Hazard Ratio for ctDNA Cleared at Landmark vs Not Cleared (adjusted for line of therapy, KPS, and visceral metastases):", 
+      round(hr_cleared_multiv, 2), 
+      " (95% CI: ", 
+      round(hr_cleared_multiv_lower, 2), 
+      "-", 
+      round(hr_cleared_multiv_upper, 2), 
+      ")\n")
+  cat("- P-value:", ifelse(p_cleared_multiv < 0.001, 
+                            "<0.001", 
+                            round(p_cleared_multiv, 3)), "\n\n")
+} else if (exists("hr_cleared") && !is.na(hr_cleared)) {
+  cat("**Key Findings - On-Treatment (Early Response):**\n")
+  cat("- Hazard Ratio for ctDNA Cleared at Landmark vs Not Cleared (adjusted for line of therapy):", 
+      round(hr_cleared, 2), 
+      " (95% CI: ", 
+      round(hr_cleared_lower, 2), 
+      "-", 
+      round(hr_cleared_upper, 2), 
+      ")\n")
+  cat("- P-value:", ifelse(p_cleared < 0.001, 
+                            "<0.001", 
+                            round(p_cleared, 3)), "\n\n")
+}
+cat("**Combined Interpretation:**\n\n")
+
+# Prognostic role (baseline ctDNA) - use fully adjusted model if available
+cat("**Prognostic Role (Baseline ctDNA):** ")
+# Use multivariate HR if available, otherwise fall back to line-adjusted HR
+hr_to_use <- if (!is.null(cox_model_multiv) && exists("hr_multiv") && !is.na(hr_multiv)) hr_multiv else hr_value
+hr_lower_to_use <- if (!is.null(cox_model_multiv) && exists("hr_multiv_lower") && !is.na(hr_multiv_lower)) hr_multiv_lower else hr_lower
+hr_upper_to_use <- if (!is.null(cox_model_multiv) && exists("hr_multiv_upper") && !is.na(hr_multiv_upper)) hr_multiv_upper else hr_upper
+adjustment_text <- if (!is.null(cox_model_multiv) && exists("hr_multiv") && !is.na(hr_multiv)) 
+  "adjusted for line of therapy, KPS, and visceral metastases" else "adjusted for line of therapy"
+
+if (hr_to_use > 1 && hr_lower_to_use > 1) {
+  cat("Higher ctDNA levels before starting a new line of therapy are significantly associated with worse metastasis-free survival (HR = ", round(hr_to_use, 2), ", 95% CI: ", round(hr_lower_to_use, 2), "-", round(hr_upper_to_use, 2), "), ", adjustment_text, ". ", sep="")
+  cat("This finding suggests that ctDNA level before therapy initiation may serve as a prognostic biomarker for duration of complete response outcomes across multiple lines of therapy in patients with metastatic urothelial carcinoma.\n\n")
+} else if (hr_to_use > 1) {
+  cat("Higher ctDNA levels before starting a new line of therapy show a trend toward worse metastasis-free survival (HR = ", round(hr_to_use, 2), ", 95% CI: ", round(hr_lower_to_use, 2), "-", round(hr_upper_to_use, 2), "), though the confidence interval includes 1.0, indicating the association may not be statistically significant.\n\n", sep="")
+} else if (hr_to_use < 1 && hr_upper_to_use < 1) {
+  cat("Higher ctDNA levels before starting a new line of therapy are significantly associated with better metastasis-free survival (HR = ", round(hr_to_use, 2), ", 95% CI: ", round(hr_lower_to_use, 2), "-", round(hr_upper_to_use, 2), "), which is counterintuitive and warrants further investigation.\n\n", sep="")
+} else {
+  cat("There is no significant association between ctDNA level before starting a new line of therapy and metastasis-free survival (HR = ", round(hr_to_use, 2), ", 95% CI: ", round(hr_lower_to_use, 2), "-", round(hr_upper_to_use, 2), "), ", adjustment_text, ".\n\n", sep="")
+}
+
+# On-treatment role (landmark analysis) - use fully adjusted model if available
+if (exists("hr_cleared_multiv") && !is.na(hr_cleared_multiv)) {
+  cat("**On-Treatment Role (Early Response):** Patients who cleared ctDNA at the landmark time point (6-16 weeks after therapy initiation) showed ", 
+      if (hr_cleared_multiv < 1) {
+        paste0("a significantly lower risk of metastasis or death (HR = ", round(hr_cleared_multiv, 2), ", 95% CI: ", round(hr_cleared_multiv_lower, 2), "-", round(hr_cleared_multiv_upper, 2), "), p = ", ifelse(p_cleared_multiv < 0.001, "<0.001", round(p_cleared_multiv, 3)), ", adjusted for line of therapy, KPS, and visceral metastases) COMPARED to those who did not clear ctDNA. ", sep = "")
+      } else {
+        paste0("a higher risk of metastasis or death (HR = ", round(hr_cleared_multiv, 2), ", 95% CI: ", round(hr_cleared_multiv_lower, 2), "-", round(hr_cleared_multiv_upper, 2), "), p = ", ifelse(p_cleared_multiv < 0.001, "<0.001", round(p_cleared_multiv, 3)), ", adjusted for line of therapy, KPS, and visceral metastases) COMPARED to those who did not clear ctDNA. ", sep = "")
+      })
+  cat("This strong association suggests that early ctDNA clearance may serve as a pharmacodynamic response biomarker, indicating effective treatment and potentially predicting improved metastasis-free survival. ")
+  cat("Together, these findings demonstrate both the prognostic value of baseline ctDNA levels and the predictive value of early on-treatment ctDNA changes. Validation as a surrogate endpoint would require prospective trials.\n")
+} else if (exists("hr_cleared") && !is.na(hr_cleared)) {
+  cat("**On-Treatment Role (Early Response):** Patients who cleared ctDNA at the landmark time point (6-16 weeks after therapy initiation) showed ", 
+      if (hr_cleared < 1) {
+        paste0("a significantly lower risk of metastasis or death (HR = ", round(hr_cleared, 2), ", 95% CI: ", round(hr_cleared_lower, 2), "-", round(hr_cleared_upper, 2), "), p = ", ifelse(p_cleared < 0.001, "<0.001", round(p_cleared, 3)), ", adjusted for line of therapy) COMPARED to those who did not clear ctDNA. ", sep = "")
+      } else {
+        paste0("a higher risk of metastasis or death (HR = ", round(hr_cleared, 2), ", 95% CI: ", round(hr_cleared_lower, 2), "-", round(hr_cleared_upper, 2), "), p = ", ifelse(p_cleared < 0.001, "<0.001", round(p_cleared, 3)), ", adjusted for line of therapy) COMPARED to those who did not clear ctDNA. ", sep = "")
+      })
+  cat("This strong association suggests that early ctDNA clearance may serve as a pharmacodynamic response biomarker, indicating effective treatment and potentially predicting improved metastasis-free survival. ")
+  cat("Together, these findings demonstrate both the prognostic value of baseline ctDNA levels and the predictive value of early on-treatment ctDNA changes. Validation as a surrogate endpoint would require prospective trials.\n")
+}
+
+```
+

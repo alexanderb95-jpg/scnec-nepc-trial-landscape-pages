@@ -1,0 +1,5 @@
+"ctdna_pattern","n","percentage","expected_total"
+"Conversion (0→>0)",22,7.1,63
+"Persistent Negative",119,38.4,342
+"Persistent Positive",89,28.7,255
+"Resolution (>0→0)",80,25.8,230

@@ -1,0 +1,11 @@
+"regimen_clean","setting_clean","n_patients","percentage","expected_total"
+"Enfortumab Vedotin + Pembrolizumab","Palliative",5,4.6,14
+"Other (see notes)","Palliative",4,3.7,11
+"Gemcitabine + Cisplatin","Neoadjuvant",2,1.9,6
+"Pembrolizumab","Palliative",2,1.9,6
+"Disitimab Vedotin","Palliative",1,0.9,3
+"Gemcitabine + Carboplatin","Palliative",1,0.9,3
+"Gemcitabine + Cisplatin","Palliative",1,0.9,3
+"Gemcitabine + Cisplatin + Nivolumab","Palliative",1,0.9,3
+"Nivolumab","Adjuvant",1,0.9,3
+"Trastuzumab Deruxtecan","Palliative",1,0.9,3

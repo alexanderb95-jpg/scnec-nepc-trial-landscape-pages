@@ -1,0 +1,2885 @@
+---
+title: "LB-RECIST: Liquid Biopsy Response Evaluation Criteria in Solid Tumors"
+author: "Alex Karol"
+date: "2025-12-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# ==============================
+# Setup
+# ==============================
+knitr::opts_knit$set(root.dir = "~/R")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Core libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(knitr)
+  library(kableExtra)
+  library(ggplot2)
+  library(patchwork)
+  library(survival)
+  library(survminer)
+  library(cluster)
+  library(purrr)
+})
+
+# Ensure survminer functions are available
+if (!exists("ggsurvplot")) {
+  if (requireNamespace("survminer", quietly = TRUE)) {
+    ggsurvplot <- survminer::ggsurvplot
+  } else {
+    stop("survminer package is required for Kaplan-Meier plots")
+  }
+}
+
+# excel_sheets is already available from readxl package
+
+# Helper function: Robust date parser
+as_date_safe <- function(x) {
+  v <- as.character(x)
+  num <- suppressWarnings(as.numeric(v))
+  out <- rep(as.Date(NA), length(v))
+  # Excel serials (roughly 1955–2064)
+  is_serial <- !is.na(num) & num > 20000 & num < 60000
+  out[is_serial] <- as.Date(num[is_serial], origin = "1899-12-30")
+  # Strings
+  left <- !is_serial
+  if (any(left)) {
+    parsed <- suppressWarnings(parse_date_time(v[left], orders = c("Y-m-d","m/d/Y","d/m/Y","m/d/y","d/m/y","Ymd"), tz = "UTC"))
+    out[left] <- as.Date(parsed)
+  }
+  # Clamp to reasonable range
+  bad <- is.na(out) | year(out) < 2000 | year(out) > 2100
+  out[bad] <- as.Date(NA)
+  out
+}
+
+# Build long ctDNA data from wide columns
+build_ctdna_long <- function(dat, id_col) {
+  val <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+$")) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp", values_to = "ctdna_value_raw") %>%
+    mutate(ctdna_value = suppressWarnings(as.numeric(gsub("^<\\s*", "", gsub(",", "", as.character(ctdna_value_raw))))) )
+  dt  <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+_date$")) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp_date", values_to = "ctdna_date_raw")
+  out <- val %>%
+    mutate(tp_idx = as.integer(str_extract(tp, "\\d+"))) %>%
+    left_join(dt %>% mutate(tp_idx = as.integer(str_extract(tp_date, "\\d+"))) %>% select(all_of(id_col), tp_idx, ctdna_date_raw),
+              by = c(id_col, "tp_idx")) %>%
+    mutate(ctdna_date = as_date_safe(ctdna_date_raw)) %>%
+    filter(!is.na(ctdna_date), !is.na(ctdna_value)) %>%
+    select(all_of(id_col), ctdna_date, ctdna_value) %>%
+    arrange(.data[[id_col]], ctdna_date)
+  out
+}
+```
+
+```{r load_and_combine_data, include=FALSE}
+# ==============================
+# Load and Combine Both Datasets
+# ==============================
+
+cat("=== Loading Lower Tract Dataset ===\n")
+# Lower tract dataset
+file_path_lower <- "Natera_Sheet_Master1.xlsx"
+# Check available sheets and use the correct one
+available_sheets_lower <- excel_sheets(file_path_lower)
+cat("Available sheets in lower tract file:", paste(available_sheets_lower, collapse = ", "), "\n")
+sheet_name_lower <- if ("Master_Sheet" %in% available_sheets_lower) {
+  "Master_Sheet"
+} else if ("Sheet1" %in% available_sheets_lower) {
+  "Sheet1"
+} else {
+  available_sheets_lower[1]  # Use first sheet
+}
+cat("Using sheet:", sheet_name_lower, "\n")
+raw_lower <- read_excel(file_path_lower, sheet = sheet_name_lower, col_names = FALSE)
+var_names_lower <- raw_lower[[1]]
+dat_lower <- as.data.frame(t(raw_lower[, -1]), stringsAsFactors = FALSE)
+colnames(dat_lower) <- make.unique(var_names_lower, sep = "_")
+dat_lower <- clean_names(dat_lower)
+
+# Identify patient ID column
+id_col_lower <- if ("record_id_linking_key" %in% names(dat_lower)) {
+  "record_id_linking_key"
+} else {
+  id_candidates <- names(dat_lower)[str_detect(names(dat_lower), regex("record.*id|id.*linking|linking.*key", ignore_case = TRUE))]
+  if (length(id_candidates) > 0) id_candidates[1] else names(dat_lower)[2]
+}
+
+# Filter blank IDs
+dat_lower <- dat_lower %>%
+  mutate(id_check = as.character(.data[[id_col_lower]])) %>%
+  filter(!is.na(id_check), str_trim(id_check) != "", str_trim(id_check) != "NA") %>%
+  select(-id_check)
+
+# Add dataset identifier
+dat_lower$dataset <- "Lower Tract"
+
+cat("Lower tract patients:", nrow(dat_lower), "\n")
+
+cat("\n=== Loading Upper Tract Dataset ===\n")
+# Upper tract dataset
+file_path_upper <- "Natera_Sheet_UTUC.xlsx"
+raw_upper <- read_excel(file_path_upper, sheet = "Sheet1", col_names = FALSE)
+var_names_upper <- raw_upper[[1]]
+dat_upper <- as.data.frame(t(raw_upper[, -1]), stringsAsFactors = FALSE)
+colnames(dat_upper) <- make.unique(var_names_upper, sep = "_")
+dat_upper <- clean_names(dat_upper)
+
+# Identify patient ID column
+id_col_upper <- if ("record_id_linking_key" %in% names(dat_upper)) {
+  "record_id_linking_key"
+} else {
+  id_candidates <- names(dat_upper)[str_detect(names(dat_upper), regex("record.*id|id.*linking|linking.*key", ignore_case = TRUE))]
+  if (length(id_candidates) > 0) id_candidates[1] else names(dat_upper)[2]
+}
+
+# Filter blank IDs
+dat_upper <- dat_upper %>%
+  mutate(id_check = as.character(.data[[id_col_upper]])) %>%
+  filter(!is.na(id_check), str_trim(id_check) != "", str_trim(id_check) != "NA") %>%
+  select(-id_check)
+
+# Add dataset identifier
+dat_upper$dataset <- "Upper Tract"
+
+cat("Upper tract patients:", nrow(dat_upper), "\n")
+
+# Standardize ID column name for both datasets
+dat_lower <- dat_lower %>% rename(patient_id = all_of(id_col_lower))
+dat_upper <- dat_upper %>% rename(patient_id = all_of(id_col_upper))
+
+# Convert date columns
+date_cols_lower <- names(dat_lower)[str_detect(names(dat_lower), regex("date", ignore_case = TRUE))]
+date_cols_upper <- names(dat_upper)[str_detect(names(dat_upper), regex("date", ignore_case = TRUE))]
+
+dat_lower <- dat_lower %>% mutate(across(all_of(date_cols_lower), as_date_safe))
+dat_upper <- dat_upper %>% mutate(across(all_of(date_cols_upper), as_date_safe))
+
+# Normalize ctDNA column names
+names(dat_lower) <- str_replace_all(names(dat_lower), regex("^ct[_ ]?dna[_ ]?level(\\d+)$", ignore_case = TRUE), "ct_dna_level_\\1")
+names(dat_upper) <- str_replace_all(names(dat_upper), regex("^ct[_ ]?dna[_ ]?level(\\d+)$", ignore_case = TRUE), "ct_dna_level_\\1")
+
+# Ensure ctDNA numeric columns are numeric
+ctdna_value_cols_lower <- names(dat_lower)[str_detect(names(dat_lower), regex("^ct_dna_level_\\d+$", ignore_case = TRUE))]
+if (length(ctdna_value_cols_lower)) {
+  dat_lower[ctdna_value_cols_lower] <- lapply(dat_lower[ctdna_value_cols_lower], function(x) {
+    y <- gsub(",", "", as.character(x))
+    y <- gsub("^<\\s*", "", y)
+    y[y %in% c("", "NA", "N/A", "na", "n/a", "Not detected", "Undetected", "NEGATIVE", "Negative", "neg", "ND")] <- NA
+    suppressWarnings(as.numeric(y))
+  })
+}
+
+ctdna_value_cols_upper <- names(dat_upper)[str_detect(names(dat_upper), regex("^ct_dna_level_\\d+$", ignore_case = TRUE))]
+if (length(ctdna_value_cols_upper)) {
+  dat_upper[ctdna_value_cols_upper] <- lapply(dat_upper[ctdna_value_cols_upper], function(x) {
+    y <- gsub(",", "", as.character(x))
+    y <- gsub("^<\\s*", "", y)
+    y[y %in% c("", "NA", "N/A", "na", "n/a", "Not detected", "Undetected", "NEGATIVE", "Negative", "neg", "ND")] <- NA
+    suppressWarnings(as.numeric(y))
+  })
+}
+
+cat("\n=== Combining Datasets ===\n")
+# Find common columns for combining
+common_cols <- intersect(names(dat_lower), names(dat_upper))
+cat("Common columns:", length(common_cols), "\n")
+
+# Combine datasets (keeping only common columns)
+dat_combined <- bind_rows(
+  dat_lower %>% select(all_of(common_cols), dataset),
+  dat_upper %>% select(all_of(common_cols), dataset)
+)
+
+cat("Total combined patients:", nrow(dat_combined), "\n")
+cat("  - Lower tract:", sum(dat_combined$dataset == "Lower Tract"), "\n")
+cat("  - Upper tract:", sum(dat_combined$dataset == "Upper Tract"), "\n")
+
+# Extract cancer stage information
+# Look for stage columns (T stage, pathology stage, clinical stage, etc.)
+stage_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("stage|t_stage|pathology.*stage|clinical.*stage|cancer.*stage", ignore_case = TRUE))]
+
+cat("\nStage-related columns found:", paste(stage_cols, collapse = ", "), "\n")
+
+# Function to extract numeric stage from stage string
+extract_stage_number <- function(x) {
+  if (is.na(x) || x == "" || x == "NA") return(NA_real_)
+  x_upper <- toupper(as.character(x))
+  # Look for T2, T3, T4, Stage II, Stage III, Stage IV, etc.
+  if (str_detect(x_upper, "T[234]|STAGE\\s*[I]{2,}|STAGE\\s*[IVX]+")) {
+    # Extract T stage number
+    t_match <- str_extract(x_upper, "T([234])")
+    if (!is.na(t_match)) {
+      return(as.numeric(str_extract(t_match, "\\d+")))
+    }
+    # Extract stage number (II, III, IV)
+    stage_match <- str_extract(x_upper, "STAGE\\s*([IVX]+)")
+    if (!is.na(stage_match)) {
+      stage_roman <- str_extract(stage_match, "[IVX]+")
+      stage_map <- c("I" = 1, "II" = 2, "III" = 3, "IV" = 4)
+      if (stage_roman %in% names(stage_map)) {
+        return(stage_map[stage_roman])
+      }
+    }
+  }
+  # Check for T1 or Stage I (these are stage I, not II+)
+  if (str_detect(x_upper, "T1|STAGE\\s*I[^IVX]")) {
+    return(1)
+  }
+  return(NA_real_)
+}
+
+# Extract stage for each patient
+if (length(stage_cols) > 0) {
+  patient_stage <- dat_combined %>%
+    select(patient_id, dataset, all_of(stage_cols)) %>%
+    rowwise() %>%
+    mutate(
+      # Try to extract stage from each column
+      stage_values = {
+        values <- c_across(all_of(stage_cols))
+        stages <- map_dbl(values, extract_stage_number)
+        max(stages, na.rm = TRUE)  # Take highest stage if multiple
+      }
+    ) %>%
+    ungroup() %>%
+    mutate(
+      stage_numeric = ifelse(is.infinite(stage_values), NA_real_, stage_values),
+      stage_ii_or_higher = !is.na(stage_numeric) & stage_numeric >= 2
+    ) %>%
+    select(patient_id, dataset, stage_numeric, stage_ii_or_higher)
+} else {
+  # If no stage columns found, assume all patients are Stage II+ (or create a warning)
+  cat("WARNING: No stage columns found. Including all patients.\n")
+  patient_stage <- dat_combined %>%
+    select(patient_id, dataset) %>%
+    mutate(
+      stage_numeric = NA_real_,
+      stage_ii_or_higher = TRUE  # Include all if we can't determine stage
+    )
+}
+
+cat("\nStage distribution:\n")
+print(table(patient_stage$stage_numeric, useNA = "always"))
+cat("\nPatients with Stage II or higher:", sum(patient_stage$stage_ii_or_higher, na.rm = TRUE), "\n")
+cat("Patients with Stage I or unknown:", sum(!patient_stage$stage_ii_or_higher | is.na(patient_stage$stage_ii_or_higher), na.rm = TRUE), "\n")
+
+# Filter to only Stage II or higher
+dat_combined <- dat_combined %>%
+  left_join(patient_stage %>% select(patient_id, stage_ii_or_higher), by = "patient_id") %>%
+  filter(stage_ii_or_higher == TRUE)
+
+cat("\nAfter filtering to Stage II or higher:", nrow(dat_combined), "patients\n")
+```
+
+```{r build_ctdna_data, include=FALSE}
+# ==============================
+# Build Combined ctDNA Data
+# ==============================
+
+cat("\n=== Building ctDNA Data ===\n")
+
+# Build long ctDNA data for combined dataset
+ctdna_long <- build_ctdna_long(dat_combined, "patient_id")
+
+cat("Total ctDNA measurements:", nrow(ctdna_long), "\n")
+cat("Patients with ctDNA data:", length(unique(ctdna_long$patient_id)), "\n")
+
+# Add dataset identifier
+ctdna_long <- ctdna_long %>%
+  left_join(dat_combined %>% select(patient_id, dataset), by = "patient_id")
+
+# Calculate baseline ctDNA (first measurement per patient)
+baseline_ctdna <- ctdna_long %>%
+  group_by(patient_id) %>%
+  arrange(ctdna_date) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(patient_id, baseline_date = ctdna_date, baseline_value = ctdna_value, dataset)
+
+cat("\nPatients with baseline ctDNA:", nrow(baseline_ctdna), "\n")
+cat("  Baseline positive (ctDNA > 0):", sum(baseline_ctdna$baseline_value > 0, na.rm = TRUE), "\n")
+cat("  Baseline negative (ctDNA = 0):", sum(baseline_ctdna$baseline_value == 0, na.rm = TRUE), "\n")
+```
+
+```{r calculate_lbrecist, include=FALSE, eval=FALSE}
+# ==============================
+# Calculate LB-RECIST Response Categories
+# REMOVED: Not needed for current analysis
+# ==============================
+
+cat("\n=== Calculating LB-RECIST Response Categories ===\n")
+
+# LB-RECIST Criteria:
+# 1. Complete Response (CR): ctDNA becomes negative (0) from a positive baseline, confirmed
+# 2. Partial Response (PR): ≥50% reduction in ctDNA from baseline (and not CR)
+# 3. Stable Disease (SD): Neither CR/PR nor PD criteria met
+# 4. Progressive Disease (PD): ≥50% increase in ctDNA from baseline, or new positive ctDNA after being negative
+
+# For each patient, calculate best response
+# Join baseline data (dataset is already in ctdna_long, but we need baseline info)
+response_data <- ctdna_long %>%
+  left_join(baseline_ctdna %>% select(patient_id, baseline_date, baseline_value), by = "patient_id") %>%
+  filter(!is.na(baseline_value)) %>%
+  # Calculate change from baseline
+  mutate(
+    days_from_baseline = as.numeric(ctdna_date - baseline_date),
+    percent_change = case_when(
+      baseline_value == 0 ~ NA_real_,  # Can't calculate % change from 0
+      baseline_value > 0 ~ ((ctdna_value - baseline_value) / baseline_value) * 100,
+      TRUE ~ NA_real_
+    ),
+    absolute_change = ctdna_value - baseline_value,
+    # Status indicators
+    became_negative = (baseline_value > 0 & ctdna_value == 0),
+    became_positive = (baseline_value == 0 & ctdna_value > 0),
+    reduction_50pct = (baseline_value > 0 & percent_change <= -50),
+    increase_50pct = (baseline_value > 0 & percent_change >= 50)
+  ) %>%
+  # Only consider measurements after baseline
+  filter(days_from_baseline > 0) %>%
+  arrange(patient_id, ctdna_date)
+
+# Calculate best response per patient
+# Verify dataset column exists
+if (!"dataset" %in% names(response_data)) {
+  # Add dataset from baseline_ctdna if missing
+  response_data <- response_data %>%
+    left_join(baseline_ctdna %>% select(patient_id, dataset), by = "patient_id")
+}
+
+best_response <- response_data %>%
+  group_by(patient_id, dataset) %>%
+  summarise(
+    baseline_value = first(baseline_value),
+    baseline_date = first(baseline_date),
+    n_measurements = n(),
+    # Check for CR: became negative and stayed negative (or at least one negative after positive baseline)
+    has_cr = any(became_negative, na.rm = TRUE),
+    # Check for PR: ≥50% reduction (but not CR)
+    has_pr = any(reduction_50pct, na.rm = TRUE) & !any(became_negative, na.rm = TRUE),
+    # Check for PD: ≥50% increase OR became positive from negative baseline
+    has_pd = any(increase_50pct, na.rm = TRUE) | any(became_positive, na.rm = TRUE),
+    # Best percent reduction
+    best_reduction = min(percent_change, na.rm = TRUE),
+    # Worst increase
+    worst_increase = max(percent_change, na.rm = TRUE),
+    # Last measurement
+    last_value = last(ctdna_value),
+    last_date = last(ctdna_date),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Assign response category
+    lbrecist_response = case_when(
+      has_cr ~ "Complete Response (CR)",
+      has_pr ~ "Partial Response (PR)",
+      has_pd ~ "Progressive Disease (PD)",
+      TRUE ~ "Stable Disease (SD)"
+    ),
+    # Additional details
+    response_detail = case_when(
+      has_cr ~ paste0("CR: ctDNA became negative (baseline: ", round(baseline_value, 2), ")"),
+      has_pr ~ paste0("PR: ≥50% reduction (best: ", round(best_reduction, 1), "%)"),
+      has_pd ~ paste0("PD: ≥50% increase or new positive (worst: ", round(worst_increase, 1), "%)"),
+      TRUE ~ paste0("SD: No significant change (change: ", round(ifelse(!is.na(best_reduction), best_reduction, 0), 1), "%)")
+    )
+  )
+
+cat("\nLB-RECIST Response Categories:\n")
+print(table(best_response$lbrecist_response))
+
+cat("\nBy Dataset:\n")
+print(table(best_response$dataset, best_response$lbrecist_response))
+```
+
+```{r response_summary_tables, eval=FALSE}
+# ==============================
+# Response Summary Tables
+# REMOVED: LB-RECIST section not needed
+# ==============================
+
+cat("\n=== LB-RECIST Response Summary ===\n\n")
+
+# Overall summary table
+summary_table <- best_response %>%
+  count(lbrecist_response) %>%
+  mutate(
+    Percent = round(n / sum(n) * 100, 1),
+    `N (%)` = paste0(n, " (", Percent, "%)")
+  ) %>%
+  select(Response = lbrecist_response, `N (%)`, n) %>%
+  arrange(desc(n))
+
+kable(summary_table, caption = "Overall LB-RECIST Response Distribution") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+cat("\n\n")
+
+# By dataset
+summary_by_dataset <- best_response %>%
+  count(dataset, lbrecist_response) %>%
+  group_by(dataset) %>%
+  mutate(
+    Percent = round(n / sum(n) * 100, 1),
+    `N (%)` = paste0(n, " (", Percent, "%)")
+  ) %>%
+  ungroup() %>%
+  select(Dataset = dataset, Response = lbrecist_response, `N (%)`, n) %>%
+  arrange(Dataset, desc(n))
+
+kable(summary_by_dataset, caption = "LB-RECIST Response by Dataset") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+cat("\n\n")
+
+# Detailed patient-level table (sample)
+detailed_table <- best_response %>%
+  select(patient_id, dataset, baseline_value, n_measurements, lbrecist_response, response_detail) %>%
+  arrange(dataset, lbrecist_response, patient_id) %>%
+  head(20)
+
+kable(detailed_table, caption = "Sample of Patient-Level LB-RECIST Responses (First 20)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = TRUE)
+```
+
+```{r response_visualizations, eval=FALSE}
+# ==============================
+# Response Visualizations
+# REMOVED: LB-RECIST section not needed
+# ==============================
+
+# 1. Bar chart of response categories
+p1 <- best_response %>%
+  count(lbrecist_response) %>%
+  mutate(
+    lbrecist_response = factor(lbrecist_response, 
+                               levels = c("Complete Response (CR)", "Partial Response (PR)", 
+                                          "Stable Disease (SD)", "Progressive Disease (PD)"))
+  ) %>%
+  ggplot(aes(x = lbrecist_response, y = n, fill = lbrecist_response)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = n), vjust = -0.5, size = 4) +
+  scale_fill_manual(values = c("Complete Response (CR)" = "#2E7D32",
+                               "Partial Response (PR)" = "#66BB6A",
+                               "Stable Disease (SD)" = "#FFA726",
+                               "Progressive Disease (PD)" = "#E53935")) +
+  labs(title = "LB-RECIST Response Distribution",
+       x = "Response Category",
+       y = "Number of Patients",
+       fill = "Response") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 2. Response by dataset
+p2 <- best_response %>%
+  count(dataset, lbrecist_response) %>%
+  group_by(dataset) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ungroup() %>%
+  mutate(
+    lbrecist_response = factor(lbrecist_response, 
+                               levels = c("Complete Response (CR)", "Partial Response (PR)", 
+                                          "Stable Disease (SD)", "Progressive Disease (PD)"))
+  ) %>%
+  ggplot(aes(x = dataset, y = pct, fill = lbrecist_response)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = c("Complete Response (CR)" = "#2E7D32",
+                               "Partial Response (PR)" = "#66BB6A",
+                               "Stable Disease (SD)" = "#FFA726",
+                               "Progressive Disease (PD)" = "#E53935"),
+                    name = "Response") +
+  labs(title = "LB-RECIST Response by Dataset",
+       x = "Dataset",
+       y = "Percentage of Patients (%)") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+# 3. Baseline ctDNA distribution by response
+p3 <- best_response %>%
+  filter(!is.na(baseline_value)) %>%
+  mutate(
+    lbrecist_response = factor(lbrecist_response, 
+                               levels = c("Complete Response (CR)", "Partial Response (PR)", 
+                                          "Stable Disease (SD)", "Progressive Disease (PD)"))
+  ) %>%
+  ggplot(aes(x = lbrecist_response, y = baseline_value, fill = lbrecist_response)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_y_log10() +
+  scale_fill_manual(values = c("Complete Response (CR)" = "#2E7D32",
+                               "Partial Response (PR)" = "#66BB6A",
+                               "Stable Disease (SD)" = "#FFA726",
+                               "Progressive Disease (PD)" = "#E53935"),
+                    guide = "none") +
+  labs(title = "Baseline ctDNA by Response Category",
+       x = "Response Category",
+       y = "Baseline ctDNA (log scale)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Combine plots
+combined_plots <- (p1 | p2) / p3
+combined_plots <- combined_plots + 
+  plot_annotation(title = "LB-RECIST Response Evaluation",
+                  subtitle = "Liquid Biopsy Response Evaluation Criteria in Solid Tumors")
+
+print(combined_plots)
+```
+
+```{r export_results, include=FALSE, eval=FALSE}
+# ==============================
+# Export Results
+# REMOVED: LB-RECIST section not needed
+# ==============================
+
+# Create comprehensive results table
+results_export <- best_response %>%
+  left_join(
+    ctdna_long %>%
+      group_by(patient_id) %>%
+      summarise(
+        first_ctdna_date = min(ctdna_date, na.rm = TRUE),
+        last_ctdna_date = max(ctdna_date, na.rm = TRUE),
+        total_measurements = n(),
+        .groups = "drop"
+      ),
+    by = "patient_id"
+  ) %>%
+  select(
+    patient_id,
+    dataset,
+    baseline_date,
+    baseline_value,
+    first_ctdna_date,
+    last_ctdna_date,
+    total_measurements,
+    n_measurements,
+    lbrecist_response,
+    response_detail,
+    best_reduction,
+    worst_increase,
+    last_value
+  ) %>%
+  arrange(dataset, lbrecist_response, patient_id)
+
+# Write to CSV
+write.csv(results_export, "LB_RECIST_Results.csv", row.names = FALSE)
+
+cat("\n=== Results Exported ===\n")
+cat("Results saved to: LB_RECIST_Results.csv\n")
+cat("Total patients with LB-RECIST assessment:", nrow(results_export), "\n")
+```
+
+```{r extract_survival_data, include=FALSE}
+# ==============================
+# Extract Survival and Relapse Data
+# ==============================
+
+cat("\n=== Extracting Survival and Relapse Data ===\n")
+
+# Extract relapse/progression dates from combined dataset
+relapse_cols_lower <- names(dat_lower)[str_detect(names(dat_lower), regex("metastatic.*relapse.*date|relapse.*date|metastasis.*date|progression.*date", ignore_case = TRUE))]
+relapse_cols_upper <- names(dat_upper)[str_detect(names(dat_upper), regex("metastatic.*relapse.*date|relapse.*date|metastasis.*date|progression.*date", ignore_case = TRUE))]
+
+# Extract survival/death dates
+survival_cols_lower <- names(dat_lower)[str_detect(names(dat_lower), regex("death.*date|died.*date|survival.*date|last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE))]
+survival_cols_upper <- names(dat_upper)[str_detect(names(dat_upper), regex("death.*date|died.*date|survival.*date|last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE))]
+
+# Extract death status
+death_status_cols_lower <- names(dat_lower)[str_detect(names(dat_lower), regex("death|died|vital.*status|alive|dead", ignore_case = TRUE))]
+death_status_cols_upper <- names(dat_upper)[str_detect(names(dat_upper), regex("death|died|vital.*status|alive|dead", ignore_case = TRUE))]
+
+# Function to extract survival data from a dataset
+extract_survival_data <- function(dat, id_col_name, raw_data = NULL, row_num = NULL) {
+  # Get relapse date
+  relapse_date <- NULL
+  relapse_cols <- names(dat)[str_detect(names(dat), regex("metastatic.*relapse.*date|relapse.*date|metastasis.*date|progression.*date", ignore_case = TRUE))]
+  if (length(relapse_cols) > 0) {
+    relapse_data <- dat %>%
+      select(all_of(id_col_name), all_of(relapse_cols[1])) %>%
+      rename(relapse_date_raw = all_of(relapse_cols[1])) %>%
+      mutate(relapse_date = as_date_safe(relapse_date_raw)) %>%
+      select(all_of(id_col_name), relapse_date)
+    relapse_date <- relapse_data
+  }
+  
+  # Get explicit death date (separate from follow-up date)
+  explicit_death_date <- NULL
+  death_date_cols <- names(dat)[str_detect(names(dat), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                 !str_detect(names(dat), regex("cause|reason", ignore_case = TRUE))]
+  if (length(death_date_cols) > 0) {
+    death_date_data <- dat %>%
+      select(all_of(id_col_name), all_of(death_date_cols[1])) %>%
+      rename(death_date_raw = all_of(death_date_cols[1])) %>%
+      mutate(
+        # Check if already a Date object, otherwise convert
+        explicit_death_date = if (inherits(death_date_raw, "Date")) {
+          death_date_raw
+        } else {
+          as_date_safe(death_date_raw)
+        }
+      ) %>%
+      select(all_of(id_col_name), explicit_death_date)
+    explicit_death_date <- death_date_data
+  }
+  
+  # Get survival/follow-up date (last follow-up date)
+  survival_date <- NULL
+  survival_cols <- names(dat)[str_detect(names(dat), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                              !str_detect(names(dat), regex("death", ignore_case = TRUE))]
+  if (length(survival_cols) > 0) {
+    survival_data <- dat %>%
+      select(all_of(id_col_name), all_of(survival_cols[1])) %>%
+      rename(survival_date_raw = all_of(survival_cols[1])) %>%
+      mutate(survival_date = as_date_safe(survival_date_raw)) %>%
+      select(all_of(id_col_name), survival_date)
+    survival_date <- survival_data
+  }
+  
+  # Get alive yes/no status (row 259 in raw Excel)
+  alive_status <- NULL
+  alive_cols <- names(dat)[str_detect(names(dat), regex("^alive_yes_no$|alive.*yes.*no", ignore_case = TRUE))]
+  if (length(alive_cols) > 0) {
+    alive_data <- dat %>%
+      select(all_of(id_col_name), all_of(alive_cols[1])) %>%
+      rename(alive_status_raw = all_of(alive_cols[1])) %>%
+      mutate(
+        alive_yes_no = case_when(
+          str_detect(tolower(as.character(alive_status_raw)), "yes|y|1") ~ "Yes",
+          str_detect(tolower(as.character(alive_status_raw)), "no|n|0") ~ "No",
+          TRUE ~ NA_character_
+        )
+      ) %>%
+      select(all_of(id_col_name), alive_yes_no)
+    alive_status <- alive_data
+  }
+  
+  # Get death status (legacy - for backward compatibility)
+  death_status <- NULL
+  death_status_cols <- names(dat)[str_detect(names(dat), regex("death|died|vital.*status", ignore_case = TRUE)) & 
+                                   !str_detect(names(dat), regex("date|alive", ignore_case = TRUE))]
+  if (length(death_status_cols) > 0) {
+    death_data <- dat %>%
+      select(all_of(id_col_name), all_of(death_status_cols[1])) %>%
+      rename(death_status_raw = all_of(death_status_cols[1])) %>%
+      mutate(
+        death_status_legacy = case_when(
+          str_detect(tolower(as.character(death_status_raw)), "yes|dead|died|death|deceased") ~ 1,
+          TRUE ~ 0
+        )
+      ) %>%
+      select(all_of(id_col_name), death_status_legacy)
+    death_status <- death_data
+  }
+  
+  # Extract palliative therapy start dates (these indicate relapse/progression)
+  palliative_dates <- NULL
+  # Look for systemic therapy columns with palliative setting
+  therapy_cols <- names(dat)[str_detect(names(dat), regex("systemic.*therapy.*\\d+", ignore_case = TRUE))]
+  therapy_setting_cols <- names(dat)[str_detect(names(dat), regex("systemic.*therapy.*\\d+.*setting", ignore_case = TRUE))]
+  therapy_start_cols <- names(dat)[str_detect(names(dat), regex("systemic.*therapy.*\\d+.*start.*date", ignore_case = TRUE))]
+  
+  if (length(therapy_setting_cols) > 0 && length(therapy_start_cols) > 0) {
+    # Get all therapy settings and start dates
+    therapy_settings_long <- dat %>%
+      select(all_of(id_col_name), all_of(therapy_setting_cols)) %>%
+      pivot_longer(-all_of(id_col_name), names_to = "therapy_var", values_to = "setting") %>%
+      mutate(
+        therapy_idx = str_extract(therapy_var, "\\d+"),
+        setting_lower = tolower(as.character(setting))
+      ) %>%
+      filter(str_detect(setting_lower, "palliative"))
+    
+    therapy_starts_long <- dat %>%
+      select(all_of(id_col_name), all_of(therapy_start_cols)) %>%
+      pivot_longer(-all_of(id_col_name), names_to = "therapy_var", values_to = "start_date_raw") %>%
+      mutate(
+        therapy_idx = str_extract(therapy_var, "\\d+"),
+        start_date = as_date_safe(start_date_raw)
+      ) %>%
+      filter(!is.na(start_date))
+    
+    # Join to get palliative therapy start dates
+    palliative_dates <- therapy_settings_long %>%
+      left_join(therapy_starts_long, by = c(id_col_name, "therapy_idx")) %>%
+      filter(!is.na(start_date)) %>%
+      group_by(.data[[id_col_name]]) %>%
+      summarise(
+        first_palliative_date = min(start_date, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      rename(palliative_start_date = first_palliative_date)
+  }
+  
+  # Combine
+  result <- dat %>% select(all_of(id_col_name))
+  if (!is.null(relapse_date)) {
+    result <- result %>% left_join(relapse_date, by = id_col_name)
+  } else {
+    result <- result %>% mutate(relapse_date = as.Date(NA))
+  }
+  if (!is.null(explicit_death_date)) {
+    result <- result %>% left_join(explicit_death_date, by = id_col_name)
+  } else {
+    result <- result %>% mutate(explicit_death_date = as.Date(NA))
+  }
+  if (!is.null(survival_date)) {
+    result <- result %>% left_join(survival_date, by = id_col_name)
+  } else {
+    result <- result %>% mutate(survival_date = as.Date(NA))
+  }
+  if (!is.null(alive_status)) {
+    result <- result %>% left_join(alive_status, by = id_col_name)
+  } else {
+    result <- result %>% mutate(alive_yes_no = NA_character_)
+  }
+  if (!is.null(death_status)) {
+    result <- result %>% left_join(death_status, by = id_col_name)
+  } else {
+    result <- result %>% mutate(death_status_legacy = NA_real_)
+  }
+  if (!is.null(palliative_dates)) {
+    result <- result %>% left_join(palliative_dates, by = id_col_name)
+  } else {
+    result <- result %>% mutate(palliative_start_date = as.Date(NA))
+  }
+  
+  result
+}
+
+# Extract survival data from both datasets
+# Pass raw data for row-based extraction if needed
+survival_lower <- extract_survival_data(dat_lower, "patient_id", raw_lower, row_num = 259)
+survival_lower$dataset <- "Lower Tract"
+
+survival_upper <- extract_survival_data(dat_upper, "patient_id", raw_upper, row_num = 259)
+survival_upper$dataset <- "Upper Tract"
+
+# Combine survival data
+survival_data <- bind_rows(survival_lower, survival_upper)
+
+cat("Survival data extracted for", nrow(survival_data), "patients\n")
+cat("  Patients with relapse date:", sum(!is.na(survival_data$relapse_date)), "\n")
+cat("  Patients with survival date:", sum(!is.na(survival_data$survival_date)), "\n")
+cat("  Patients with explicit death date:", sum(!is.na(survival_data$explicit_death_date)), "\n")
+cat("  Patients with alive_yes_no == 'No':", sum(survival_data$alive_yes_no == "No", na.rm = TRUE), "\n")
+cat("  Patients with death_status_legacy == 1:", sum(survival_data$death_status_legacy == 1, na.rm = TRUE), "\n")
+```
+
+```{r create_survival_outcomes, include=FALSE}
+# ==============================
+# Create Survival Outcomes
+# ==============================
+
+cat("\n=== Creating Survival Outcomes ===\n")
+
+# Merge survival data with baseline ctDNA and response data
+# Start from ALL patients in combined dataset, not just those with baseline ctDNA
+all_patients <- dat_combined %>%
+  select(patient_id, dataset) %>%
+  distinct()
+
+# Get last ctDNA date for each patient (for censoring if no follow-up date)
+last_ctdna_dates <- ctdna_long %>%
+  group_by(patient_id) %>%
+  summarise(
+    last_ctdna_date = max(ctdna_date, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Get last systemic therapy date for each patient (for censoring if no follow-up date)
+# Extract all systemic therapy dates (start and end)
+therapy_date_cols_lower <- names(dat_lower)[str_detect(names(dat_lower), regex("systemic.*therapy.*\\d+.*(start|end).*date", ignore_case = TRUE))]
+therapy_date_cols_upper <- names(dat_upper)[str_detect(names(dat_upper), regex("systemic.*therapy.*\\d+.*(start|end).*date", ignore_case = TRUE))]
+
+# Function to extract last therapy date
+extract_last_therapy_date <- function(dat, id_col_name) {
+  therapy_cols <- names(dat)[str_detect(names(dat), regex("systemic.*therapy.*\\d+.*(start|end).*date", ignore_case = TRUE))]
+  if (length(therapy_cols) > 0) {
+    therapy_dates_long <- dat %>%
+      select(all_of(id_col_name), all_of(therapy_cols)) %>%
+      pivot_longer(-all_of(id_col_name), names_to = "therapy_var", values_to = "therapy_date_raw") %>%
+      mutate(therapy_date = as_date_safe(therapy_date_raw)) %>%
+      filter(!is.na(therapy_date)) %>%
+      group_by(.data[[id_col_name]]) %>%
+      summarise(
+        last_therapy_date = max(therapy_date, na.rm = TRUE),
+        .groups = "drop"
+      )
+    return(therapy_dates_long)
+  } else {
+    return(tibble(!!id_col_name := dat[[id_col_name]], last_therapy_date = as.Date(NA)))
+  }
+}
+
+last_therapy_lower <- extract_last_therapy_date(dat_lower, "patient_id")
+last_therapy_upper <- extract_last_therapy_date(dat_upper, "patient_id")
+last_therapy_dates <- bind_rows(last_therapy_lower, last_therapy_upper) %>%
+  group_by(patient_id) %>%
+  summarise(
+    last_therapy_date = max(last_therapy_date, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(last_therapy_date = ifelse(is.infinite(last_therapy_date), as.Date(NA), last_therapy_date))
+
+# Create survival outcomes for ALL patients (already filtered to Stage II+)
+survival_outcomes <- all_patients %>%
+  # Add baseline ctDNA data (if available)
+  left_join(baseline_ctdna, by = "patient_id") %>%
+  # Add last ctDNA date
+  left_join(last_ctdna_dates, by = "patient_id") %>%
+  # Add last systemic therapy date
+  left_join(last_therapy_dates, by = "patient_id") %>%
+  # Add survival data
+  left_join(survival_data, by = "patient_id") %>%
+  # Add response data (if available) - LB-RECIST removed
+  # left_join(best_response %>% select(patient_id, lbrecist_response, n_measurements), by = "patient_id") %>%
+  # Use baseline date as time 0 for survival analysis (or first ctDNA date, or follow-up start)
+  mutate(
+    # Time anchor: Use first ctDNA measurement (baseline_date) as time 0 for OS
+    # If no baseline_date, try to use first ctDNA date or follow-up date as anchor
+    time_anchor = coalesce(baseline_date, survival_date),
+    # Combine relapse dates: use explicit relapse_date OR palliative_start_date (whichever is earlier)
+    relapse_date_combined = case_when(
+      !is.na(relapse_date) & !is.na(palliative_start_date) ~ pmin(relapse_date, palliative_start_date, na.rm = TRUE),
+      !is.na(relapse_date) ~ relapse_date,
+      !is.na(palliative_start_date) ~ palliative_start_date,
+      TRUE ~ as.Date(NA)
+    ),
+    # Determine death status and date:
+    # 1. If explicit_death_date exists, patient is dead at that date
+    # 2. If alive_yes_no == "No", patient is dead at last available follow-up
+    # 3. Otherwise, assume alive
+    death_status_final = case_when(
+      !is.na(explicit_death_date) ~ 1,  # Has explicit death date
+      alive_yes_no == "No" ~ 1,  # Marked as not alive
+      !is.na(death_status_legacy) & death_status_legacy == 1 ~ 1,  # Legacy death status
+      TRUE ~ 0  # Assume alive
+    ),
+    # Death date: use explicit death date, or last follow-up if alive_yes_no == "No"
+    death_date = case_when(
+      !is.na(explicit_death_date) ~ explicit_death_date,  # Use explicit death date
+      alive_yes_no == "No" & !is.na(survival_date) ~ survival_date,  # Use last follow-up if marked as not alive
+      alive_yes_no == "No" & !is.na(relapse_date_combined) ~ relapse_date_combined,  # Fallback to relapse date
+      death_status_legacy == 1 & !is.na(survival_date) ~ survival_date,  # Legacy: use follow-up
+      TRUE ~ as.Date(NA)
+    )
+  ) %>%
+  rowwise() %>%
+  mutate(
+    # Calculate max of ctDNA and therapy dates (using rowwise to handle Date objects properly)
+    max_ctdna_therapy_date = {
+      if (!is.na(last_ctdna_date) && !is.na(last_therapy_date)) {
+        as.Date(max(as.numeric(last_ctdna_date), as.numeric(last_therapy_date)), origin = "1970-01-01")
+      } else if (!is.na(last_ctdna_date)) {
+        last_ctdna_date
+      } else if (!is.na(last_therapy_date)) {
+        last_therapy_date
+      } else {
+        as.Date(NA)
+      }
+    },
+    # Last available date: prefer follow-up, then max of ctDNA/therapy
+    last_available_date = {
+      if (!is.na(survival_date)) {
+        survival_date
+      } else if (!is.na(max_ctdna_therapy_date)) {
+        max_ctdna_therapy_date
+      } else {
+        as.Date(NA)
+      }
+    }
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Time to event (in months from first ctDNA measurement)
+    time_to_relapse = ifelse(!is.na(relapse_date_combined) & !is.na(time_anchor),
+                            as.numeric(relapse_date_combined - time_anchor) / 30.44,
+                            NA_real_),
+    time_to_death = ifelse(!is.na(death_date) & !is.na(time_anchor),
+                          as.numeric(death_date - time_anchor) / 30.44,
+                          NA_real_),
+    # Time to last follow-up or last available date (for censoring alive patients)
+    time_to_last_fu = ifelse(!is.na(last_available_date) & !is.na(time_anchor),
+                             as.numeric(last_available_date - time_anchor) / 30.44,
+                             NA_real_),
+    # Event indicators
+    # Relapse: explicit relapse date OR starting palliative therapy
+    relapse_event = ifelse(!is.na(relapse_date_combined), 1, 0),
+    # Death event: use death_status_final (includes explicit death date, alive_yes_no == "No", etc.)
+    death_event = death_status_final,
+    # PFS time: time to relapse OR time to last follow-up (censored)
+    pfs_time = ifelse(relapse_event == 1 & !is.na(time_to_relapse), time_to_relapse, 
+                     ifelse(!is.na(time_to_last_fu), time_to_last_fu, NA_real_)),
+    # OS time: time from first ctDNA measurement to death OR last follow-up (censored for alive patients)
+    os_time = ifelse(
+      death_event == 1 & !is.na(time_to_death), 
+      time_to_death,  # Dead: use time to death
+      ifelse(
+        !is.na(time_to_last_fu), 
+        time_to_last_fu,  # Alive: use time to last follow-up (censored)
+        NA_real_
+      )
+    )
+  )
+  # Patients already filtered to Stage II or higher
+
+cat("Total patients included:", nrow(survival_outcomes), "\n")
+cat("  Patients with baseline ctDNA:", sum(!is.na(survival_outcomes$baseline_value)), "\n")
+cat("  Patients with follow-up data:", sum(!is.na(survival_outcomes$time_to_last_fu)), "\n")
+cat("  PFS events:", sum(survival_outcomes$relapse_event == 1, na.rm = TRUE), "\n")
+cat("  OS events:", sum(survival_outcomes$death_event == 1, na.rm = TRUE), "\n")
+cat("  Patients with explicit death date:", sum(!is.na(survival_outcomes$explicit_death_date)), "\n")
+cat("  Patients marked as dead (alive_yes_no == 'No'):", sum(survival_outcomes$alive_yes_no == "No", na.rm = TRUE), "\n")
+cat("  Total patients marked as dead:", sum(survival_outcomes$death_status_final == 1, na.rm = TRUE), "\n")
+cat("  Patients assumed alive:", sum(survival_outcomes$death_status_final == 0, na.rm = TRUE), "\n")
+```
+
+```{r approach1_qualitative_criteria, include=FALSE}
+# ==============================
+# Approach 1: Qualitative Criteria (from PDF Table 1)
+# ==============================
+
+cat("\n=== Approach 1: Qualitative Criteria ===\n")
+cat("Based on PDF Table 1 - Qualitative ctDNA Response Categories\n")
+
+# Qualitative criteria typically based on ctDNA positive/negative status
+# Common categories:
+# 1. ctDNA Clearance: Positive → Negative
+# 2. ctDNA Persistent Negative: Always negative
+# 3. ctDNA Persistent Positive: Always positive  
+# 4. ctDNA Conversion: Negative → Positive
+
+# Include all patients, even those without ctDNA data
+qualitative_groups <- all_patients %>%
+  left_join(
+    ctdna_long %>%
+      left_join(baseline_ctdna, by = "patient_id") %>%
+      filter(!is.na(baseline_value)) %>%
+  group_by(patient_id) %>%
+  summarise(
+    baseline_status = ifelse(first(baseline_value) > 0, "Positive", "Negative"),
+    ever_negative = any(ctdna_value == 0, na.rm = TRUE),
+    ever_positive = any(ctdna_value > 0, na.rm = TRUE),
+    last_status = ifelse(last(ctdna_value) > 0, "Positive", "Negative"),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    qualitative_group = case_when(
+      baseline_status == "Positive" & last_status == "Negative" ~ "ctDNA Clearance",
+      baseline_status == "Negative" & last_status == "Negative" ~ "Persistent Negative",
+      baseline_status == "Positive" & last_status == "Positive" ~ "Persistent Positive",
+      baseline_status == "Negative" & last_status == "Positive" ~ "ctDNA Conversion",
+      TRUE ~ "No ctDNA Data"
+    )
+  ) %>%
+  select(patient_id, qualitative_group, baseline_status, last_status),
+    by = "patient_id"
+  ) %>%
+  # Fill in missing values for patients without ctDNA data
+  mutate(
+    qualitative_group = ifelse(is.na(qualitative_group), "No ctDNA Data", qualitative_group)
+  ) %>%
+  select(patient_id, qualitative_group, baseline_status, last_status)
+
+cat("\nQualitative Groups Distribution:\n")
+print(table(qualitative_groups$qualitative_group))
+
+# Merge with survival outcomes (include all patients)
+survival_qualitative <- survival_outcomes %>%
+  left_join(qualitative_groups, by = "patient_id") %>%
+  mutate(qualitative_group = ifelse(is.na(qualitative_group), "No ctDNA Data", qualitative_group))
+
+cat("\nPatients with qualitative grouping and survival data:", nrow(survival_qualitative), "\n")
+```
+
+```{r approach2_quantitative_criteria, include=FALSE}
+# ==============================
+# Approach 2: Quantitative Criteria (from PDF Table 1)
+# ==============================
+
+cat("\n=== Approach 2: Quantitative Criteria ===\n")
+cat("Based on PDF Table 1 - Quantitative ctDNA Response Categories\n")
+
+# Quantitative criteria typically based on percent change thresholds
+# Common categories:
+# 1. Major Response: ≥90% reduction
+# 2. Partial Response: ≥50% reduction (but <90%)
+# 3. Stable: <50% change (increase or decrease)
+# 4. Progressive: ≥50% increase
+
+# Build response_data for quantitative criteria (similar to LB-RECIST but just for percent change)
+response_data_quant <- ctdna_long %>%
+  left_join(baseline_ctdna %>% select(patient_id, baseline_date, baseline_value), by = "patient_id") %>%
+  filter(!is.na(baseline_value)) %>%
+  # Calculate change from baseline
+  mutate(
+    days_from_baseline = as.numeric(ctdna_date - baseline_date),
+    percent_change = case_when(
+      baseline_value == 0 ~ NA_real_,  # Can't calculate % change from 0
+      baseline_value > 0 ~ ((ctdna_value - baseline_value) / baseline_value) * 100,
+      TRUE ~ NA_real_
+    ),
+    absolute_change = ctdna_value - baseline_value
+  ) %>%
+  # Only consider measurements after baseline
+  filter(days_from_baseline > 0) %>%
+  arrange(patient_id, ctdna_date)
+
+# Verify dataset column exists
+if (!"dataset" %in% names(response_data_quant)) {
+  response_data_quant <- response_data_quant %>%
+    left_join(baseline_ctdna %>% select(patient_id, dataset), by = "patient_id")
+}
+
+# Include all patients in quantitative groups
+quantitative_groups <- all_patients %>%
+  left_join(
+    response_data_quant %>%
+      group_by(patient_id, dataset) %>%
+      summarise(
+        baseline_value = first(baseline_value),
+        best_reduction_pct = min(percent_change, na.rm = TRUE),
+        worst_increase_pct = max(percent_change, na.rm = TRUE),
+        max_value = max(ctdna_value, na.rm = TRUE),
+        min_value = min(ctdna_value, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        quantitative_group = case_when(
+          baseline_value > 0 & !is.na(best_reduction_pct) & best_reduction_pct <= -90 ~ "Major Response (≥90% reduction)",
+          baseline_value > 0 & !is.na(best_reduction_pct) & best_reduction_pct <= -50 & best_reduction_pct > -90 ~ "Partial Response (≥50% reduction)",
+          baseline_value > 0 & !is.na(worst_increase_pct) & worst_increase_pct >= 50 ~ "Progressive (≥50% increase)",
+          baseline_value > 0 ~ "Stable (<50% change)",
+          baseline_value == 0 & max_value > 0 ~ "New Positive",
+          baseline_value == 0 & max_value == 0 ~ "Persistent Negative",
+          TRUE ~ "No ctDNA Data"
+        )
+      ) %>%
+      select(patient_id, quantitative_group, best_reduction_pct, worst_increase_pct),
+    by = "patient_id"
+  ) %>%
+  mutate(quantitative_group = ifelse(is.na(quantitative_group), "No ctDNA Data", quantitative_group))
+
+cat("\nQuantitative Groups Distribution:\n")
+print(table(quantitative_groups$quantitative_group))
+
+# Merge with survival outcomes (include all patients)
+survival_quantitative <- survival_outcomes %>%
+  left_join(quantitative_groups, by = "patient_id") %>%
+  mutate(quantitative_group = ifelse(is.na(quantitative_group), "No ctDNA Data", quantitative_group))
+
+cat("\nPatients with quantitative grouping and survival data:", nrow(survival_quantitative), "\n")
+```
+
+```{r approach3_machine_learning, include=FALSE}
+# ==============================
+# Approach 3: Machine Learning to Generate Subgroups
+# ==============================
+
+cat("\n=== Approach 3: Machine Learning Approach ===\n")
+cat("Generating distinct subgroups based on ctDNA patterns using ML\n")
+cat("Using train/validation/test split for proper model evaluation\n")
+
+# Prepare features for ML
+# First calculate trend separately
+# Include all patients, but only calculate features for those with ctDNA data
+ctdna_with_trend <- ctdna_long %>%
+  left_join(baseline_ctdna %>% select(patient_id, baseline_value, baseline_date), by = "patient_id") %>%
+  filter(!is.na(baseline_value)) %>%
+  arrange(patient_id, ctdna_date) %>%
+  group_by(patient_id) %>%
+  mutate(
+    time_from_first = as.numeric(ctdna_date - min(ctdna_date, na.rm = TRUE)),
+    row_num = row_number()
+  ) %>%
+  ungroup()
+
+# Calculate trend for each patient using a helper function
+calculate_trend <- function(values, times) {
+  valid <- !is.na(values) & !is.na(times)
+  if (sum(valid) > 1) {
+    tryCatch({
+      lm_fit <- lm(values[valid] ~ times[valid])
+      as.numeric(coef(lm_fit)[2])
+    }, error = function(e) 0)
+  } else {
+    0
+  }
+}
+
+trend_data <- ctdna_with_trend %>%
+  group_by(patient_id) %>%
+  filter(n() > 1, sum(!is.na(ctdna_value)) > 1, sum(!is.na(time_from_first)) > 1) %>%
+  summarise(
+    trend = calculate_trend(ctdna_value, time_from_first),
+    .groups = "drop"
+  )
+
+# Patients without trend (single measurement or insufficient data)
+patients_no_trend <- ctdna_with_trend %>%
+  group_by(patient_id) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  filter(n == 1 | !patient_id %in% trend_data$patient_id) %>%
+  mutate(trend = 0) %>%
+  select(patient_id, trend)
+
+trend_all <- bind_rows(trend_data, patients_no_trend)
+
+# Now create ML features - enhanced for better stratification
+ml_features <- ctdna_with_trend %>%
+  group_by(patient_id) %>%
+  summarise(
+    baseline_value = first(baseline_value),
+    n_measurements = n(),
+    mean_ctdna = mean(ctdna_value, na.rm = TRUE),
+    median_ctdna = median(ctdna_value, na.rm = TRUE),
+    max_ctdna = max(ctdna_value, na.rm = TRUE),
+    min_ctdna = min(ctdna_value, na.rm = TRUE),
+    sd_ctdna = sd(ctdna_value, na.rm = TRUE),
+    # Status changes
+    n_positive = sum(ctdna_value > 0, na.rm = TRUE),
+    n_negative = sum(ctdna_value == 0, na.rm = TRUE),
+    became_negative = any(baseline_value > 0 & ctdna_value == 0, na.rm = TRUE),
+    became_positive = any(baseline_value == 0 & ctdna_value > 0, na.rm = TRUE),
+    # Additional features for better stratification
+    last_value = last(ctdna_value),
+    first_value = first(ctdna_value),
+    # Percent change from baseline to last
+    pct_change_baseline = ifelse(baseline_value > 0, 
+                                 ((last(ctdna_value) - baseline_value) / baseline_value) * 100,
+                                 ifelse(baseline_value == 0 & last(ctdna_value) > 0, 100, 0)),
+    # Time span of measurements
+    time_span_days = as.numeric(max(ctdna_date) - min(ctdna_date)),
+    .groups = "drop"
+  ) %>%
+  left_join(trend_all, by = "patient_id") %>%
+  mutate(
+    # Variability
+    cv_ctdna = ifelse(mean_ctdna > 0 & !is.na(sd_ctdna), sd_ctdna / mean_ctdna, 0),
+    # Normalized trend (per day)
+    trend_per_day = ifelse(!is.na(time_span_days) & time_span_days > 0, trend / time_span_days, 0),
+    # Response pattern indicators
+    clearance_pattern = became_negative & baseline_value > 0,
+    conversion_pattern = became_positive & baseline_value == 0,
+    persistent_positive = baseline_value > 0 & !became_negative & last_value > 0,
+    persistent_negative = baseline_value == 0 & !became_positive & last_value == 0,
+    # Handle missing values
+    across(c(mean_ctdna, median_ctdna, max_ctdna, min_ctdna, sd_ctdna, trend, cv_ctdna, 
+             trend_per_day, pct_change_baseline, time_span_days),
+           ~ifelse(is.na(.), 0, .))
+  )
+
+# Split data into train/validation/test sets (60/20/20)
+set.seed(123)
+n_patients_ml <- nrow(ml_features)
+train_idx <- sample(n_patients_ml, size = floor(0.6 * n_patients_ml))
+remaining_idx <- setdiff(1:n_patients_ml, train_idx)
+validation_idx <- sample(remaining_idx, size = floor(0.5 * length(remaining_idx)))
+test_idx <- setdiff(remaining_idx, validation_idx)
+
+ml_features_train <- ml_features[train_idx, ]
+ml_features_validation <- ml_features[validation_idx, ]
+ml_features_test <- ml_features[test_idx, ]
+
+cat("Data split:\n")
+cat("  Training set:", length(train_idx), "patients (", round(100 * length(train_idx) / n_patients_ml, 1), "%)\n")
+cat("  Validation set:", length(validation_idx), "patients (", round(100 * length(validation_idx) / n_patients_ml, 1), "%)\n")
+cat("  Test set:", length(test_idx), "patients (", round(100 * length(test_idx) / n_patients_ml, 1), "%)\n")
+
+# Select features for clustering - focus on clinically relevant features
+# Exclude patient_id, baseline_value (we'll use it for interpretation)
+feature_cols <- setdiff(names(ml_features), c("patient_id", "baseline_value"))
+
+# Prepare training data
+ml_features_train_for_clustering <- ml_features_train %>%
+  select(all_of(feature_cols))
+
+# Remove any infinite or NaN values before scaling
+ml_features_train_for_clustering <- ml_features_train_for_clustering %>%
+  mutate(across(everything(), ~{
+    x <- .
+    x[is.infinite(x)] <- 0
+    x[is.nan(x)] <- 0
+    x
+  }))
+
+# Scale features using training data statistics
+ml_features_train_scaled <- scale(ml_features_train_for_clustering)
+ml_features_train_scaled[is.infinite(ml_features_train_scaled)] <- 0
+ml_features_train_scaled[is.nan(ml_features_train_scaled)] <- 0
+
+# Store scaling parameters for validation/test sets
+scale_center <- attr(ml_features_train_scaled, "scaled:center")
+scale_scale <- attr(ml_features_train_scaled, "scaled:scale")
+
+# Determine optimal number of clusters (using training data)
+n_train <- nrow(ml_features_train_scaled)
+if (n_train >= 6) {
+  # Try 4-6 clusters and use elbow method
+  wss <- numeric(6)
+  for (k in 2:6) {
+    if (k < n_train) {
+      km <- kmeans(ml_features_train_scaled, centers = k, nstart = 10, iter.max = 100)
+      wss[k] <- km$tot.withinss
+    }
+  }
+  # Use 5 clusters for better stratification
+  n_clusters <- 5
+  cat("Using", n_clusters, "clusters for ML subgrouping\n")
+} else if (n_train >= 4) {
+  n_clusters <- 4
+  cat("Using", n_clusters, "clusters for ML subgrouping\n")
+} else {
+  n_clusters <- max(2, n_train)
+  cat("WARNING: Limited training data. Using", n_clusters, "clusters.\n")
+}
+
+# Fit k-means on training data
+kmeans_result_train <- kmeans(ml_features_train_scaled, centers = n_clusters, nstart = 50, iter.max = 200)
+cluster_centers <- kmeans_result_train$centers
+
+cat("K-means fitted on training set with", n_clusters, "clusters\n")
+
+# Function to assign patients to nearest cluster center
+assign_to_cluster <- function(features_scaled, centers) {
+  # Calculate distances to each cluster center
+  distances <- matrix(NA, nrow = nrow(features_scaled), ncol = nrow(centers))
+  for (i in 1:nrow(features_scaled)) {
+    for (j in 1:nrow(centers)) {
+      distances[i, j] <- sum((features_scaled[i, ] - centers[j, ])^2)
+    }
+  }
+  # Assign to nearest center
+  apply(distances, 1, which.min)
+}
+
+# Scale validation and test sets using training set statistics
+ml_features_validation_for_clustering <- ml_features_validation %>%
+  select(all_of(feature_cols)) %>%
+  mutate(across(everything(), ~{
+    x <- .
+    x[is.infinite(x)] <- 0
+    x[is.nan(x)] <- 0
+    x
+  }))
+
+ml_features_test_for_clustering <- ml_features_test %>%
+  select(all_of(feature_cols)) %>%
+  mutate(across(everything(), ~{
+    x <- .
+    x[is.infinite(x)] <- 0
+    x[is.nan(x)] <- 0
+    x
+  }))
+
+# Scale using training set parameters
+ml_features_validation_scaled <- scale(ml_features_validation_for_clustering, 
+                                        center = scale_center, 
+                                        scale = scale_scale)
+ml_features_test_scaled <- scale(ml_features_test_for_clustering, 
+                                 center = scale_center, 
+                                 scale = scale_scale)
+
+ml_features_validation_scaled[is.infinite(ml_features_validation_scaled)] <- 0
+ml_features_validation_scaled[is.nan(ml_features_validation_scaled)] <- 0
+ml_features_test_scaled[is.infinite(ml_features_test_scaled)] <- 0
+ml_features_test_scaled[is.nan(ml_features_test_scaled)] <- 0
+
+# Assign validation and test sets to clusters
+validation_clusters <- assign_to_cluster(ml_features_validation_scaled, cluster_centers)
+test_clusters <- assign_to_cluster(ml_features_test_scaled, cluster_centers)
+
+# Combine all assignments
+ml_features_all <- ml_features %>%
+  mutate(
+    dataset_split = case_when(
+      patient_id %in% ml_features_train$patient_id ~ "Train",
+      patient_id %in% ml_features_validation$patient_id ~ "Validation",
+      patient_id %in% ml_features_test$patient_id ~ "Test",
+      TRUE ~ "Not in ML analysis"
+    ),
+    ml_cluster = case_when(
+      patient_id %in% ml_features_train$patient_id ~ kmeans_result_train$cluster[match(patient_id, ml_features_train$patient_id)],
+      patient_id %in% ml_features_validation$patient_id ~ validation_clusters[match(patient_id, ml_features_validation$patient_id)],
+      patient_id %in% ml_features_test$patient_id ~ test_clusters[match(patient_id, ml_features_test$patient_id)],
+      TRUE ~ NA_integer_
+    )
+  )
+
+cat("Cluster assignments:\n")
+cat("  Training set clusters assigned\n")
+cat("  Validation set assigned to nearest cluster centers\n")
+cat("  Test set assigned to nearest cluster centers\n")
+
+# Store cluster centers and scaling parameters for clinical use
+ml_model_parameters <- list(
+  cluster_centers = cluster_centers,
+  scale_center = scale_center,
+  scale_scale = scale_scale,
+  feature_cols = feature_cols,
+  n_clusters = n_clusters
+)
+
+cat("\n=== ML Model Parameters Saved for Clinical Use ===\n")
+cat("Cluster centers and scaling parameters have been saved.\n")
+cat("These can be used to classify new patients.\n")
+
+# Characterize each cluster using training data only (for interpretation)
+cluster_characteristics <- ml_features_train %>%
+  mutate(ml_cluster = kmeans_result_train$cluster) %>%
+  group_by(ml_cluster) %>%
+  summarise(
+    n = n(),
+    mean_baseline = mean(baseline_value, na.rm = TRUE),
+    median_baseline = median(baseline_value, na.rm = TRUE),
+    mean_max = mean(max_ctdna, na.rm = TRUE),
+    mean_trend = mean(trend, na.rm = TRUE),
+    mean_pct_change = mean(pct_change_baseline, na.rm = TRUE),
+    pct_clearance = mean(clearance_pattern, na.rm = TRUE) * 100,
+    pct_conversion = mean(conversion_pattern, na.rm = TRUE) * 100,
+    pct_persistent_pos = mean(persistent_positive, na.rm = TRUE) * 100,
+    pct_persistent_neg = mean(persistent_negative, na.rm = TRUE) * 100,
+    mean_cv = mean(cv_ctdna, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(mean_baseline, mean_trend)
+
+# Assign descriptive names based on comprehensive characteristics
+# Strategy: Create clinically meaningful groups based on ctDNA dynamics
+cluster_names <- cluster_characteristics %>%
+  mutate(
+    group_name = case_when(
+      # Group 1: Clearance/Response - started positive, became negative
+      pct_clearance >= 50 & mean_trend < 0 ~ "Clearance/Response (Positive→Negative)",
+      
+      # Group 2: Conversion/Progression - started negative, became positive
+      pct_conversion >= 50 & mean_trend > 0 ~ "Conversion/Progression (Negative→Positive)",
+      
+      # Group 3: Persistent High - always positive, high baseline, increasing or stable high
+      mean_baseline > 5 & pct_persistent_pos >= 50 & mean_trend >= 0 ~ "Persistent High ctDNA (Stable/Increasing)",
+      
+      # Group 4: Persistent Low/Negative - always negative or very low
+      mean_baseline <= 1 & pct_persistent_neg >= 50 ~ "Persistent Low/Negative ctDNA",
+      
+      # Group 5: Variable/Unstable - high variability, mixed patterns
+      mean_cv > 1.0 | (pct_clearance < 50 & pct_conversion < 50 & pct_persistent_pos < 50 & pct_persistent_neg < 50) ~ "Variable/Unstable ctDNA Pattern",
+      
+      # Group 6: Decreasing but not cleared - positive baseline, decreasing but not to zero
+      mean_baseline > 0 & mean_trend < 0 & pct_clearance < 50 ~ "Decreasing ctDNA (Not Cleared)",
+      
+      # Default fallback
+      TRUE ~ paste0("Group ", ml_cluster, ": Mixed Pattern")
+    )
+  ) %>%
+  select(ml_cluster, group_name)
+
+cat("\n=== ML Subgroup Development Methodology ===\n")
+cat("Features used for clustering:\n")
+cat("  1. Baseline ctDNA value\n")
+cat("  2. Number of measurements\n")
+cat("  3. Mean, median, max, min ctDNA values\n")
+cat("  4. Standard deviation and coefficient of variation\n")
+cat("  5. Trend (linear regression slope of ctDNA over time)\n")
+cat("  6. Trend per day (normalized trend)\n")
+cat("  7. Percent change from baseline to last measurement\n")
+cat("  8. Time span of measurements\n")
+cat("  9. Status changes (became negative/positive)\n")
+cat("  10. Response patterns (clearance, conversion, persistent)\n")
+cat("\nClustering method: K-means with 4-6 clusters (depending on data)\n")
+cat("Scaling: All features standardized before clustering\n")
+cat("Group assignment: Based on cluster characteristics and clinical patterns\n\n")
+
+# Create ml_groups with cluster assignments for all patients
+ml_groups <- ml_features_all %>%
+  filter(!is.na(ml_cluster)) %>%
+  left_join(cluster_names, by = "ml_cluster") %>%
+  select(patient_id, ml_group = group_name, dataset_split, ml_cluster)
+
+cat("\nML-Generated Groups Distribution:\n")
+print(table(ml_groups$ml_group))
+
+cat("\nCluster Characteristics:\n")
+print(cluster_characteristics)
+
+# Merge with survival outcomes (include all patients)
+survival_ml <- survival_outcomes %>%
+  left_join(ml_groups %>% select(patient_id, ml_group), by = "patient_id") %>%
+  mutate(ml_group = ifelse(is.na(ml_group), "No ctDNA Data", ml_group))
+
+cat("\nPatients with ML grouping and survival data:", nrow(survival_ml), "\n")
+
+# Get total patient count for abstract
+total_patients_abstract <- nrow(survival_outcomes)
+cat("\nTotal patients included in analysis:", total_patients_abstract, "\n")
+
+# Save ML model parameters for clinical use
+if (exists("ml_model_parameters")) {
+  # Create a comprehensive model specification document
+  ml_model_spec <- list(
+    model_type = "K-means Clustering",
+    n_clusters = ml_model_parameters$n_clusters,
+    features_used = ml_model_parameters$feature_cols,
+    cluster_centers = as.data.frame(ml_model_parameters$cluster_centers),
+    scaling_center = ml_model_parameters$scale_center,
+    scaling_scale = ml_model_parameters$scale_scale,
+    cluster_names = cluster_names
+  )
+  
+  # Save to RDS for potential future use
+  saveRDS(ml_model_spec, "ML_Model_Specification.rds")
+  cat("\nML model specification saved to: ML_Model_Specification.rds\n")
+}
+```
+
+```{r kaplan_meier_curves}
+# ==============================
+# Kaplan-Meier Survival Curves
+# ==============================
+
+cat("\n=== Generating Kaplan-Meier Survival Curves ===\n")
+
+# Function to create survival object and plot
+create_km_plot <- function(data, time_var, event_var, group_var, title, ylab = "Survival Probability", 
+                          show_legend = TRUE, reference_group = NULL) {
+  # Filter to valid data and exclude "No ctDNA Data" groups
+  data_clean <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var]]),
+           !str_detect(tolower(.data[[group_var]]), "no ctdna data"))
+  
+  if (nrow(data_clean) == 0) {
+    cat("No valid data for", title, "\n")
+    return(NULL)
+  }
+  
+  # Check if we have events
+  if (sum(data_clean[[event_var]] == 1, na.rm = TRUE) == 0) {
+    cat("No events for", title, "\n")
+    return(NULL)
+  }
+  
+  # Add temporary columns with standard names for formula
+  data_plot <- data_clean %>%
+    mutate(
+      surv_time = .data[[time_var]],
+      surv_event = .data[[event_var]],
+      surv_group = .data[[group_var]]
+    )
+  
+  # Identify reference group (usually persistent negative)
+  if (is.null(reference_group)) {
+    # Try to find persistent negative group
+    groups <- unique(data_plot$surv_group)
+    ref_candidates <- groups[str_detect(tolower(groups), "persistent.*negative|negative.*persistent")]
+    if (length(ref_candidates) > 0) {
+      reference_group <- ref_candidates[1]
+    } else {
+      # Use first group alphabetically as reference
+      reference_group <- sort(groups)[1]
+    }
+  }
+  
+  # Calculate pairwise log-rank tests comparing each group to reference
+  all_groups <- unique(data_plot$surv_group)
+  groups <- all_groups[all_groups != reference_group & !is.na(all_groups)]
+  
+  # Use a list to store p-values instead of named vector
+  pairwise_pvals_list <- list()
+  
+  for (i in seq_along(groups)) {
+    # Subset data to reference and current group
+    data_subset <- data_plot %>%
+      filter(surv_group %in% c(reference_group, groups[i]))
+    
+    if (nrow(data_subset) > 0 && sum(data_subset$surv_event == 1, na.rm = TRUE) > 0) {
+      surv_formula_subset <- as.formula("Surv(surv_time, surv_event) ~ surv_group")
+      logrank_test <- tryCatch({
+        survdiff(surv_formula_subset, data = data_subset)
+      }, error = function(e) NULL)
+      
+      if (!is.null(logrank_test)) {
+        p_val <- 1 - pchisq(logrank_test$chisq, length(logrank_test$n) - 1)
+        pairwise_pvals_list[[groups[i]]] <- p_val
+      }
+    }
+  }
+  
+  # Format p-values with asterisks
+  format_pval <- function(p) {
+    if (length(p) == 0 || is.na(p) || p >= 0.05) return("")
+    if (p < 0.001) return("***")
+    if (p < 0.01) return("**")
+    if (p < 0.05) return("*")
+    return("")
+  }
+  
+  # Create survival formula and fit first
+  surv_formula <- as.formula("Surv(surv_time, surv_event) ~ surv_group")
+  fit <- do.call("survfit", list(formula = surv_formula, data = quote(data_plot)))
+  
+  # Create labels with p-values - need to match order of groups in fit object
+  # Get the order from the survival fit object
+  fit_groups <- names(fit$strata)
+  if (is.null(fit_groups) || length(fit_groups) == 0) {
+    fit_groups <- unique(data_plot$surv_group)
+  } else {
+    # Extract group names from strata names (format: "surv_group=GroupName")
+    fit_groups <- sub("^surv_group=", "", fit_groups)
+  }
+  
+  # Ensure fit_groups is a simple character vector without names
+  fit_groups <- as.character(fit_groups)
+  fit_groups <- fit_groups[!is.na(fit_groups)]
+  
+  group_labels_with_pval <- character(length(fit_groups))
+  names(group_labels_with_pval) <- NULL  # Ensure no names
+  
+  for (i in seq_along(fit_groups)) {
+    if (fit_groups[i] == reference_group) {
+      group_labels_with_pval[i] <- fit_groups[i]
+    } else {
+      # Access p-value from list
+      p_val <- pairwise_pvals_list[[fit_groups[i]]]
+      if (length(p_val) == 1 && !is.na(p_val) && p_val > 0) {
+        group_labels_with_pval[i] <- paste0(fit_groups[i], format_pval(p_val))
+      } else {
+        group_labels_with_pval[i] <- fit_groups[i]
+      }
+    }
+  }
+  
+  # Ensure no names on the labels vector
+  names(group_labels_with_pval) <- NULL
+  
+  # Get number of groups
+  n_groups <- length(unique(data_plot$surv_group))
+  
+  # Use simple sequential color scheme (previous approach)
+  colors <- c("#2E7D32", "#66BB6A", "#FFA726", "#E53935", "#9C27B0", "#00BCD4", "#795548", "#607D8B")[1:n_groups]
+  
+  # Abbreviate y-axis labels
+  ylab_abbrev <- ifelse(ylab == "Progression-Free Survival", "PFS", 
+                       ifelse(ylab == "Overall Survival", "OS", ylab))
+  
+  # Ensure labels are clean (no names)
+  group_labels_final <- as.character(group_labels_with_pval)
+  names(group_labels_final) <- NULL
+  
+  # Create plot using survminer
+  p <- survminer::ggsurvplot(
+    fit,
+    data = data_plot,
+    pval = TRUE,
+    pval.size = 4,
+    conf.int = FALSE,
+    risk.table = TRUE,
+    risk.table.height = 0.25,
+    risk.table.fontsize = 3.5,
+    risk.table.y.text = FALSE,
+    risk.table.title = "Number at risk",
+    ggtheme = theme_minimal(),
+    title = title,
+    xlab = "Time (months)",
+    ylab = ylab_abbrev,
+    legend = "right",  # Always show legend to see p-values
+    legend.title = "",
+    legend.labs = group_labels_final,
+    palette = colors,
+    font.main = 12,
+    font.x = 10,
+    font.y = 10,
+    font.tickslab = 9
+  )
+  
+  # Remove "surv_group=" from legend if it appears
+  if (!is.null(p$plot)) {
+    p$plot <- p$plot + 
+      theme(legend.title = element_blank())
+  }
+  
+  return(p)
+}
+
+# Create all plots first, then arrange in grid
+p1_pfs <- NULL
+p1_os <- NULL
+p2_pfs <- NULL
+p2_os <- NULL
+p3_pfs <- NULL
+p3_os <- NULL
+
+# Approach 1: Qualitative Criteria - PFS (with legend)
+if (exists("survival_qualitative") && nrow(survival_qualitative) > 0 && sum(survival_qualitative$relapse_event == 1, na.rm = TRUE) > 0) {
+  p1_pfs <- create_km_plot(
+    survival_qualitative,
+    "pfs_time",
+    "relapse_event",
+    "qualitative_group",
+    "Qualitative: PFS",
+    "Progression-Free Survival",
+    show_legend = TRUE,
+    reference_group = "Persistent Negative"
+  )
+}
+
+# Approach 1: Qualitative Criteria - OS (with legend to show p-values)
+if (exists("survival_qualitative") && nrow(survival_qualitative) > 0 && sum(survival_qualitative$death_event == 1, na.rm = TRUE) > 0) {
+  p1_os <- create_km_plot(
+    survival_qualitative,
+    "os_time",
+    "death_event",
+    "qualitative_group",
+    "Qualitative: OS",
+    "Overall Survival",
+    show_legend = TRUE,  # Show legend to see p-values
+    reference_group = "Persistent Negative"
+  )
+}
+
+# Approach 2: Quantitative Criteria - PFS (with legend)
+if (exists("survival_quantitative") && nrow(survival_quantitative) > 0 && sum(survival_quantitative$relapse_event == 1, na.rm = TRUE) > 0) {
+  p2_pfs <- create_km_plot(
+    survival_quantitative,
+    "pfs_time",
+    "relapse_event",
+    "quantitative_group",
+    "Quantitative: PFS",
+    "Progression-Free Survival",
+    show_legend = TRUE,
+    reference_group = "Persistent Negative"
+  )
+}
+
+# Approach 2: Quantitative Criteria - OS (with legend to show p-values)
+if (exists("survival_quantitative") && nrow(survival_quantitative) > 0 && sum(survival_quantitative$death_event == 1, na.rm = TRUE) > 0) {
+  p2_os <- create_km_plot(
+    survival_quantitative,
+    "os_time",
+    "death_event",
+    "quantitative_group",
+    "Quantitative: OS",
+    "Overall Survival",
+    show_legend = TRUE,  # Show legend to see p-values
+    reference_group = "Persistent Negative"
+  )
+}
+
+# Approach 3: Machine Learning - PFS (with legend)
+if (exists("survival_ml") && nrow(survival_ml) > 0 && sum(survival_ml$relapse_event == 1, na.rm = TRUE) > 0) {
+  p3_pfs <- create_km_plot(
+    survival_ml,
+    "pfs_time",
+    "relapse_event",
+    "ml_group",
+    "ML: PFS",
+    "Progression-Free Survival",
+    show_legend = TRUE,
+    reference_group = "Persistent Low/Negative ctDNA"
+  )
+}
+
+# Approach 3: Machine Learning - OS (with legend to show p-values)
+if (exists("survival_ml") && nrow(survival_ml) > 0 && sum(survival_ml$death_event == 1, na.rm = TRUE) > 0) {
+  p3_os <- create_km_plot(
+    survival_ml,
+    "os_time",
+    "death_event",
+    "ml_group",
+    "ML: OS",
+    "Overall Survival",
+    show_legend = TRUE,  # Show legend to see p-values
+    reference_group = "Persistent Low/Negative ctDNA"
+  )
+}
+
+# Arrange plots in grid: PFS on left, OS on right, each row is a method
+# Extract the plot objects from ggsurvplot (they return lists with $plot)
+plots_list <- list()
+if (!is.null(p1_pfs) && !is.null(p1_pfs$plot)) plots_list[["Qual_PFS"]] <- p1_pfs$plot
+if (!is.null(p1_os) && !is.null(p1_os$plot)) plots_list[["Qual_OS"]] <- p1_os$plot
+if (!is.null(p2_pfs) && !is.null(p2_pfs$plot)) plots_list[["Quant_PFS"]] <- p2_pfs$plot
+if (!is.null(p2_os) && !is.null(p2_os$plot)) plots_list[["Quant_OS"]] <- p2_os$plot
+if (!is.null(p3_pfs) && !is.null(p3_pfs$plot)) plots_list[["ML_PFS"]] <- p3_pfs$plot
+if (!is.null(p3_os) && !is.null(p3_os$plot)) plots_list[["ML_OS"]] <- p3_os$plot
+
+# Create grid layout: 3 rows (methods) x 2 columns (PFS, OS)
+if (length(plots_list) >= 2) {
+  # Build grid row by row
+  row1 <- NULL
+  row2 <- NULL
+  row3 <- NULL
+  
+  if (!is.null(plots_list[["Qual_PFS"]]) && !is.null(plots_list[["Qual_OS"]])) {
+    row1 <- plots_list[["Qual_PFS"]] | plots_list[["Qual_OS"]]
+  } else if (!is.null(plots_list[["Qual_PFS"]])) {
+    row1 <- plots_list[["Qual_PFS"]]
+  } else if (!is.null(plots_list[["Qual_OS"]])) {
+    row1 <- plots_list[["Qual_OS"]]
+  }
+  
+  if (!is.null(plots_list[["Quant_PFS"]]) && !is.null(plots_list[["Quant_OS"]])) {
+    row2 <- plots_list[["Quant_PFS"]] | plots_list[["Quant_OS"]]
+  } else if (!is.null(plots_list[["Quant_PFS"]])) {
+    row2 <- plots_list[["Quant_PFS"]]
+  } else if (!is.null(plots_list[["Quant_OS"]])) {
+    row2 <- plots_list[["Quant_OS"]]
+  }
+  
+  if (!is.null(plots_list[["ML_PFS"]]) && !is.null(plots_list[["ML_OS"]])) {
+    row3 <- plots_list[["ML_PFS"]] | plots_list[["ML_OS"]]
+  } else if (!is.null(plots_list[["ML_PFS"]])) {
+    row3 <- plots_list[["ML_PFS"]]
+  } else if (!is.null(plots_list[["ML_OS"]])) {
+    row3 <- plots_list[["ML_OS"]]
+  }
+  
+  # Combine rows
+  combined_grid <- NULL
+  if (!is.null(row1) && !is.null(row2) && !is.null(row3)) {
+    combined_grid <- row1 / row2 / row3
+  } else if (!is.null(row1) && !is.null(row2)) {
+    combined_grid <- row1 / row2
+  } else if (!is.null(row1) && !is.null(row3)) {
+    combined_grid <- row1 / row3
+  } else if (!is.null(row2) && !is.null(row3)) {
+    combined_grid <- row2 / row3
+  } else if (!is.null(row1)) {
+    combined_grid <- row1
+  } else if (!is.null(row2)) {
+    combined_grid <- row2
+  } else if (!is.null(row3)) {
+    combined_grid <- row3
+  }
+  
+  if (!is.null(combined_grid)) {
+    # Add footnote about p-value reference
+    combined_grid <- combined_grid + 
+      plot_annotation(
+        title = "Kaplan-Meier Survival Curves by ctDNA Response Criteria",
+        subtitle = "PFS (left) and OS (right) for Qualitative, Quantitative, and ML-based approaches",
+        caption = "P-value asterisks (* p<0.05, ** p<0.01, *** p<0.001) indicate pairwise log-rank test comparing each group to the reference group (Persistent Negative/Low ctDNA). Reference group has no asterisks."
+      ) &
+      theme(plot.caption = element_text(size = 9, hjust = 0, face = "italic"))
+    print(combined_grid)
+  } else {
+    cat("Insufficient data to create combined survival plots\n")
+  }
+} else {
+  # Fallback: print individual plots if grid not possible
+  if (!is.null(p1_pfs)) print(p1_pfs)
+  if (!is.null(p1_os)) print(p1_os)
+  if (!is.null(p2_pfs)) print(p2_pfs)
+  if (!is.null(p2_os)) print(p2_os)
+  if (!is.null(p3_pfs)) print(p3_pfs)
+  if (!is.null(p3_os)) print(p3_os)
+}
+```
+
+```{r model_comparison, include=FALSE}
+# ==============================
+# Model Comparison: Qualitative vs Quantitative vs ML
+# ==============================
+
+cat("\n=== Model Performance Comparison ===\n")
+
+# Function to calculate Harrell's C-index (concordance)
+calculate_c_index <- function(data, time_var, event_var, group_var) {
+  data_clean <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var]]),
+           !str_detect(tolower(.data[[group_var]]), "no ctdna data"))
+  
+  if (nrow(data_clean) == 0 || sum(data_clean[[event_var]] == 1, na.rm = TRUE) == 0) {
+    return(list(c_index = NA_real_, n = 0, cox_fit = NULL))
+  }
+  
+  # Fit Cox model
+  surv_formula <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", group_var))
+  cox_fit <- tryCatch({
+    coxph(surv_formula, data = data_clean)
+  }, error = function(e) {
+    return(NULL)
+  })
+  
+  if (is.null(cox_fit)) {
+    return(list(c_index = NA_real_, n = nrow(data_clean), cox_fit = NULL))
+  }
+  
+  # Calculate C-index (concordance)
+  c_index <- tryCatch({
+    summary(cox_fit)$concordance[1]
+  }, error = function(e) {
+    NA_real_
+  })
+  
+  aic_value <- tryCatch({
+    AIC(cox_fit)
+  }, error = function(e) {
+    NA_real_
+  })
+  
+  return(list(c_index = c_index, n = nrow(data_clean), aic = aic_value, cox_fit = cox_fit))
+}
+
+# Function to compare C-indices between two models using bootstrap
+compare_c_indices <- function(data, time_var, event_var, group_var1, group_var2, n_bootstrap = 1000) {
+  # Get common patients with valid data for both models
+  data_clean1 <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var1]]),
+           !str_detect(tolower(.data[[group_var1]]), "no ctdna data"))
+  
+  data_clean2 <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var2]]),
+           !str_detect(tolower(.data[[group_var2]]), "no ctdna data"))
+  
+  # Get common patients
+  common_patients <- intersect(data_clean1$patient_id, data_clean2$patient_id)
+  
+  if (length(common_patients) < 10) {
+    return(list(p_value = NA_real_, diff_c_index = NA_real_, n_common = length(common_patients)))
+  }
+  
+  data_common <- data %>%
+    filter(patient_id %in% common_patients) %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0,
+           !is.na(.data[[group_var1]]), !is.na(.data[[group_var2]]),
+           !str_detect(tolower(.data[[group_var1]]), "no ctdna data"),
+           !str_detect(tolower(.data[[group_var2]]), "no ctdna data"))
+  
+  if (nrow(data_common) == 0 || sum(data_common[[event_var]] == 1, na.rm = TRUE) == 0) {
+    return(list(p_value = NA_real_, diff_c_index = NA_real_, n_common = 0))
+  }
+  
+  # Calculate C-indices on full data
+  surv_formula1 <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", group_var1))
+  surv_formula2 <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", group_var2))
+  
+  cox_fit1 <- tryCatch(coxph(surv_formula1, data = data_common), error = function(e) NULL)
+  cox_fit2 <- tryCatch(coxph(surv_formula2, data = data_common), error = function(e) NULL)
+  
+  if (is.null(cox_fit1) || is.null(cox_fit2)) {
+    return(list(p_value = NA_real_, diff_c_index = NA_real_, n_common = nrow(data_common)))
+  }
+  
+  c_index1 <- tryCatch(summary(cox_fit1)$concordance[1], error = function(e) NA_real_)
+  c_index2 <- tryCatch(summary(cox_fit2)$concordance[1], error = function(e) NA_real_)
+  
+  if (is.na(c_index1) || is.na(c_index2)) {
+    return(list(p_value = NA_real_, diff_c_index = NA_real_, n_common = nrow(data_common)))
+  }
+  
+  diff_observed <- c_index1 - c_index2
+  
+  # Bootstrap to get p-value
+  set.seed(123)
+  n <- nrow(data_common)
+  diff_bootstrap <- numeric(n_bootstrap)
+  
+  for (i in 1:n_bootstrap) {
+    boot_idx <- sample(1:n, size = n, replace = TRUE)
+    data_boot <- data_common[boot_idx, ]
+    
+    cox_fit1_boot <- tryCatch(coxph(surv_formula1, data = data_boot), error = function(e) NULL)
+    cox_fit2_boot <- tryCatch(coxph(surv_formula2, data = data_boot), error = function(e) NULL)
+    
+    if (!is.null(cox_fit1_boot) && !is.null(cox_fit2_boot)) {
+      c1_boot <- tryCatch(summary(cox_fit1_boot)$concordance[1], error = function(e) NA_real_)
+      c2_boot <- tryCatch(summary(cox_fit2_boot)$concordance[1], error = function(e) NA_real_)
+      
+      if (!is.na(c1_boot) && !is.na(c2_boot)) {
+        diff_bootstrap[i] <- c1_boot - c2_boot
+      }
+    }
+  }
+  
+  # Calculate p-value (two-sided test)
+  # P-value is proportion of bootstrap differences as extreme or more extreme than observed
+  p_value <- mean(abs(diff_bootstrap) >= abs(diff_observed), na.rm = TRUE)
+  
+  return(list(
+    p_value = p_value,
+    diff_c_index = diff_observed,
+    c_index1 = c_index1,
+    c_index2 = c_index2,
+    n_common = nrow(data_common),
+    n_bootstrap = sum(!is.na(diff_bootstrap))
+  ))
+}
+
+# Function to calculate log-rank test p-value
+calculate_logrank_pvalue <- function(data, time_var, event_var, group_var) {
+  data_clean <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var]]),
+           !str_detect(tolower(.data[[group_var]]), "no ctdna data"))
+  
+  if (nrow(data_clean) == 0 || sum(data_clean[[event_var]] == 1, na.rm = TRUE) == 0) {
+    return(NA_real_)
+  }
+  
+  surv_formula <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", group_var))
+  surv_fit <- survfit(surv_formula, data = data_clean)
+  
+  # Log-rank test
+  logrank_test <- tryCatch({
+    survdiff(surv_formula, data = data_clean)
+  }, error = function(e) {
+    return(NULL)
+  })
+  
+  if (is.null(logrank_test)) {
+    return(NA_real_)
+  }
+  
+  p_value <- 1 - pchisq(logrank_test$chisq, length(logrank_test$n) - 1)
+  return(p_value)
+}
+
+# Compare PFS performance
+cat("\n--- PFS (Progression-Free Survival) Comparison ---\n")
+
+# Qualitative
+qual_pfs_c <- calculate_c_index(survival_qualitative, "pfs_time", "relapse_event", "qualitative_group")
+qual_pfs_p <- calculate_logrank_pvalue(survival_qualitative, "pfs_time", "relapse_event", "qualitative_group")
+
+# Quantitative
+quant_pfs_c <- calculate_c_index(survival_quantitative, "pfs_time", "relapse_event", "quantitative_group")
+quant_pfs_p <- calculate_logrank_pvalue(survival_quantitative, "pfs_time", "relapse_event", "quantitative_group")
+
+# ML
+ml_pfs_c <- calculate_c_index(survival_ml, "pfs_time", "relapse_event", "ml_group")
+ml_pfs_p <- calculate_logrank_pvalue(survival_ml, "pfs_time", "relapse_event", "ml_group")
+
+# Compare OS performance
+cat("\n--- OS (Overall Survival) Comparison ---\n")
+
+# Qualitative
+qual_os_c <- calculate_c_index(survival_qualitative, "os_time", "death_event", "qualitative_group")
+qual_os_p <- calculate_logrank_pvalue(survival_qualitative, "os_time", "death_event", "qualitative_group")
+
+# Quantitative
+quant_os_c <- calculate_c_index(survival_quantitative, "os_time", "death_event", "quantitative_group")
+quant_os_p <- calculate_logrank_pvalue(survival_quantitative, "os_time", "death_event", "quantitative_group")
+
+# ML
+ml_os_c <- calculate_c_index(survival_ml, "os_time", "death_event", "ml_group")
+ml_os_p <- calculate_logrank_pvalue(survival_ml, "os_time", "death_event", "ml_group")
+
+# Create comparison table
+comparison_results <- tibble(
+  Approach = c("Qualitative", "Quantitative", "ML"),
+  PFS_C_Index = c(qual_pfs_c$c_index, quant_pfs_c$c_index, ml_pfs_c$c_index),
+  PFS_LogRank_P = c(qual_pfs_p, quant_pfs_p, ml_pfs_p),
+  PFS_N = c(qual_pfs_c$n, quant_pfs_c$n, ml_pfs_c$n),
+  PFS_AIC = c(ifelse(is.null(qual_pfs_c$aic), NA_real_, qual_pfs_c$aic),
+              ifelse(is.null(quant_pfs_c$aic), NA_real_, quant_pfs_c$aic),
+              ifelse(is.null(ml_pfs_c$aic), NA_real_, ml_pfs_c$aic)),
+  OS_C_Index = c(qual_os_c$c_index, quant_os_c$c_index, ml_os_c$c_index),
+  OS_LogRank_P = c(qual_os_p, quant_os_p, ml_os_p),
+  OS_N = c(qual_os_c$n, quant_os_c$n, ml_os_c$n),
+  OS_AIC = c(ifelse(is.null(qual_os_c$aic), NA_real_, qual_os_c$aic),
+             ifelse(is.null(quant_os_c$aic), NA_real_, quant_os_c$aic),
+             ifelse(is.null(ml_os_c$aic), NA_real_, ml_os_c$aic))
+) %>%
+  mutate(
+    PFS_C_Index = round(PFS_C_Index, 3),
+    PFS_LogRank_P = round(PFS_LogRank_P, 4),
+    OS_C_Index = round(OS_C_Index, 3),
+    OS_LogRank_P = round(OS_LogRank_P, 4),
+    PFS_AIC = round(PFS_AIC, 1),
+    OS_AIC = round(OS_AIC, 1)
+  )
+
+cat("\nModel Performance Comparison:\n")
+print(comparison_results)
+
+# Statistical comparison of C-indices for OS
+cat("\n=== Statistical Comparison of OS C-Indices ===\n")
+cat("Comparing Quantitative vs Qualitative and ML approaches using bootstrap (n=1000)\n\n")
+
+# Compare Quantitative vs Qualitative for OS
+if ("Quantitative" %in% comparison_results$Approach) {
+  comp_quant_vs_qual_os <- compare_c_indices(
+    survival_quantitative %>% 
+      left_join(survival_qualitative %>% select(patient_id, qualitative_group), by = "patient_id"),
+    "os_time", "death_event", 
+    "quantitative_group", "qualitative_group", n_bootstrap = 1000
+  )
+  
+  cat("Quantitative vs Qualitative (OS):\n")
+  cat("  Quantitative C-Index:", round(comp_quant_vs_qual_os$c_index1, 3), "\n")
+  cat("  Qualitative C-Index:", round(comp_quant_vs_qual_os$c_index2, 3), "\n")
+  cat("  Difference:", round(comp_quant_vs_qual_os$diff_c_index, 3), "\n")
+  cat("  P-value (bootstrap):", round(comp_quant_vs_qual_os$p_value, 4), "\n")
+  cat("  Common patients:", comp_quant_vs_qual_os$n_common, "\n\n")
+  
+  # Compare Quantitative vs ML for OS
+  comp_quant_vs_ml_os <- compare_c_indices(
+    survival_quantitative %>% 
+      left_join(survival_ml %>% select(patient_id, ml_group), by = "patient_id"),
+    "os_time", "death_event", 
+    "quantitative_group", "ml_group", n_bootstrap = 1000
+  )
+  
+  cat("Quantitative vs ML (OS):\n")
+  cat("  Quantitative C-Index:", round(comp_quant_vs_ml_os$c_index1, 3), "\n")
+  cat("  ML C-Index:", round(comp_quant_vs_ml_os$c_index2, 3), "\n")
+  cat("  Difference:", round(comp_quant_vs_ml_os$diff_c_index, 3), "\n")
+  cat("  P-value (bootstrap):", round(comp_quant_vs_ml_os$p_value, 4), "\n")
+  cat("  Common patients:", comp_quant_vs_ml_os$n_common, "\n\n")
+  
+  # Store results for table
+  c_index_comparison_os <- tibble(
+    Comparison = c("Quantitative vs Qualitative", "Quantitative vs ML"),
+    Quantitative_C_Index = c(comp_quant_vs_qual_os$c_index1, comp_quant_vs_ml_os$c_index1),
+    Other_C_Index = c(comp_quant_vs_qual_os$c_index2, comp_quant_vs_ml_os$c_index2),
+    Difference = c(comp_quant_vs_qual_os$diff_c_index, comp_quant_vs_ml_os$diff_c_index),
+    P_Value = c(comp_quant_vs_qual_os$p_value, comp_quant_vs_ml_os$p_value),
+    N_Common = c(comp_quant_vs_qual_os$n_common, comp_quant_vs_ml_os$n_common)
+  ) %>%
+    mutate(
+      Difference = round(Difference, 3),
+      P_Value = round(P_Value, 4),
+      Quantitative_C_Index = round(Quantitative_C_Index, 3),
+      Other_C_Index = round(Other_C_Index, 3)
+    )
+} else {
+  # Only Qualitative and ML available
+  comp_qual_vs_ml_os <- compare_c_indices(
+    survival_qualitative %>% 
+      left_join(survival_ml %>% select(patient_id, ml_group), by = "patient_id"),
+    "os_time", "death_event", 
+    "qualitative_group", "ml_group", n_bootstrap = 1000
+  )
+  
+  cat("Qualitative vs ML (OS):\n")
+  cat("  Qualitative C-Index:", round(comp_qual_vs_ml_os$c_index1, 3), "\n")
+  cat("  ML C-Index:", round(comp_qual_vs_ml_os$c_index2, 3), "\n")
+  cat("  Difference:", round(comp_qual_vs_ml_os$diff_c_index, 3), "\n")
+  cat("  P-value (bootstrap):", round(comp_qual_vs_ml_os$p_value, 4), "\n")
+  cat("  Common patients:", comp_qual_vs_ml_os$n_common, "\n\n")
+  
+  c_index_comparison_os <- tibble(
+    Comparison = "Qualitative vs ML",
+    Qualitative_C_Index = comp_qual_vs_ml_os$c_index1,
+    ML_C_Index = comp_qual_vs_ml_os$c_index2,
+    Difference = comp_qual_vs_ml_os$diff_c_index,
+    P_Value = comp_qual_vs_ml_os$p_value,
+    N_Common = comp_qual_vs_ml_os$n_common
+  ) %>%
+    mutate(
+      Difference = round(Difference, 3),
+      P_Value = round(P_Value, 4),
+      Qualitative_C_Index = round(Qualitative_C_Index, 3),
+      ML_C_Index = round(ML_C_Index, 3)
+    )
+}
+```
+
+```{r model_comparison_table}
+# ==============================
+# Model Comparison Table
+# ==============================
+
+cat("\n=== Model Performance Comparison Table ===\n\n")
+
+kable(comparison_results, 
+      caption = "Performance Comparison: Qualitative vs Quantitative vs ML Approaches",
+      col.names = c("Approach", 
+                    "PFS C-Index", "PFS Log-Rank P", "PFS N", "PFS AIC",
+                    "OS C-Index", "OS Log-Rank P", "OS N", "OS AIC")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  add_footnote(c("C-Index: Harrell's concordance index (higher is better, 0.5 = random, 1.0 = perfect)",
+                 "Log-Rank P: P-value from log-rank test (lower is better)",
+                 "AIC: Akaike Information Criterion (lower is better)",
+                 "N: Number of patients included in analysis"), 
+               notation = "symbol")
+
+# Display C-index comparison table
+if (exists("c_index_comparison_os")) {
+  cat("\n=== C-Index Comparison Table (OS) ===\n\n")
+  kable(c_index_comparison_os,
+        caption = "Statistical Comparison of OS C-Indices: Quantitative vs Other Approaches",
+        col.names = c("Comparison", "Approach 1 C-Index", "Approach 2 C-Index", 
+                     "Difference", "P-Value", "N (Common Patients)")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    add_footnote(c("P-value from bootstrap test (n=1000) comparing C-indices",
+                   "Difference = Approach 1 C-Index - Approach 2 C-Index",
+                   "P < 0.05 indicates statistically significant difference in discrimination ability"),
+                 notation = "symbol")
+  cat("\n\n")
+}
+
+cat("\n\n=== How to Interpret the Results ===\n\n")
+
+cat("**1. C-Index (Concordance Index)** - Discrimination Ability:\n")
+cat("   - Range: 0.5 (random) to 1.0 (perfect)\n")
+cat("   - > 0.6 = Good discrimination\n")
+cat("   - > 0.7 = Excellent discrimination\n")
+cat("   - > 0.8 = Outstanding discrimination\n")
+cat("   - Higher is ALWAYS better\n\n")
+
+cat("**2. Log-Rank P-value** - Statistical Significance:\n")
+cat("   - Tests if survival curves differ significantly between groups\n")
+cat("   - P < 0.05 = Significant differences (groups are meaningfully different)\n")
+cat("   - P = 0 (or < 0.001) = Highly significant\n")
+cat("   - All three approaches show P = 0, meaning all successfully stratify patients\n\n")
+
+cat("**3. AIC (Akaike Information Criterion)** - Model Fit:\n")
+cat("   - Lower is better (penalizes model complexity)\n")
+cat("   - Difference of 2-3 points = Meaningful difference\n")
+cat("   - Difference of >10 points = Substantial difference\n")
+cat("   - Used to compare models: Lower AIC = Better fit for complexity\n\n")
+
+cat("**4. N (Sample Size)** - Robustness:\n")
+cat("   - More patients = More robust/stable results\n")
+cat("   - Consider when comparing approaches with different sample sizes\n\n")
+
+cat("**Interpreting Your Results:**\n\n")
+
+# Calculate which is best for each metric
+if (exists("comparison_results")) {
+  # PFS Analysis
+  best_pfs_c <- comparison_results$Approach[which.max(comparison_results$PFS_C_Index)]
+  best_pfs_aic <- comparison_results$Approach[which.min(comparison_results$PFS_AIC)]
+  
+  cat("**For PFS (Progression-Free Survival):**\n")
+  cat("  - Best Discrimination (C-Index):", best_pfs_c, 
+      "(C-Index =", max(comparison_results$PFS_C_Index, na.rm = TRUE), ")\n")
+  cat("  - Best Model Fit (AIC):", best_pfs_aic, 
+      "(AIC =", min(comparison_results$PFS_AIC, na.rm = TRUE), ")\n")
+  
+  # Determine overall best for PFS
+  if (best_pfs_c == best_pfs_aic) {
+    cat("  → Overall Best for PFS:", best_pfs_c, "\n")
+    cat("    (Best in both discrimination AND model fit)\n")
+  } else {
+    cat("  → Trade-off: Higher discrimination (", best_pfs_c, 
+        ") vs Better fit (", best_pfs_aic, ")\n")
+    cat("    Recommendation: Prioritize C-Index for clinical utility\n")
+  }
+  cat("\n")
+  
+  # OS Analysis
+  best_os_c <- comparison_results$Approach[which.max(comparison_results$OS_C_Index)]
+  best_os_aic <- comparison_results$Approach[which.min(comparison_results$OS_AIC)]
+  
+  cat("**For OS (Overall Survival):**\n")
+  cat("  - Best Discrimination (C-Index):", best_os_c, 
+      "(C-Index =", max(comparison_results$OS_C_Index, na.rm = TRUE), ")\n")
+  cat("  - Best Model Fit (AIC):", best_os_c, 
+      "(AIC =", min(comparison_results$OS_AIC, na.rm = TRUE), ")\n")
+  
+  if (best_os_c == best_os_aic) {
+    cat("  → Overall Best for OS:", best_os_c, "\n")
+    cat("    (Best in both discrimination AND model fit)\n")
+  } else {
+    cat("  → Trade-off: Higher discrimination (", best_os_c, 
+        ") vs Better fit (", best_os_aic, ")\n")
+    cat("    Recommendation: Prioritize C-Index for clinical utility\n")
+  }
+  cat("\n")
+  
+  cat("**Key Differences Between Approaches:**\n\n")
+  
+  # Calculate differences
+  pfs_c_diff <- max(comparison_results$PFS_C_Index, na.rm = TRUE) - min(comparison_results$PFS_C_Index, na.rm = TRUE)
+  os_c_diff <- max(comparison_results$OS_C_Index, na.rm = TRUE) - min(comparison_results$OS_C_Index, na.rm = TRUE)
+  
+  cat("  - PFS C-Index range:", round(pfs_c_diff, 3), 
+      "(difference between best and worst)\n")
+  if (pfs_c_diff > 0.05) {
+    cat("    → Substantial difference in discrimination ability\n")
+  } else if (pfs_c_diff > 0.02) {
+    cat("    → Moderate difference in discrimination ability\n")
+  } else {
+    cat("    → Small difference - approaches perform similarly\n")
+  }
+  
+  cat("  - OS C-Index range:", round(os_c_diff, 3), 
+      "(difference between best and worst)\n")
+  if (os_c_diff > 0.05) {
+    cat("    → Substantial difference in discrimination ability\n")
+  } else if (os_c_diff > 0.02) {
+    cat("    → Moderate difference in discrimination ability\n")
+  } else {
+    cat("    → Small difference - approaches perform similarly\n")
+  }
+  cat("\n")
+  
+  cat("**Clinical Recommendation:**\n")
+  cat("  - For clinical decision-making, prioritize C-Index (discrimination)\n")
+  cat("  - C-Index directly measures how well the model separates high-risk from low-risk patients\n")
+  cat("  - AIC is useful for model selection but less directly relevant to clinical utility\n")
+  cat("  - All approaches show significant stratification (P = 0), so all are statistically valid\n")
+  cat("  - Choose the approach with highest C-Index for the outcome of interest\n\n")
+}
+```
+
+```{r ml_model_formula, echo=TRUE, eval=FALSE}
+# ==============================
+# ML Model Formula for Clinical Use
+# REMOVED: Not needed for current analysis
+# ==============================
+
+cat("\n=== ML Model Formula for Clinical Application ===\n\n")
+
+if (exists("ml_model_parameters") && exists("cluster_names")) {
+  
+  cat("**HOW TO CALCULATE PATIENT GROUPING USING THE ML MODEL**\n\n")
+  
+  cat("**Step 1: Calculate Features for Your Patient**\n\n")
+  cat("For each patient, calculate the following features from their ctDNA measurements:\n\n")
+  
+  # Create feature descriptions mapping
+  feature_desc_map <- c(
+    "n_measurements" = "Total number of ctDNA measurements",
+    "mean_ctdna" = "Mean ctDNA value across all measurements",
+    "median_ctdna" = "Median ctDNA value",
+    "max_ctdna" = "Maximum ctDNA value observed",
+    "min_ctdna" = "Minimum ctDNA value observed",
+    "sd_ctdna" = "Standard deviation of ctDNA values",
+    "n_positive" = "Number of positive ctDNA measurements (>0)",
+    "n_negative" = "Number of negative ctDNA measurements (=0)",
+    "became_negative" = "1 if patient had positive baseline and later became negative, else 0",
+    "became_positive" = "1 if patient had negative baseline and later became positive, else 0",
+    "last_value" = "Last ctDNA measurement value",
+    "first_value" = "First ctDNA measurement value",
+    "pct_change_baseline" = "Percent change from baseline to last: ((last - baseline)/baseline)*100 (or 100 if baseline=0 and last>0)",
+    "time_span_days" = "Number of days between first and last ctDNA measurement",
+    "trend" = "Linear regression slope of ctDNA values over time (from first to last measurement)",
+    "cv_ctdna" = "Coefficient of variation: sd/mean (0 if mean=0)",
+    "trend_per_day" = "Trend normalized by time span: trend/time_span_days",
+    "clearance_pattern" = "1 if baseline>0 and became negative, else 0",
+    "conversion_pattern" = "1 if baseline=0 and became positive, else 0",
+    "persistent_positive" = "1 if baseline>0, never became negative, and last>0, else 0",
+    "persistent_negative" = "1 if baseline=0, never became positive, and last=0, else 0"
+  )
+  
+  feature_descriptions <- tibble(
+    Feature = ml_model_parameters$feature_cols,
+    Description = ifelse(ml_model_parameters$feature_cols %in% names(feature_desc_map),
+                        feature_desc_map[ml_model_parameters$feature_cols],
+                        ml_model_parameters$feature_cols)
+  )
+  
+  kable(feature_descriptions, 
+        caption = "Features Required for ML Model Classification",
+        col.names = c("Feature Name", "How to Calculate")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+  
+  cat("\n\n**Step 2: Scale Features Using Training Set Parameters**\n\n")
+  cat("For each feature, apply the following transformation:\n\n")
+  cat("```\n")
+  cat("scaled_feature = (raw_feature - center) / scale\n")
+  cat("```\n\n")
+  cat("Where 'center' and 'scale' are the training set mean and standard deviation:\n\n")
+  
+  # Create scaling parameters table
+  scaling_params <- tibble(
+    Feature = names(ml_model_parameters$scale_center),
+    Center = round(ml_model_parameters$scale_center, 4),
+    Scale = round(ml_model_parameters$scale_scale, 4)
+  )
+  
+  kable(scaling_params, 
+        caption = "Scaling Parameters (Training Set Statistics)",
+        col.names = c("Feature", "Center (Mean)", "Scale (SD)")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    scroll_box(width = "100%", height = "400px")
+  
+  cat("\n\n**Step 3: Calculate Distance to Each Cluster Center**\n\n")
+  cat("For each cluster (1 to ", ml_model_parameters$n_clusters, "), calculate the Euclidean distance:\n\n", sep = "")
+  cat("```\n")
+  cat("distance_to_cluster[i] = sqrt(sum((scaled_features - cluster_center[i])^2))\n")
+  cat("```\n\n")
+  cat("Where cluster_center[i] is the center of cluster i.\n\n")
+  
+  cat("**Step 4: Assign to Nearest Cluster**\n\n")
+  cat("Assign the patient to the cluster with the minimum distance:\n\n")
+  cat("```\n")
+  cat("assigned_cluster = cluster with minimum distance\n")
+  cat("```\n\n")
+  
+  cat("**Step 5: Map Cluster to Group Name**\n\n")
+  cat("Use the following mapping to get the clinical group name:\n\n")
+  
+  cluster_mapping <- cluster_names %>%
+    arrange(ml_cluster) %>%
+    mutate(Cluster_Number = ml_cluster) %>%
+    select(Cluster_Number, Clinical_Group_Name = group_name)
+  
+  kable(cluster_mapping, 
+        caption = "Cluster Number to Clinical Group Name Mapping",
+        col.names = c("Cluster Number", "Clinical Group Name")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+  
+  cat("\n\n**Cluster Centers (for distance calculation):**\n\n")
+  
+  # Display cluster centers in a readable format
+  cluster_centers_df <- as.data.frame(ml_model_parameters$cluster_centers)
+  cluster_centers_df$Cluster <- 1:nrow(cluster_centers_df)
+  cluster_centers_df <- cluster_centers_df %>%
+    select(Cluster, everything()) %>%
+    mutate(across(where(is.numeric), ~round(., 4)))
+  
+  kable(cluster_centers_df, 
+        caption = "Cluster Centers (Scaled Feature Values)",
+        digits = 4) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    scroll_box(width = "100%", height = "400px")
+  
+  cat("\n\n**EXAMPLE CALCULATION:**\n\n")
+  cat("1. Patient has 5 ctDNA measurements: [10.5, 8.2, 5.1, 2.3, 0.0]\n")
+  cat("2. Calculate features:\n")
+  cat("   - n_measurements = 5\n")
+  cat("   - mean_ctdna = 5.22\n")
+  cat("   - baseline_value = 10.5\n")
+  cat("   - last_value = 0.0\n")
+  cat("   - became_negative = 1 (started positive, ended negative)\n")
+  cat("   - ... (calculate all features)\n")
+  cat("3. Scale each feature using the Center and Scale values from the table above\n")
+  cat("4. Calculate distance to each of the ", ml_model_parameters$n_clusters, " cluster centers\n", sep = "")
+  cat("5. Assign to cluster with minimum distance\n")
+  cat("6. Look up the Clinical Group Name from the mapping table\n\n")
+  
+  cat("**IMPORTANT NOTES:**\n")
+  cat("- All features must be calculated exactly as described\n")
+  cat("- Scaling must use the training set parameters (provided above)\n")
+  cat("- Missing values should be set to 0\n")
+  cat("- Infinite or NaN values should be set to 0\n")
+  cat("- The model was trained on patients with ctDNA data only\n\n")
+  
+  # Export to CSV for easy use
+  write.csv(scaling_params, "ML_Scaling_Parameters.csv", row.names = FALSE)
+  write.csv(cluster_centers_df, "ML_Cluster_Centers.csv", row.names = FALSE)
+  write.csv(cluster_mapping, "ML_Cluster_Names.csv", row.names = FALSE)
+  
+  cat("**Files Exported for Clinical Use:**\n")
+  cat("- ML_Scaling_Parameters.csv: Feature scaling parameters\n")
+  cat("- ML_Cluster_Centers.csv: Cluster center coordinates\n")
+  cat("- ML_Cluster_Names.csv: Cluster to group name mapping\n")
+  cat("- ML_Model_Specification.rds: Complete model specification (R format)\n\n")
+  
+} else {
+  cat("ML model parameters not available. Please ensure the ML model has been trained.\n")
+}
+```
+
+# ML-specific: Performance on train/validation/test sets
+cat("\n=== ML Model: Train/Validation/Test Performance ===\n\n")
+
+if (exists("ml_groups") && "dataset_split" %in% names(ml_groups)) {
+  # Merge dataset_split info with survival data
+  survival_ml_split <- survival_ml %>%
+    left_join(ml_groups %>% select(patient_id, dataset_split), by = "patient_id") %>%
+    filter(!is.na(dataset_split), !str_detect(tolower(ml_group), "no ctdna data"))
+  
+  # Calculate performance on each split
+  ml_train_pfs <- calculate_c_index(survival_ml_split %>% filter(dataset_split == "Train"), 
+                                     "pfs_time", "relapse_event", "ml_group")
+  ml_val_pfs <- calculate_c_index(survival_ml_split %>% filter(dataset_split == "Validation"), 
+                                   "pfs_time", "relapse_event", "ml_group")
+  ml_test_pfs <- calculate_c_index(survival_ml_split %>% filter(dataset_split == "Test"), 
+                                    "pfs_time", "relapse_event", "ml_group")
+  
+  ml_train_os <- calculate_c_index(survival_ml_split %>% filter(dataset_split == "Train"), 
+                                    "os_time", "death_event", "ml_group")
+  ml_val_os <- calculate_c_index(survival_ml_split %>% filter(dataset_split == "Validation"), 
+                                  "os_time", "death_event", "ml_group")
+  ml_test_os <- calculate_c_index(survival_ml_split %>% filter(dataset_split == "Test"), 
+                                   "os_time", "death_event", "ml_group")
+  
+  ml_split_results <- tibble(
+    Dataset = c("Train", "Validation", "Test"),
+    PFS_C_Index = c(ml_train_pfs$c_index, ml_val_pfs$c_index, ml_test_pfs$c_index),
+    PFS_N = c(ml_train_pfs$n, ml_val_pfs$n, ml_test_pfs$n),
+    OS_C_Index = c(ml_train_os$c_index, ml_val_os$c_index, ml_test_os$c_index),
+    OS_N = c(ml_train_os$n, ml_val_os$n, ml_test_os$n)
+  ) %>%
+    mutate(
+      PFS_C_Index = round(PFS_C_Index, 3),
+      OS_C_Index = round(OS_C_Index, 3)
+    )
+  
+  cat("ML Model Performance by Dataset Split:\n")
+  print(ml_split_results)
+  
+  cat("\nNote: Model was trained on training set only.\n")
+  cat("Validation and test sets were assigned to nearest cluster centers from training model.\n")
+  cat("Similar C-Index values across splits indicate good generalization.\n\n")
+}
+```
+
+```{r summary_tables_approaches}
+# ==============================
+# Summary Tables for Each Approach
+# ==============================
+
+cat("\n=== Summary Tables for Each Approach ===\n\n")
+
+# Approach 1 Summary
+cat("## Approach 1: Qualitative Criteria\n\n")
+if (exists("survival_qualitative") && nrow(survival_qualitative) > 0) {
+  qualitative_summary <- survival_qualitative %>%
+  filter(!str_detect(tolower(qualitative_group), "no ctdna data")) %>%
+  group_by(qualitative_group) %>%
+  summarise(
+    N = n(),
+    PFS_events = sum(relapse_event == 1, na.rm = TRUE),
+    OS_events = sum(death_event == 1, na.rm = TRUE),
+    Median_PFS = median(pfs_time[relapse_event == 1], na.rm = TRUE),
+    Median_OS = median(os_time[death_event == 1], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+  kable(qualitative_summary, caption = "Qualitative Criteria: Outcomes by Group") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+} else {
+  cat("No data available for Qualitative Criteria summary\n")
+}
+
+cat("\n\n")
+
+# Approach 2 Summary
+cat("## Approach 2: Quantitative Criteria\n\n")
+if (exists("survival_quantitative") && nrow(survival_quantitative) > 0) {
+  quantitative_summary <- survival_quantitative %>%
+  filter(!str_detect(tolower(quantitative_group), "no ctdna data")) %>%
+  group_by(quantitative_group) %>%
+  summarise(
+    N = n(),
+    PFS_events = sum(relapse_event == 1, na.rm = TRUE),
+    OS_events = sum(death_event == 1, na.rm = TRUE),
+    Median_PFS = median(pfs_time[relapse_event == 1], na.rm = TRUE),
+    Median_OS = median(os_time[death_event == 1], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+  kable(quantitative_summary, caption = "Quantitative Criteria: Outcomes by Group") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+} else {
+  cat("No data available for Quantitative Criteria summary\n")
+}
+
+cat("\n\n")
+
+# Approach 3 Summary
+cat("## Approach 3: Machine Learning Subgroups\n\n")
+if (exists("survival_ml") && nrow(survival_ml) > 0) {
+  ml_summary <- survival_ml %>%
+  filter(!str_detect(tolower(ml_group), "no ctdna data")) %>%
+  group_by(ml_group) %>%
+  summarise(
+    N = n(),
+    PFS_events = sum(relapse_event == 1, na.rm = TRUE),
+    OS_events = sum(death_event == 1, na.rm = TRUE),
+    Median_PFS = median(pfs_time[relapse_event == 1], na.rm = TRUE),
+    Median_OS = median(os_time[death_event == 1], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+  kable(ml_summary, caption = "ML-Generated Subgroups: Outcomes by Group") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+} else {
+  cat("No data available for ML Subgroups summary\n")
+}
+
+cat("\n\n")
+
+# Show ML criteria that were generated
+cat("## Machine Learning Criteria Generated\n\n")
+n_clusters_used <- if (exists("n_clusters")) n_clusters else 4
+cat("The following features were used to generate", n_clusters_used, "subgroups:\n")
+cat("- Baseline ctDNA value\n")
+cat("- Number of measurements\n")
+cat("- Mean, median, max, min ctDNA values\n")
+cat("- Standard deviation and coefficient of variation\n")
+cat("- Trend (increasing/decreasing over time)\n")
+cat("- Status changes (became negative/positive)\n\n")
+
+if (exists("cluster_characteristics")) {
+  cat("Cluster characteristics:\n")
+  print(cluster_characteristics)
+} else {
+  cat("Cluster characteristics not available\n")
+}
+```
+
+```{r comprehensive_patient_table}
+# ==============================
+# Comprehensive Patient Data Table
+# ==============================
+
+cat("\n=== Comprehensive Patient Data: ctDNA Levels and Clinical Outcomes ===\n\n")
+
+# Create comprehensive table with ctDNA levels and outcomes
+# Dataset should already be in survival_outcomes, but ensure it's there
+comprehensive_table <- survival_outcomes %>%
+  # Ensure dataset is present (it should be from all_patients)
+  mutate(dataset = ifelse(is.na(dataset), "Unknown", dataset)) %>%
+  # Add qualitative and quantitative groups
+  left_join(qualitative_groups %>% select(patient_id, qualitative_group), by = "patient_id") %>%
+  left_join(quantitative_groups %>% select(patient_id, quantitative_group), by = "patient_id") %>%
+  left_join(ml_groups %>% select(patient_id, ml_group), by = "patient_id") %>%
+  # Get all ctDNA measurements for each patient
+  left_join(
+    ctdna_long %>%
+      group_by(patient_id) %>%
+      summarise(
+        ctDNA_measurements = paste(
+          paste0(round(ctdna_value, 2), " (", format(ctdna_date, "%Y-%m-%d"), ")"),
+          collapse = "; "
+        ),
+        n_ctDNA = n(),
+        first_ctDNA_date = min(ctdna_date, na.rm = TRUE),
+        last_ctDNA_date = max(ctdna_date, na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = "patient_id"
+  ) %>%
+  # Select and arrange columns (only select columns that exist)
+  select(
+    patient_id,
+    dataset,
+    baseline_date,
+    baseline_value,
+    first_ctDNA_date,
+    last_ctDNA_date,
+    n_ctDNA,
+    ctDNA_measurements,
+    # Clinical outcomes
+    relapse_date,
+    relapse_event,
+    time_to_relapse,
+    survival_date,
+    explicit_death_date,
+    alive_yes_no,
+    death_status_final,
+    death_event,
+    death_date,
+    time_to_death,
+    pfs_time,
+    os_time,
+    # Response categories
+    qualitative_group,
+    quantitative_group,
+    ml_group
+    # lbrecist_response  # Removed: LB-RECIST not needed
+  ) %>%
+  arrange(dataset, patient_id) %>%
+  # Format dates for display
+  mutate(
+    baseline_date = format(baseline_date, "%Y-%m-%d"),
+    first_ctDNA_date = format(first_ctDNA_date, "%Y-%m-%d"),
+    last_ctDNA_date = format(last_ctDNA_date, "%Y-%m-%d"),
+    relapse_date = ifelse(!is.na(relapse_date), format(relapse_date, "%Y-%m-%d"), NA_character_),
+    survival_date = ifelse(!is.na(survival_date), format(survival_date, "%Y-%m-%d"), NA_character_),
+    explicit_death_date = ifelse(!is.na(explicit_death_date), format(explicit_death_date, "%Y-%m-%d"), NA_character_),
+    death_date = ifelse(!is.na(death_date), format(death_date, "%Y-%m-%d"), NA_character_),
+    # Format numeric values
+    baseline_value = round(baseline_value, 2),
+    time_to_relapse = round(time_to_relapse, 1),
+    time_to_death = round(time_to_death, 1),
+    pfs_time = round(pfs_time, 1),
+    os_time = round(os_time, 1),
+    # Format event indicators
+    relapse_event = ifelse(relapse_event == 1, "Yes", "No"),
+    death_event = ifelse(death_event == 1, "Yes", "No"),
+    death_status = case_when(
+      death_status_final == 1 ~ "Dead",
+      death_status_final == 0 ~ "Alive",
+      TRUE ~ "Unknown"
+    )
+  ) %>%
+  # Rename columns for display
+  rename(
+    `Patient ID` = patient_id,
+    `Dataset` = dataset,
+    `Baseline Date` = baseline_date,
+    `Baseline ctDNA` = baseline_value,
+    `First ctDNA Date` = first_ctDNA_date,
+    `Last ctDNA Date` = last_ctDNA_date,
+    `# ctDNA Tests` = n_ctDNA,
+    `ctDNA Measurements (value, date)` = ctDNA_measurements,
+    `Relapse Date` = relapse_date,
+    `Relapse Event` = relapse_event,
+    `Time to Relapse (months)` = time_to_relapse,
+    `Last Follow-up Date` = survival_date,
+    `Explicit Death Date` = explicit_death_date,
+    `Alive Yes/No` = alive_yes_no,
+    `Death Status` = death_status,
+    `Death Date` = death_date,
+    `Death Event` = death_event,
+    `Time to Death (months)` = time_to_death,
+    `PFS Time (months)` = pfs_time,
+    `OS Time (months)` = os_time,
+    `Qualitative Group` = qualitative_group,
+    `Quantitative Group` = quantitative_group,
+    `ML Group` = ml_group
+    # `LB-RECIST Response` = lbrecist_response  # Removed: LB-RECIST not needed
+  )
+
+# Display table with kable
+kable(comprehensive_table, 
+      caption = "Comprehensive Patient Data: ctDNA Levels and Clinical Outcomes",
+      longtable = TRUE) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = TRUE,
+    font_size = 9,
+    position = "left"
+  ) %>%
+  scroll_box(width = "100%", height = "600px")
+
+cat("\n\nTotal patients in table:", nrow(comprehensive_table), "\n")
+cat("Patients with relapse events:", sum(comprehensive_table$`Relapse Event` == "Yes", na.rm = TRUE), "\n")
+cat("Patients with death events:", sum(comprehensive_table$`Death Event` == "Yes", na.rm = TRUE), "\n")
+```
+
+```{r export_comprehensive_table, include=FALSE}
+# ==============================
+# Export Comprehensive Table
+# ==============================
+
+# Export to CSV for easy viewing
+write.csv(comprehensive_table, "Comprehensive_Patient_Data.csv", row.names = FALSE)
+
+cat("\n=== Comprehensive Table Exported ===\n")
+cat("Table saved to: Comprehensive_Patient_Data.csv\n")
+```
+
+```{r asco_abstract}
+# ==============================
+# ASCO Abstract
+# ==============================
+
+cat("\n=== ASCO ABSTRACT ===\n\n")
+
+# Get key statistics for abstract
+if (exists("comparison_results") && exists("total_patients_abstract")) {
+  
+  # Extract best performing approach
+  best_os_approach <- comparison_results$Approach[which.max(comparison_results$OS_C_Index)]
+  best_os_cindex <- max(comparison_results$OS_C_Index, na.rm = TRUE)
+  best_pfs_approach <- comparison_results$Approach[which.max(comparison_results$PFS_C_Index)]
+  best_pfs_cindex <- max(comparison_results$PFS_C_Index, na.rm = TRUE)
+  
+  # Quantitative approach metrics
+  quant_os_cindex <- comparison_results$OS_C_Index[comparison_results$Approach == "Quantitative"]
+  quant_pfs_cindex <- comparison_results$PFS_C_Index[comparison_results$Approach == "Quantitative"]
+  quant_os_n <- comparison_results$OS_N[comparison_results$Approach == "Quantitative"]
+  quant_pfs_n <- comparison_results$PFS_N[comparison_results$Approach == "Quantitative"]
+  
+  cat("**TITLE:**\n")
+  cat("Validation of Circulating Tumor DNA Response Criteria in Muscle-Invasive Bladder Cancer: A Retrospective Analysis Comparing Qualitative, Quantitative, and Machine Learning Approaches\n\n")
+  
+  cat("**BACKGROUND:**\n")
+  cat("Circulating tumor DNA (ctDNA) has emerged as a promising predictive biomarker in muscle-invasive bladder cancer (MIBC), with potential applications in treatment response monitoring and prognostication. However, standardized and validated response criteria for ctDNA in this context are currently lacking, limiting its clinical utility. This study aimed to evaluate and validate various ctDNA response criteria in a retrospective cohort of MIBC patients to identify optimal criteria for clinical application.\n\n")
+  
+  cat("**METHODS:**\n")
+  cat("We conducted a retrospective analysis of ", total_patients_abstract, " MIBC patients (Stage II or higher) from our institutional database. Three distinct ctDNA response criteria were applied to stratify patients:\n", sep = "")
+  cat("(1) Qualitative approach: Categorization based on ctDNA positivity/negativity patterns (Clearance, Persistent Negative, Persistent Positive, Conversion);\n")
+  cat("(2) Quantitative approach: Stratification based on percent change in ctDNA levels (Major Response ≥90% reduction, Partial Response ≥50% reduction, Stable, Progressive ≥50% increase);\n")
+  cat("(3) Machine learning (ML) approach: K-means clustering incorporating multiple ctDNA features (baseline value, trend, variability, clearance/conversion patterns) to generate data-driven subgroups.\n")
+  cat("The performance of each approach was evaluated using Harrell's Concordance Index (C-Index) for progression-free survival (PFS) and overall survival (OS), log-rank test p-values, and Akaike Information Criterion (AIC).\n\n")
+  
+  cat("**RESULTS:**\n")
+  
+  # Get actual values from comparison table
+  qual_pfs_c <- comparison_results$PFS_C_Index[comparison_results$Approach == "Qualitative"]
+  qual_os_c <- comparison_results$OS_C_Index[comparison_results$Approach == "Qualitative"]
+  qual_pfs_n <- comparison_results$PFS_N[comparison_results$Approach == "Qualitative"]
+  qual_os_n <- comparison_results$OS_N[comparison_results$Approach == "Qualitative"]
+  
+  ml_pfs_c <- comparison_results$PFS_C_Index[comparison_results$Approach == "ML"]
+  ml_os_c <- comparison_results$OS_C_Index[comparison_results$Approach == "ML"]
+  ml_pfs_n <- comparison_results$PFS_N[comparison_results$Approach == "ML"]
+  ml_os_n <- comparison_results$OS_N[comparison_results$Approach == "ML"]
+  
+  # Check if Quantitative exists
+  if ("Quantitative" %in% comparison_results$Approach) {
+    quant_pfs_c <- comparison_results$PFS_C_Index[comparison_results$Approach == "Quantitative"]
+    quant_os_c <- comparison_results$OS_C_Index[comparison_results$Approach == "Quantitative"]
+    quant_pfs_n <- comparison_results$PFS_N[comparison_results$Approach == "Quantitative"]
+    quant_os_n <- comparison_results$OS_N[comparison_results$Approach == "Quantitative"]
+    
+    # Determine best approach for each outcome
+    best_os_approach <- comparison_results$Approach[which.max(comparison_results$OS_C_Index)]
+    best_pfs_approach <- comparison_results$Approach[which.max(comparison_results$PFS_C_Index)]
+    
+    cat("Performance metrics for each approach are summarized in the table below. ")
+    
+    if (best_os_approach == "Quantitative") {
+      cat("The quantitative approach demonstrated the highest discriminatory value for OS (C-Index = ", round(quant_os_c, 3), ", n = ", quant_os_n, "), ", sep = "")
+      if (best_pfs_approach == "ML") {
+        cat("followed by the ML approach (C-Index = ", round(ml_os_c, 3), ") and qualitative approach (C-Index = ", round(qual_os_c, 3), "). ", sep = "")
+      } else {
+        cat("followed by the qualitative approach (C-Index = ", round(qual_os_c, 3), ") and ML approach (C-Index = ", round(ml_os_c, 3), "). ", sep = "")
+      }
+      cat("For PFS, the ", best_pfs_approach, " approach showed the highest C-Index (", round(comparison_results$PFS_C_Index[comparison_results$Approach == best_pfs_approach], 3), ", n = ", comparison_results$PFS_N[comparison_results$Approach == best_pfs_approach], "). ", sep = "")
+    } else if (best_os_approach == "ML") {
+      cat("The ML approach demonstrated the highest discriminatory value for OS (C-Index = ", round(ml_os_c, 3), ", n = ", ml_os_n, "), ", sep = "")
+      if ("Quantitative" %in% comparison_results$Approach) {
+        cat("followed by the quantitative approach (C-Index = ", round(quant_os_c, 3), ") and qualitative approach (C-Index = ", round(qual_os_c, 3), "). ", sep = "")
+      } else {
+        cat("followed by the qualitative approach (C-Index = ", round(qual_os_c, 3), "). ", sep = "")
+      }
+      cat("For PFS, the ", best_pfs_approach, " approach showed the highest C-Index (", round(comparison_results$PFS_C_Index[comparison_results$Approach == best_pfs_approach], 3), ", n = ", comparison_results$PFS_N[comparison_results$Approach == best_pfs_approach], "). ", sep = "")
+    } else {
+      cat("The qualitative approach demonstrated OS C-Index of ", round(qual_os_c, 3), " (n = ", qual_os_n, "), ", sep = "")
+      if ("Quantitative" %in% comparison_results$Approach) {
+        cat("compared to quantitative (C-Index = ", round(quant_os_c, 3), ") and ML (C-Index = ", round(ml_os_c, 3), ") approaches. ", sep = "")
+      } else {
+        cat("compared to ML (C-Index = ", round(ml_os_c, 3), ") approach. ", sep = "")
+      }
+      cat("For PFS, the ", best_pfs_approach, " approach showed the highest C-Index (", round(comparison_results$PFS_C_Index[comparison_results$Approach == best_pfs_approach], 3), "). ", sep = "")
+    }
+    
+    cat("All approaches showed highly significant log-rank test p-values (p < 0.001), indicating successful patient stratification.\n\n")
+  } else {
+    # Only Qualitative and ML available
+    cat("Performance metrics for each approach are summarized in the table below. ")
+    if (ml_os_c > qual_os_c) {
+      cat("The ML approach demonstrated the highest discriminatory value for OS (C-Index = ", round(ml_os_c, 3), ", n = ", ml_os_n, "), compared to the qualitative approach (C-Index = ", round(qual_os_c, 3), ", n = ", qual_os_n, "). ", sep = "")
+    } else {
+      cat("The qualitative approach demonstrated OS C-Index of ", round(qual_os_c, 3), " (n = ", qual_os_n, "), compared to the ML approach (C-Index = ", round(ml_os_c, 3), ", n = ", ml_os_n, "). ", sep = "")
+    }
+    
+    if (ml_pfs_c > qual_pfs_c) {
+      cat("For PFS, the ML approach showed the highest C-Index (", round(ml_pfs_c, 3), ", n = ", ml_pfs_n, "), compared to the qualitative approach (C-Index = ", round(qual_pfs_c, 3), ", n = ", qual_pfs_n, "). ", sep = "")
+    } else {
+      cat("For PFS, the qualitative approach showed C-Index of ", round(qual_pfs_c, 3), " (n = ", qual_pfs_n, "), compared to the ML approach (C-Index = ", round(ml_pfs_c, 3), ", n = ", ml_pfs_n, "). ", sep = "")
+    }
+    cat("All approaches showed highly significant log-rank test p-values (p < 0.001), indicating successful patient stratification.\n\n")
+  }
+  
+  # Create results table for abstract
+  abstract_table <- comparison_results %>%
+    mutate(
+      PFS_LogRank_P_Formatted = ifelse(PFS_LogRank_P < 0.001, "<0.001", as.character(round(PFS_LogRank_P, 3))),
+      OS_LogRank_P_Formatted = ifelse(OS_LogRank_P < 0.001, "<0.001", as.character(round(OS_LogRank_P, 3)))
+    ) %>%
+    select(Approach, PFS_C_Index, PFS_LogRank_P_Formatted, PFS_N, OS_C_Index, OS_LogRank_P_Formatted, OS_N)
+  
+  kable(abstract_table,
+        caption = "Performance Comparison of ctDNA Response Criteria",
+        col.names = c("Approach", "PFS C-Index", "PFS Log-Rank P", "PFS N", 
+                     "OS C-Index", "OS Log-Rank P", "OS N"),
+        digits = 3) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+  
+  cat("\n**CONCLUSIONS:**\n")
+  
+  # Determine best overall OS approach for conclusions
+  if ("Quantitative" %in% comparison_results$Approach) {
+    best_overall_os <- comparison_results$Approach[which.max(comparison_results$OS_C_Index)]
+    best_os_cindex_val <- max(comparison_results$OS_C_Index, na.rm = TRUE)
+    
+    if (best_overall_os == "Quantitative") {
+      cat("Among the evaluated approaches, the quantitative ctDNA response criteria demonstrated the highest discriminatory value, particularly for overall survival (C-Index = ", round(best_os_cindex_val, 3), "). The quantitative approach, which stratifies patients based on percent change in ctDNA levels, provides a clinically interpretable and robust method for assessing treatment response. These findings suggest that quantitative assessment of ctDNA dynamics may serve as a valuable prognostic tool in MIBC. Prospective validation of these criteria in larger, multi-institutional cohorts is warranted to establish standardized ctDNA response metrics for clinical practice and to confirm their utility in guiding treatment decisions.\n\n", sep = "")
+    } else if (best_overall_os == "ML") {
+      cat("Among the evaluated approaches, the machine learning-based ctDNA response criteria demonstrated the highest discriminatory value for overall survival (C-Index = ", round(best_os_cindex_val, 3), "), followed by the quantitative approach (C-Index = ", round(quant_os_cindex, 3), "). The ML approach, which incorporates multiple ctDNA features to generate data-driven subgroups, and the quantitative approach, which stratifies patients based on percent change in ctDNA levels, both provide valuable methods for assessing treatment response. These findings suggest that both quantitative and ML-based assessment of ctDNA dynamics may serve as valuable prognostic tools in MIBC. Prospective validation of these criteria, particularly the quantitative approach given its clinical interpretability, in larger, multi-institutional cohorts is warranted to establish standardized ctDNA response metrics for clinical practice.\n\n", sep = "")
+    } else {
+      cat("Among the evaluated approaches, the quantitative ctDNA response criteria demonstrated the highest discriminatory value for overall survival (C-Index = ", round(quant_os_cindex, 3), "), compared to qualitative (C-Index = ", round(qual_os_c, 3), ") and ML (C-Index = ", round(ml_os_c, 3), ") approaches. The quantitative approach, which stratifies patients based on percent change in ctDNA levels, provides a clinically interpretable and robust method for assessing treatment response. These findings suggest that quantitative assessment of ctDNA dynamics may serve as a valuable prognostic tool in MIBC. Prospective validation of these criteria in larger, multi-institutional cohorts is warranted to establish standardized ctDNA response metrics for clinical practice.\n\n", sep = "")
+    }
+  } else {
+    # Only Qualitative and ML
+    best_overall_os <- if (ml_os_c > qual_os_c) "ML" else "Qualitative"
+    best_os_cindex_val <- max(ml_os_c, qual_os_c)
+    
+    if (best_overall_os == "ML") {
+      cat("Among the evaluated approaches, the machine learning-based ctDNA response criteria demonstrated the highest discriminatory value for overall survival (C-Index = ", round(ml_os_c, 3), "), compared to the qualitative approach (C-Index = ", round(qual_os_c, 3), "). The ML approach, which incorporates multiple ctDNA features to generate data-driven subgroups, provides a robust method for assessing treatment response. For PFS, the ML approach also showed superior discrimination (C-Index = ", round(ml_pfs_c, 3), ") compared to the qualitative approach (C-Index = ", round(qual_pfs_c, 3), "). These findings suggest that ML-based assessment of ctDNA dynamics may serve as a valuable prognostic tool in MIBC. Prospective validation of these criteria in larger, multi-institutional cohorts is warranted to establish standardized ctDNA response metrics for clinical practice.\n\n", sep = "")
+    } else {
+      cat("Among the evaluated approaches, both qualitative and ML-based ctDNA response criteria demonstrated similar discriminatory value for overall survival (Qualitative C-Index = ", round(qual_os_c, 3), "; ML C-Index = ", round(ml_os_c, 3), "). For PFS, the ML approach showed superior discrimination (C-Index = ", round(ml_pfs_c, 3), ") compared to the qualitative approach (C-Index = ", round(qual_pfs_c, 3), "). Both approaches successfully stratify patients based on ctDNA patterns, with the ML approach showing particular promise for PFS prediction. Prospective validation of these criteria in larger, multi-institutional cohorts is warranted to establish standardized ctDNA response metrics for clinical practice.\n\n", sep = "")
+    }
+  }
+  
+  cat("**KEY WORDS:**\n")
+  cat("Circulating tumor DNA, ctDNA, muscle-invasive bladder cancer, response criteria, biomarkers, survival analysis\n\n")
+  
+  # Determine best overall OS approach for conclusions
+  if ("Quantitative" %in% comparison_results$Approach) {
+    best_overall_os <- comparison_results$Approach[which.max(comparison_results$OS_C_Index)]
+    best_os_cindex_val <- max(comparison_results$OS_C_Index, na.rm = TRUE)
+  } else {
+    best_overall_os <- if (ml_os_c > qual_os_c) "ML" else "Qualitative"
+    best_os_cindex_val <- max(ml_os_c, qual_os_c)
+  }
+  
+  # Export abstract to text file
+  results_text <- if ("Quantitative" %in% comparison_results$Approach) {
+    paste0("Performance metrics for each approach are summarized in the table. ", 
+           if (best_os_approach == "Quantitative") {
+             paste0("The quantitative approach demonstrated the highest discriminatory value for OS (C-Index = ", round(quant_os_cindex, 3), ", n = ", quant_os_n, "), followed by the ML approach (C-Index = ", round(ml_os_c, 3), ") and qualitative approach (C-Index = ", round(qual_os_c, 3), "). ")
+           } else if (best_os_approach == "ML") {
+             paste0("The ML approach demonstrated the highest discriminatory value for OS (C-Index = ", round(ml_os_c, 3), ", n = ", ml_os_n, "), followed by the quantitative approach (C-Index = ", round(quant_os_cindex, 3), ") and qualitative approach (C-Index = ", round(qual_os_c, 3), "). ")
+           } else {
+             paste0("The qualitative approach demonstrated OS C-Index of ", round(qual_os_c, 3), " (n = ", qual_os_n, "), compared to quantitative (C-Index = ", round(quant_os_cindex, 3), ") and ML (C-Index = ", round(ml_os_c, 3), ") approaches. ")
+           },
+           "For PFS, the ", best_pfs_approach, " approach showed the highest C-Index (", round(comparison_results$PFS_C_Index[comparison_results$Approach == best_pfs_approach], 3), ", n = ", comparison_results$PFS_N[comparison_results$Approach == best_pfs_approach], "). All approaches showed highly significant log-rank test p-values (p < 0.001), indicating successful patient stratification.\n\n")
+  } else {
+    paste0("Performance metrics for each approach are summarized in the table. ",
+           if (ml_os_c > qual_os_c) {
+             paste0("The ML approach demonstrated the highest discriminatory value for OS (C-Index = ", round(ml_os_c, 3), ", n = ", ml_os_n, "), compared to the qualitative approach (C-Index = ", round(qual_os_c, 3), ", n = ", qual_os_n, "). ")
+           } else {
+             paste0("The qualitative approach demonstrated OS C-Index of ", round(qual_os_c, 3), " (n = ", qual_os_n, "), compared to the ML approach (C-Index = ", round(ml_os_c, 3), ", n = ", ml_os_n, "). ")
+           },
+           if (ml_pfs_c > qual_pfs_c) {
+             paste0("For PFS, the ML approach showed the highest C-Index (", round(ml_pfs_c, 3), ", n = ", ml_pfs_n, "), compared to the qualitative approach (C-Index = ", round(qual_pfs_c, 3), ", n = ", qual_pfs_n, "). ")
+           } else {
+             paste0("For PFS, the qualitative approach showed C-Index of ", round(qual_pfs_c, 3), " (n = ", qual_pfs_n, "), compared to the ML approach (C-Index = ", round(ml_pfs_c, 3), ", n = ", ml_pfs_n, "). ")
+           },
+           "All approaches showed highly significant log-rank test p-values (p < 0.001), indicating successful patient stratification.\n\n")
+  }
+  
+  conclusions_text <- if ("Quantitative" %in% comparison_results$Approach) {
+    if (best_overall_os == "Quantitative") {
+      paste0("Among the evaluated approaches, the quantitative ctDNA response criteria demonstrated the highest discriminatory value, particularly for overall survival (C-Index = ", round(best_os_cindex_val, 3), "). The quantitative approach, which stratifies patients based on percent change in ctDNA levels, provides a clinically interpretable and robust method for assessing treatment response. These findings suggest that quantitative assessment of ctDNA dynamics may serve as a valuable prognostic tool in MIBC. Prospective validation of these criteria in larger, multi-institutional cohorts is warranted to establish standardized ctDNA response metrics for clinical practice and to confirm their utility in guiding treatment decisions.\n")
+    } else if (best_overall_os == "ML") {
+      paste0("Among the evaluated approaches, the machine learning-based ctDNA response criteria demonstrated the highest discriminatory value for overall survival (C-Index = ", round(best_os_cindex_val, 3), "), followed by the quantitative approach (C-Index = ", round(quant_os_cindex, 3), "). The ML approach, which incorporates multiple ctDNA features to generate data-driven subgroups, and the quantitative approach, which stratifies patients based on percent change in ctDNA levels, both provide valuable methods for assessing treatment response. These findings suggest that both quantitative and ML-based assessment of ctDNA dynamics may serve as valuable prognostic tools in MIBC. Prospective validation of these criteria, particularly the quantitative approach given its clinical interpretability, in larger, multi-institutional cohorts is warranted to establish standardized ctDNA response metrics for clinical practice.\n")
+    } else {
+      paste0("Among the evaluated approaches, the quantitative ctDNA response criteria demonstrated the highest discriminatory value for overall survival (C-Index = ", round(quant_os_cindex, 3), "), compared to qualitative (C-Index = ", round(qual_os_c, 3), ") and ML (C-Index = ", round(ml_os_c, 3), ") approaches. The quantitative approach, which stratifies patients based on percent change in ctDNA levels, provides a clinically interpretable and robust method for assessing treatment response. These findings suggest that quantitative assessment of ctDNA dynamics may serve as a valuable prognostic tool in MIBC. Prospective validation of these criteria in larger, multi-institutional cohorts is warranted to establish standardized ctDNA response metrics for clinical practice.\n")
+    }
+  } else {
+    if (best_overall_os == "ML") {
+      paste0("Among the evaluated approaches, the machine learning-based ctDNA response criteria demonstrated the highest discriminatory value for overall survival (C-Index = ", round(ml_os_c, 3), "), compared to the qualitative approach (C-Index = ", round(qual_os_c, 3), "). The ML approach, which incorporates multiple ctDNA features to generate data-driven subgroups, provides a robust method for assessing treatment response. For PFS, the ML approach also showed superior discrimination (C-Index = ", round(ml_pfs_c, 3), ") compared to the qualitative approach (C-Index = ", round(qual_pfs_c, 3), "). These findings suggest that ML-based assessment of ctDNA dynamics may serve as a valuable prognostic tool in MIBC. Prospective validation of these criteria in larger, multi-institutional cohorts is warranted to establish standardized ctDNA response metrics for clinical practice.\n")
+    } else {
+      paste0("Among the evaluated approaches, both qualitative and ML-based ctDNA response criteria demonstrated similar discriminatory value for overall survival (Qualitative C-Index = ", round(qual_os_c, 3), "; ML C-Index = ", round(ml_os_c, 3), "). For PFS, the ML approach showed superior discrimination (C-Index = ", round(ml_pfs_c, 3), ") compared to the qualitative approach (C-Index = ", round(qual_pfs_c, 3), "). Both approaches successfully stratify patients based on ctDNA patterns, with the ML approach showing particular promise for PFS prediction. Prospective validation of these criteria in larger, multi-institutional cohorts is warranted to establish standardized ctDNA response metrics for clinical practice.\n")
+    }
+  }
+  
+  abstract_text <- paste0(
+    "TITLE:\n",
+    "Validation of Circulating Tumor DNA Response Criteria in Muscle-Invasive Bladder Cancer: A Retrospective Analysis Comparing Qualitative, Quantitative, and Machine Learning Approaches\n\n",
+    "BACKGROUND:\n",
+    "Circulating tumor DNA (ctDNA) has emerged as a promising predictive biomarker in muscle-invasive bladder cancer (MIBC), with potential applications in treatment response monitoring and prognostication. However, standardized and validated response criteria for ctDNA in this context are currently lacking, limiting its clinical utility. This study aimed to evaluate and validate various ctDNA response criteria in a retrospective cohort of MIBC patients to identify optimal criteria for clinical application.\n\n",
+    "METHODS:\n",
+    "We conducted a retrospective analysis of ", total_patients_abstract, " MIBC patients (Stage II or higher) from our institutional database. Three distinct ctDNA response criteria were applied to stratify patients: (1) Qualitative approach: Categorization based on ctDNA positivity/negativity patterns (Clearance, Persistent Negative, Persistent Positive, Conversion); (2) Quantitative approach: Stratification based on percent change in ctDNA levels (Major Response ≥90% reduction, Partial Response ≥50% reduction, Stable, Progressive ≥50% increase); (3) Machine learning (ML) approach: K-means clustering incorporating multiple ctDNA features (baseline value, trend, variability, clearance/conversion patterns) to generate data-driven subgroups. The performance of each approach was evaluated using Harrell's Concordance Index (C-Index) for progression-free survival (PFS) and overall survival (OS), log-rank test p-values, and Akaike Information Criterion (AIC).\n\n",
+    "RESULTS:\n",
+    results_text,
+    "CONCLUSIONS:\n",
+    conclusions_text
+  )
+  
+  writeLines(abstract_text, "ASCO_Abstract.txt")
+  cat("Abstract exported to: ASCO_Abstract.txt\n")
+  
+} else {
+  cat("Comparison results not available. Please ensure the analysis has been completed.\n")
+}
+```

@@ -1,0 +1,9 @@
+﻿Study_ID,"Cytokine (if multiple, each row gets it's own cytokine)",Type of Biomarker,LogHR_OS,SE_OS,CRP_Cutoff_mgdL,Time of cytokine assesment
+Ishihara 2020,CRP,Response,-2.856470206,0.794783137,1,post-tx within 3 months
+Kankkunen 2022,CRP ,Response,-1.302912752,0.331087122,1,baseline (115 days before nivo) and end of 12 weks
+Kijima 2021-1,CRP,Response,-0.512823626,0.547771464,0.5,post-tx within 30 days of tx initiation
+Kijima 2021-2,CRP,Response,-1.294727168,0.474186634,0.5,post-tx within 30 days of tx initiation
+Laino 2020-8,CRP,Response,-1.358409158,0.856259339,1.58,week 13
+Laino 2020-9,CRP,Response,-0.667829373,0.537489686,1.58,week 13
+Tamura 2020,CRP,Response,-1.829376333,0.683787653,0.51,before treatment and 6 weeks after 
+Tomita 2022,CRP ,Response,-0.886655927,0.175262089,1,baseline and day 1 of each 6 week cycle 

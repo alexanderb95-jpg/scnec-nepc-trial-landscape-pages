@@ -1,0 +1,1763 @@
+---
+title: 'Time-Dependent Cox Models and Landmark Analysis'
+subtitle: 'Addressing Guarantee Time Bias in ctDNA Survival Analysis'
+author: "Alex Karol"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# ==============================
+# Setup
+# ==============================
+knitr::opts_knit$set(root.dir = "~/R")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(comment = "")
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(survival)
+  library(dplyr)
+  library(tidyr)
+  library(lubridate)
+  library(ggplot2)
+  library(survminer)
+  library(knitr)
+  library(kableExtra)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+})
+```
+
+```{r load_data_if_needed, include=FALSE}
+# ==============================
+# Load Data and Create Required Objects
+# ==============================
+
+# Helper function: Robust date parser
+as_date_safe <- function(x) {
+  v <- as.character(x)
+  num <- suppressWarnings(as.numeric(v))
+  out <- rep(as.Date(NA), length(v))
+  is_serial <- !is.na(num) & num > 20000 & num < 60000
+  out[is_serial] <- as.Date(num[is_serial], origin = "1899-12-30")
+  left <- !is.na(num) & !is_serial
+  if (any(left)) {
+    parsed <- suppressWarnings(parse_date_time(v[left], orders = c("Y-m-d","m/d/Y","d/m/Y","m/d/y","d/m/y","Ymd"), tz = "UTC"))
+    out[left] <- as.Date(parsed)
+  }
+  bad <- is.na(out) | year(out) < 2000 | year(out) > 2100
+  out[bad] <- as.Date(NA)
+  out
+}
+
+# Build long ctDNA data from wide columns
+build_ctdna_long <- function(dat, id_col) {
+  cat("  Building ctdna_long from", nrow(dat), "rows in dat...\n")
+  
+  ctdna_value_cols <- names(dat)[str_detect(names(dat), regex("^ct_dna_level_\\d+$", ignore_case = TRUE))]
+  ctdna_date_cols <- names(dat)[str_detect(names(dat), regex("^ct_dna_level_\\d+_date$", ignore_case = TRUE))]
+  
+  cat("  Found", length(ctdna_value_cols), "ctDNA value columns and", length(ctdna_date_cols), "ctDNA date columns\n")
+  
+  if (length(ctdna_value_cols) == 0 || length(ctdna_date_cols) == 0) {
+    cat("  Warning: Missing ctDNA columns. Returning empty tibble.\n")
+    return(tibble(
+      !!id_col := character(0),
+      ctdna_date = as.Date(character(0)),
+      ctdna_value = numeric(0)
+    ))
+  }
+  
+  # Check how many patients we have
+  n_patients_before <- length(unique(dat[[id_col]]))
+  cat("  Starting with", n_patients_before, "unique patients\n")
+  
+  val <- dat %>% select(all_of(id_col), all_of(ctdna_value_cols)) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp", values_to = "ctdna_value_raw") %>%
+    mutate(ctdna_value = suppressWarnings(as.numeric(gsub("^<\\s*", "", gsub(",", "", as.character(ctdna_value_raw))))))
+  
+  cat("  After pivoting values:", nrow(val), "rows\n")
+  cat("  Non-NA values:", sum(!is.na(val$ctdna_value)), "\n")
+  
+  dt  <- dat %>% select(all_of(id_col), all_of(ctdna_date_cols)) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp_date", values_to = "ctdna_date_raw")
+  
+  cat("  After pivoting dates:", nrow(dt), "rows\n")
+  
+  out <- val %>%
+    mutate(tp_idx = as.integer(str_extract(tp, "\\d+"))) %>%
+    left_join(dt %>% mutate(tp_idx = as.integer(str_extract(tp_date, "\\d+"))) %>% select(all_of(id_col), tp_idx, ctdna_date_raw),
+              by = c(id_col, "tp_idx")) %>%
+    mutate(ctdna_date = as_date_safe(ctdna_date_raw))
+  
+  cat("  After joining:", nrow(out), "rows\n")
+  cat("  Non-NA dates:", sum(!is.na(out$ctdna_date)), "\n")
+  cat("  Rows with both date and value:", sum(!is.na(out$ctdna_date) & !is.na(out$ctdna_value)), "\n")
+  
+  # Filter - allow rows with at least a date OR a value (not requiring both)
+  out <- out %>%
+    filter(!is.na(ctdna_date) | !is.na(ctdna_value)) %>%
+    # If value is NA but date exists, set value to 0 (assuming negative)
+    mutate(ctdna_value = ifelse(is.na(ctdna_value) & !is.na(ctdna_date), 0, ctdna_value)) %>%
+    # If date is NA but value exists, we can't use it, so filter out
+    filter(!is.na(ctdna_date)) %>%
+    select(all_of(id_col), ctdna_date, ctdna_value) %>%
+    arrange(.data[[id_col]], ctdna_date)
+  
+  n_patients_after <- length(unique(out[[id_col]]))
+  cat("  Final result:", nrow(out), "rows from", n_patients_after, "patients\n")
+  
+  out
+}
+
+# Check if required objects exist, if not load data using EXACT approach from ctDNA_Descriptive.Rmd
+if (!exists("ctdna_long") || is.null(ctdna_long) || nrow(ctdna_long) == 0) {
+  cat("Note: ctdna_long not found. Loading data using approach from ctDNA_Descriptive.Rmd...\n")
+  
+  # Load data EXACTLY as in ctDNA_Descriptive.Rmd
+  # Lower tract dataset
+  file_path_lower <- "Natera_Sheet_Master1.xlsx"
+  if (file.exists(file_path_lower)) {
+    cat("Loading lower tract data from", file_path_lower, "\n")
+    available_sheets_lower <- excel_sheets(file_path_lower)
+    sheet_name_lower <- if ("Master_Sheet" %in% available_sheets_lower) {
+      "Master_Sheet"
+    } else if ("Sheet1" %in% available_sheets_lower) {
+      "Sheet1"
+    } else {
+      available_sheets_lower[1]
+    }
+    raw_lower <- read_excel(file_path_lower, sheet = sheet_name_lower, col_names = FALSE)
+    var_names_lower <- raw_lower[[1]]
+    dat_lower <- as.data.frame(t(raw_lower[, -1]), stringsAsFactors = FALSE)
+    colnames(dat_lower) <- make.unique(var_names_lower, sep = "_")
+    dat_lower <- clean_names(dat_lower)
+    
+    # Identify patient ID column
+    id_col_lower <- if ("record_id_linking_key" %in% names(dat_lower)) {
+      "record_id_linking_key"
+    } else {
+      id_candidates <- names(dat_lower)[str_detect(names(dat_lower), regex("record.*id|id.*linking|linking.*key", ignore_case = TRUE))]
+      if (length(id_candidates) > 0) id_candidates[1] else names(dat_lower)[2]
+    }
+    
+    # Filter blank IDs
+    dat_lower <- dat_lower %>%
+      mutate(id_check = as.character(.data[[id_col_lower]])) %>%
+      filter(!is.na(id_check), str_trim(id_check) != "", str_trim(id_check) != "NA") %>%
+      select(-id_check)
+    
+    dat_lower$dataset <- "Lower Tract"
+    dat_lower <- dat_lower %>% rename(patient_id = all_of(id_col_lower))
+    cat("  Lower tract: ", nrow(dat_lower), "patients\n")
+  } else {
+    cat("Warning: ", file_path_lower, "not found. Skipping lower tract data.\n")
+    dat_lower <- tibble(patient_id = character(0), dataset = character(0))
+  }
+  
+  # Upper tract dataset
+  file_path_upper <- "Natera_Sheet_UTUC.xlsx"
+  if (file.exists(file_path_upper)) {
+    cat("Loading upper tract data from", file_path_upper, "\n")
+    raw_upper <- read_excel(file_path_upper, sheet = "Sheet1", col_names = FALSE)
+    var_names_upper <- raw_upper[[1]]
+    dat_upper <- as.data.frame(t(raw_upper[, -1]), stringsAsFactors = FALSE)
+    colnames(dat_upper) <- make.unique(var_names_upper, sep = "_")
+    dat_upper <- clean_names(dat_upper)
+    
+    # Identify patient ID column
+    id_col_upper <- if ("record_id_linking_key" %in% names(dat_upper)) {
+      "record_id_linking_key"
+    } else {
+      id_candidates <- names(dat_upper)[str_detect(names(dat_upper), regex("record.*id|id.*linking|linking.*key", ignore_case = TRUE))]
+      if (length(id_candidates) > 0) id_candidates[1] else names(dat_upper)[2]
+    }
+    
+    # Filter blank IDs
+    dat_upper <- dat_upper %>%
+      mutate(id_check = as.character(.data[[id_col_upper]])) %>%
+      filter(!is.na(id_check), str_trim(id_check) != "", str_trim(id_check) != "NA") %>%
+      select(-id_check)
+    
+    dat_upper$dataset <- "Upper Tract"
+    dat_upper <- dat_upper %>% rename(patient_id = all_of(id_col_upper))
+    cat("  Upper tract: ", nrow(dat_upper), "patients\n")
+  } else {
+    cat("Warning: ", file_path_upper, "not found. Skipping upper tract data.\n")
+    dat_upper <- tibble(patient_id = character(0), dataset = character(0))
+  }
+  
+  # Convert date columns
+  date_cols_lower <- names(dat_lower)[str_detect(names(dat_lower), regex("date", ignore_case = TRUE))]
+  date_cols_upper <- names(dat_upper)[str_detect(names(dat_upper), regex("date", ignore_case = TRUE))]
+  
+  if (length(date_cols_lower) > 0) {
+    dat_lower <- dat_lower %>% mutate(across(all_of(date_cols_lower), as_date_safe))
+  }
+  if (length(date_cols_upper) > 0) {
+    dat_upper <- dat_upper %>% mutate(across(all_of(date_cols_upper), as_date_safe))
+  }
+  
+  # Normalize ctDNA column names
+  names(dat_lower) <- str_replace_all(names(dat_lower), regex("^ct[_ ]?dna[_ ]?level(\\d+)$", ignore_case = TRUE), "ct_dna_level_\\1")
+  names(dat_upper) <- str_replace_all(names(dat_upper), regex("^ct[_ ]?dna[_ ]?level(\\d+)$", ignore_case = TRUE), "ct_dna_level_\\1")
+  
+  # Ensure ctDNA numeric columns are numeric
+  ctdna_value_cols_lower <- names(dat_lower)[str_detect(names(dat_lower), regex("^ct_dna_level_\\d+$", ignore_case = TRUE))]
+  if (length(ctdna_value_cols_lower)) {
+    dat_lower[ctdna_value_cols_lower] <- lapply(dat_lower[ctdna_value_cols_lower], function(x) {
+      y <- gsub(",", "", as.character(x))
+      y <- gsub("^<\\s*", "", y)
+      y[y %in% c("", "NA", "N/A", "na", "n/a", "Not detected", "Undetected", "NEGATIVE", "Negative", "neg", "ND")] <- NA
+      suppressWarnings(as.numeric(y))
+    })
+  }
+  
+  ctdna_value_cols_upper <- names(dat_upper)[str_detect(names(dat_upper), regex("^ct_dna_level_\\d+$", ignore_case = TRUE))]
+  if (length(ctdna_value_cols_upper)) {
+    dat_upper[ctdna_value_cols_upper] <- lapply(dat_upper[ctdna_value_cols_upper], function(x) {
+      y <- gsub(",", "", as.character(x))
+      y <- gsub("^<\\s*", "", y)
+      y[y %in% c("", "NA", "N/A", "na", "n/a", "Not detected", "Undetected", "NEGATIVE", "Negative", "neg", "ND")] <- NA
+      suppressWarnings(as.numeric(y))
+    })
+  }
+  
+  # Find common columns for combining
+  common_cols <- intersect(names(dat_lower), names(dat_upper))
+  cat("Common columns:", length(common_cols), "\n")
+  
+  # Combine datasets
+  dat_combined <- bind_rows(
+    dat_lower %>% select(all_of(common_cols), dataset),
+    dat_upper %>% select(all_of(common_cols), dataset)
+  )
+  
+  cat("Combined dataset: ", nrow(dat_combined), "patients total\n")
+  cat("  - Lower tract:", sum(dat_combined$dataset == "Lower Tract"), "\n")
+  cat("  - Upper tract:", sum(dat_combined$dataset == "Upper Tract"), "\n")
+  
+  # Build ctDNA long data
+  ctdna_long <- build_ctdna_long(dat_combined, "patient_id")
+  cat("Created ctdna_long with", nrow(ctdna_long), "rows from", length(unique(ctdna_long$patient_id)), "patients\n")
+}
+
+# Check if survival_outcomes exists, if not create it using EXACT approach from ctDNA_Descriptive.Rmd
+if (!exists("survival_outcomes") || is.null(survival_outcomes) || nrow(survival_outcomes) == 0) {
+  cat("Note: survival_outcomes not found. Creating using approach from ctDNA_Descriptive.Rmd...\n")
+  
+  # Extract survival data function (from ctDNA_Descriptive.Rmd)
+  extract_survival_data <- function(dat, id_col_name) {
+    # Get relapse date
+    relapse_date <- NULL
+    relapse_cols <- names(dat)[str_detect(names(dat), regex("metastatic.*relapse.*date|relapse.*date|metastasis.*date|progression.*date", ignore_case = TRUE))]
+    if (length(relapse_cols) > 0) {
+      relapse_data <- dat %>%
+        select(all_of(id_col_name), all_of(relapse_cols[1])) %>%
+        rename(relapse_date_raw = all_of(relapse_cols[1])) %>%
+        mutate(relapse_date = as_date_safe(relapse_date_raw)) %>%
+        select(all_of(id_col_name), relapse_date)
+      relapse_date <- relapse_data
+    }
+    
+    # Get explicit death date
+    explicit_death_date <- NULL
+    death_date_cols <- names(dat)[str_detect(names(dat), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                   !str_detect(names(dat), regex("cause|reason", ignore_case = TRUE))]
+    if (length(death_date_cols) > 0) {
+      death_date_data <- dat %>%
+        select(all_of(id_col_name), all_of(death_date_cols[1])) %>%
+        rename(death_date_raw = all_of(death_date_cols[1])) %>%
+        mutate(explicit_death_date = as_date_safe(death_date_raw)) %>%
+        select(all_of(id_col_name), explicit_death_date)
+      explicit_death_date <- death_date_data
+    }
+    
+    # Get survival/follow-up date
+    survival_date <- NULL
+    survival_cols <- names(dat)[str_detect(names(dat), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                !str_detect(names(dat), regex("death", ignore_case = TRUE))]
+    if (length(survival_cols) > 0) {
+      survival_data <- dat %>%
+        select(all_of(id_col_name), all_of(survival_cols[1])) %>%
+        rename(survival_date_raw = all_of(survival_cols[1])) %>%
+        mutate(survival_date = as_date_safe(survival_date_raw)) %>%
+        select(all_of(id_col_name), survival_date)
+      survival_date <- survival_data
+    }
+    
+    # Get alive yes/no status
+    alive_status <- NULL
+    alive_cols <- names(dat)[str_detect(names(dat), regex("^alive_yes_no$|alive.*yes.*no", ignore_case = TRUE))]
+    if (length(alive_cols) > 0) {
+      alive_data <- dat %>%
+        select(all_of(id_col_name), all_of(alive_cols[1])) %>%
+        rename(alive_status_raw = all_of(alive_cols[1])) %>%
+        mutate(
+          alive_yes_no = case_when(
+            str_detect(tolower(as.character(alive_status_raw)), "yes|y|1") ~ "Yes",
+            str_detect(tolower(as.character(alive_status_raw)), "no|n|0") ~ "No",
+            TRUE ~ NA_character_
+          )
+        ) %>%
+        select(all_of(id_col_name), alive_yes_no)
+      alive_status <- alive_data
+    }
+    
+    # Get death status (legacy)
+    death_status <- NULL
+    death_status_cols <- names(dat)[str_detect(names(dat), regex("death|died|vital.*status", ignore_case = TRUE)) & 
+                                   !str_detect(names(dat), regex("date|alive", ignore_case = TRUE))]
+    if (length(death_status_cols) > 0) {
+      death_data <- dat %>%
+        select(all_of(id_col_name), all_of(death_status_cols[1])) %>%
+        rename(death_status_raw = all_of(death_status_cols[1])) %>%
+        mutate(
+          death_status_legacy = case_when(
+            str_detect(tolower(as.character(death_status_raw)), "yes|dead|died|death|deceased") ~ 1,
+            TRUE ~ 0
+          )
+        ) %>%
+        select(all_of(id_col_name), death_status_legacy)
+      death_status <- death_data
+    }
+    
+    # Extract palliative therapy start dates
+    palliative_dates <- NULL
+    therapy_setting_cols <- names(dat)[str_detect(names(dat), regex("systemic.*therapy.*\\d+.*setting", ignore_case = TRUE))]
+    therapy_start_cols <- names(dat)[str_detect(names(dat), regex("systemic.*therapy.*\\d+.*start.*date", ignore_case = TRUE))]
+    
+    if (length(therapy_setting_cols) > 0 && length(therapy_start_cols) > 0) {
+      therapy_settings_long <- dat %>%
+        select(all_of(id_col_name), all_of(therapy_setting_cols)) %>%
+        pivot_longer(-all_of(id_col_name), names_to = "therapy_var", values_to = "setting") %>%
+        mutate(
+          therapy_idx = str_extract(therapy_var, "\\d+"),
+          setting_lower = tolower(as.character(setting))
+        ) %>%
+        filter(str_detect(setting_lower, "palliative"))
+      
+      therapy_starts_long <- dat %>%
+        select(all_of(id_col_name), all_of(therapy_start_cols)) %>%
+        pivot_longer(-all_of(id_col_name), names_to = "therapy_var", values_to = "start_date_raw") %>%
+        mutate(
+          therapy_idx = str_extract(therapy_var, "\\d+"),
+          start_date = as_date_safe(start_date_raw)
+        ) %>%
+        filter(!is.na(start_date))
+      
+      palliative_dates <- therapy_settings_long %>%
+        left_join(therapy_starts_long, by = c(id_col_name, "therapy_idx")) %>%
+        filter(!is.na(start_date)) %>%
+        group_by(.data[[id_col_name]]) %>%
+        summarise(first_palliative_date = min(start_date, na.rm = TRUE), .groups = "drop") %>%
+        rename(palliative_start_date = first_palliative_date)
+    }
+    
+    # Combine
+    result <- dat %>% select(all_of(id_col_name))
+    if (!is.null(relapse_date)) {
+      result <- result %>% left_join(relapse_date, by = id_col_name)
+    } else {
+      result <- result %>% mutate(relapse_date = as.Date(NA))
+    }
+    if (!is.null(explicit_death_date)) {
+      result <- result %>% left_join(explicit_death_date, by = id_col_name)
+    } else {
+      result <- result %>% mutate(explicit_death_date = as.Date(NA))
+    }
+    if (!is.null(survival_date)) {
+      result <- result %>% left_join(survival_date, by = id_col_name)
+    } else {
+      result <- result %>% mutate(survival_date = as.Date(NA))
+    }
+    if (!is.null(alive_status)) {
+      result <- result %>% left_join(alive_status, by = id_col_name)
+    } else {
+      result <- result %>% mutate(alive_yes_no = NA_character_)
+    }
+    if (!is.null(death_status)) {
+      result <- result %>% left_join(death_status, by = id_col_name)
+    } else {
+      result <- result %>% mutate(death_status_legacy = NA_real_)
+    }
+    if (!is.null(palliative_dates)) {
+      result <- result %>% left_join(palliative_dates, by = id_col_name)
+    } else {
+      result <- result %>% mutate(palliative_start_date = as.Date(NA))
+    }
+    
+    result
+  }
+  
+  # Extract survival data from both datasets
+  if (exists("dat_lower") && nrow(dat_lower) > 0) {
+    survival_lower <- extract_survival_data(dat_lower, "patient_id")
+    survival_lower$dataset <- "Lower Tract"
+  } else {
+    survival_lower <- tibble(patient_id = character(0), dataset = character(0))
+  }
+  
+  if (exists("dat_upper") && nrow(dat_upper) > 0) {
+    survival_upper <- extract_survival_data(dat_upper, "patient_id")
+    survival_upper$dataset <- "Upper Tract"
+  } else {
+    survival_upper <- tibble(patient_id = character(0), dataset = character(0))
+  }
+  
+  survival_data <- bind_rows(survival_lower, survival_upper)
+  
+  # Get baseline ctDNA
+  baseline_ctdna <- ctdna_long %>%
+    group_by(patient_id) %>%
+    arrange(ctdna_date) %>%
+    slice_head(n = 1) %>%
+    ungroup() %>%
+    select(patient_id, baseline_date = ctdna_date, baseline_value = ctdna_value)
+  
+  # Get last ctDNA and therapy dates
+  last_ctdna_dates <- ctdna_long %>%
+    group_by(patient_id) %>%
+    summarise(last_ctdna_date = max(ctdna_date, na.rm = TRUE), .groups = "drop")
+  
+  # Extract last therapy dates
+  extract_last_therapy_date <- function(dat, id_col_name) {
+    therapy_cols <- names(dat)[str_detect(names(dat), regex("systemic.*therapy.*\\d+.*(start|end).*date", ignore_case = TRUE))]
+    if (length(therapy_cols) > 0) {
+      therapy_dates_long <- dat %>%
+        select(all_of(id_col_name), all_of(therapy_cols)) %>%
+        pivot_longer(-all_of(id_col_name), names_to = "therapy_var", values_to = "therapy_date_raw") %>%
+        mutate(therapy_date = as_date_safe(therapy_date_raw)) %>%
+        filter(!is.na(therapy_date)) %>%
+        group_by(.data[[id_col_name]]) %>%
+        summarise(last_therapy_date = max(therapy_date, na.rm = TRUE), .groups = "drop")
+      return(therapy_dates_long)
+    } else {
+      return(tibble(!!id_col_name := dat[[id_col_name]], last_therapy_date = as.Date(NA)))
+    }
+  }
+  
+  if (exists("dat_lower") && nrow(dat_lower) > 0) {
+    last_therapy_lower <- extract_last_therapy_date(dat_lower, "patient_id")
+  } else {
+    last_therapy_lower <- tibble(patient_id = character(0), last_therapy_date = as.Date(character(0)))
+  }
+  
+  if (exists("dat_upper") && nrow(dat_upper) > 0) {
+    last_therapy_upper <- extract_last_therapy_date(dat_upper, "patient_id")
+  } else {
+    last_therapy_upper <- tibble(patient_id = character(0), last_therapy_date = as.Date(character(0)))
+  }
+  
+  last_therapy_dates <- bind_rows(last_therapy_lower, last_therapy_upper) %>%
+    group_by(patient_id) %>%
+    summarise(last_therapy_date = max(last_therapy_date, na.rm = TRUE), .groups = "drop") %>%
+    mutate(last_therapy_date = ifelse(is.infinite(last_therapy_date), as.Date(NA), last_therapy_date))
+  
+  # Extract surgery dates (for landmark analysis from surgery)
+  extract_surgery_dates <- function(dat, id_col_name) {
+    surgery_cols <- names(dat)[str_detect(names(dat), regex("surgery.*date|surgery_\\d+_date", ignore_case = TRUE))]
+    if (length(surgery_cols) > 0) {
+      surgery_dates_long <- dat %>%
+        select(all_of(id_col_name), all_of(surgery_cols)) %>%
+        pivot_longer(-all_of(id_col_name), names_to = "surgery_var", values_to = "surgery_date_raw") %>%
+        mutate(
+          surgery_date = as_date_safe(surgery_date_raw),
+          is_surgery_1 = str_detect(surgery_var, "surgery_1")
+        ) %>%
+        filter(!is.na(surgery_date)) %>%
+        group_by(.data[[id_col_name]]) %>%
+        summarise(
+          first_surgery_date = min(surgery_date, na.rm = TRUE),
+          surgery_1_date = if (any(is_surgery_1)) {
+            surgery_date[is_surgery_1][1]
+          } else {
+            first_surgery_date
+          },
+          .groups = "drop"
+        )
+      return(surgery_dates_long)
+    } else {
+      return(tibble(!!id_col_name := dat[[id_col_name]], 
+                   first_surgery_date = as.Date(NA), 
+                   surgery_1_date = as.Date(NA)))
+    }
+  }
+  
+  if (exists("dat_lower") && nrow(dat_lower) > 0) {
+    surgery_dates_lower <- extract_surgery_dates(dat_lower, "patient_id")
+  } else {
+    surgery_dates_lower <- tibble(patient_id = character(0), first_surgery_date = as.Date(character(0)), surgery_1_date = as.Date(character(0)))
+  }
+  
+  if (exists("dat_upper") && nrow(dat_upper) > 0) {
+    surgery_dates_upper <- extract_surgery_dates(dat_upper, "patient_id")
+  } else {
+    surgery_dates_upper <- tibble(patient_id = character(0), first_surgery_date = as.Date(character(0)), surgery_1_date = as.Date(character(0)))
+  }
+  
+  surgery_dates <- bind_rows(surgery_dates_lower, surgery_dates_upper) %>%
+    group_by(patient_id) %>%
+    summarise(
+      first_surgery_date = min(first_surgery_date, na.rm = TRUE),
+      surgery_1_date = min(surgery_1_date, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      first_surgery_date = ifelse(is.infinite(first_surgery_date), as.Date(NA), first_surgery_date),
+      surgery_1_date = ifelse(is.infinite(surgery_1_date), as.Date(NA), surgery_1_date)
+    )
+  
+  # Create survival outcomes (EXACTLY as in ctDNA_Descriptive.Rmd)
+  all_patients <- dat_combined %>%
+    select(patient_id, dataset) %>%
+    distinct()
+  
+  survival_outcomes <- all_patients %>%
+    left_join(baseline_ctdna, by = "patient_id") %>%
+    left_join(last_ctdna_dates, by = "patient_id") %>%
+    left_join(last_therapy_dates, by = "patient_id") %>%
+    left_join(surgery_dates, by = "patient_id") %>%
+    left_join(survival_data, by = "patient_id") %>%
+    mutate(
+      time_anchor = coalesce(baseline_date, survival_date),
+      relapse_date_combined = case_when(
+        !is.na(relapse_date) & !is.na(palliative_start_date) ~ pmin(relapse_date, palliative_start_date, na.rm = TRUE),
+        !is.na(relapse_date) ~ relapse_date,
+        !is.na(palliative_start_date) ~ palliative_start_date,
+        TRUE ~ as.Date(NA)
+      ),
+      death_status_final = case_when(
+        !is.na(explicit_death_date) ~ 1,
+        alive_yes_no == "No" ~ 1,
+        !is.na(death_status_legacy) & death_status_legacy == 1 ~ 1,
+        TRUE ~ 0
+      ),
+      death_date = case_when(
+        !is.na(explicit_death_date) ~ explicit_death_date,
+        alive_yes_no == "No" & !is.na(survival_date) ~ survival_date,
+        alive_yes_no == "No" & !is.na(relapse_date_combined) ~ relapse_date_combined,
+        death_status_legacy == 1 & !is.na(survival_date) ~ survival_date,
+        TRUE ~ as.Date(NA)
+      ),
+      max_ctdna_therapy_date = {
+        result <- rep(as.Date(NA), nrow(.))
+        for (i in 1:nrow(.)) {
+          if (!is.na(last_ctdna_date[i]) && !is.na(last_therapy_date[i])) {
+            result[i] <- pmax(last_ctdna_date[i], last_therapy_date[i])
+          } else if (!is.na(last_ctdna_date[i])) {
+            result[i] <- last_ctdna_date[i]
+          } else if (!is.na(last_therapy_date[i])) {
+            result[i] <- last_therapy_date[i]
+          }
+        }
+        result
+      },
+      last_available_date = case_when(
+        !is.na(survival_date) ~ survival_date,
+        !is.na(max_ctdna_therapy_date) ~ max_ctdna_therapy_date,
+        TRUE ~ as.Date(NA)
+      )
+    ) %>%
+    mutate(
+      time_to_relapse = ifelse(!is.na(relapse_date_combined) & !is.na(time_anchor),
+                              as.numeric(relapse_date_combined - time_anchor) / 30.44, NA_real_),
+      time_to_death = ifelse(!is.na(death_date) & !is.na(time_anchor),
+                            as.numeric(death_date - time_anchor) / 30.44, NA_real_),
+      time_to_last_fu = ifelse(!is.na(last_available_date) & !is.na(time_anchor),
+                             as.numeric(last_available_date - time_anchor) / 30.44, NA_real_),
+      relapse_event = ifelse(!is.na(relapse_date_combined), 1, 0),
+      death_event = death_status_final,
+      pfs_time = ifelse(relapse_event == 1 & !is.na(time_to_relapse), time_to_relapse, 
+                       ifelse(!is.na(time_to_last_fu), time_to_last_fu, NA_real_)),
+      os_time = ifelse(
+        death_event == 1 & !is.na(time_to_death), 
+        time_to_death,
+        ifelse(!is.na(time_to_last_fu), time_to_last_fu, NA_real_)
+      )
+    )
+  
+  cat("Created survival_outcomes for", nrow(survival_outcomes), "patients\n")
+  cat("  Patients with os_time:", sum(!is.na(survival_outcomes$os_time)), "\n")
+  cat("  Patients with death_event:", sum(survival_outcomes$death_event == 1, na.rm = TRUE), "\n")
+}
+
+# Ensure baseline_ctdna exists
+if (!exists("baseline_ctdna") || is.null(baseline_ctdna) || nrow(baseline_ctdna) == 0) {
+  cat("Note: baseline_ctdna not found. Creating from ctdna_long...\n")
+  if (exists("ctdna_long") && !is.null(ctdna_long) && nrow(ctdna_long) > 0) {
+    baseline_ctdna <- ctdna_long %>%
+      group_by(patient_id) %>%
+      arrange(ctdna_date) %>%
+      slice_head(n = 1) %>%
+      ungroup() %>%
+      select(patient_id, baseline_date = ctdna_date, baseline_value = ctdna_value)
+    cat("Created baseline_ctdna with", nrow(baseline_ctdna), "patients\n")
+  } else {
+    cat("Warning: ctdna_long is empty. Creating empty baseline_ctdna structure.\n")
+    baseline_ctdna <- tibble(
+      patient_id = character(0),
+      baseline_date = as.Date(character(0)),
+      baseline_value = numeric(0)
+    )
+  }
+}
+
+# Verify required columns exist (allow empty structures)
+if (nrow(baseline_ctdna) > 0) {
+  if (!"baseline_value" %in% names(baseline_ctdna)) {
+    stop("Error: baseline_ctdna must have 'baseline_value' column")
+  }
+  if (!"patient_id" %in% names(baseline_ctdna)) {
+    stop("Error: baseline_ctdna must have 'patient_id' column")
+  }
+} else {
+  cat("Note: baseline_ctdna is empty. Required columns will be checked when data is available.\n")
+}
+
+required_surv_cols <- c("patient_id", "os_time", "death_event")
+missing_surv_cols <- setdiff(required_surv_cols, names(survival_outcomes))
+if (length(missing_surv_cols) > 0) {
+  if (nrow(survival_outcomes) > 0) {
+    stop(paste("Error: survival_outcomes missing required columns:", paste(missing_surv_cols, collapse = ", ")))
+  } else {
+    cat("Note: survival_outcomes is empty. Required columns will be checked when data is available.\n")
+  }
+}
+
+# Check if time_anchor exists, if not create it
+if (!"time_anchor" %in% names(survival_outcomes)) {
+  cat("Note: time_anchor not found. Creating from baseline_ctdna...\n")
+  if (nrow(baseline_ctdna) > 0) {
+    survival_outcomes <- survival_outcomes %>%
+      left_join(baseline_ctdna %>% select(patient_id, baseline_date), by = "patient_id") %>%
+      mutate(time_anchor = coalesce(baseline_date, as.Date(Sys.Date())))
+  } else {
+    survival_outcomes <- survival_outcomes %>%
+      mutate(time_anchor = as.Date(NA))
+  }
+  cat("Created time_anchor column\n")
+}
+
+# Verify ctdna_long exists (allow empty for now, will check later if needed)
+if (!exists("ctdna_long")) {
+  stop("Error: ctdna_long does not exist. Please check your data file or run ctDNA_Descriptive.Rmd first.")
+}
+
+# If ctdna_long is empty, create a minimal structure to prevent errors
+if (is.null(ctdna_long) || nrow(ctdna_long) == 0) {
+  cat("Warning: ctdna_long is empty. Creating minimal structure to allow script to continue.\n")
+  cat("  Note: Most analyses will not work without ctDNA data.\n")
+  # Create minimal empty structure
+  ctdna_long <- tibble(
+    patient_id = character(0),
+    ctdna_date = as.Date(character(0)),
+    ctdna_value = numeric(0)
+  )
+}
+
+# Verify survival_outcomes exists (allow empty for now)
+if (!exists("survival_outcomes")) {
+  stop("Error: survival_outcomes does not exist. Please check your data file or run ctDNA_Descriptive.Rmd first.")
+}
+
+# If survival_outcomes is empty, create minimal structure
+if (is.null(survival_outcomes) || nrow(survival_outcomes) == 0) {
+  cat("Warning: survival_outcomes is empty. Creating minimal structure.\n")
+  if (exists("ctdna_long") && nrow(ctdna_long) > 0) {
+    all_patients <- ctdna_long %>%
+      select(patient_id) %>%
+      distinct()
+  } else {
+    all_patients <- tibble(patient_id = character(0))
+  }
+  
+  survival_outcomes <- all_patients %>%
+    mutate(
+      time_anchor = as.Date(NA),
+      os_time = NA_real_,
+      death_event = NA_real_,
+      death_date = as.Date(NA),
+      last_fu_date = as.Date(NA)
+    )
+}
+
+# Create baseline_ctdna if it doesn't exist
+if (!exists("baseline_ctdna") || is.null(baseline_ctdna) || nrow(baseline_ctdna) == 0) {
+  cat("Note: baseline_ctdna not found. Creating from ctdna_long...\n")
+  baseline_ctdna <- ctdna_long %>%
+    group_by(patient_id) %>%
+    arrange(ctdna_date) %>%
+    slice_head(n = 1) %>%
+    ungroup() %>%
+    select(patient_id, baseline_date = ctdna_date, baseline_value = ctdna_value)
+  cat("Created baseline_ctdna with", nrow(baseline_ctdna), "patients\n")
+}
+
+# Verify required columns exist
+if (!"baseline_value" %in% names(baseline_ctdna)) {
+  stop("Error: baseline_ctdna must have 'baseline_value' column")
+}
+if (!"patient_id" %in% names(baseline_ctdna)) {
+  stop("Error: baseline_ctdna must have 'patient_id' column")
+}
+
+required_surv_cols <- c("patient_id", "os_time", "death_event")
+missing_surv_cols <- setdiff(required_surv_cols, names(survival_outcomes))
+if (length(missing_surv_cols) > 0) {
+  stop(paste("Error: survival_outcomes missing required columns:", paste(missing_surv_cols, collapse = ", ")))
+}
+
+# Check if time_anchor exists, if not create it
+if (!"time_anchor" %in% names(survival_outcomes)) {
+  cat("Note: time_anchor not found. Creating from baseline_ctdna...\n")
+  survival_outcomes <- survival_outcomes %>%
+    left_join(baseline_ctdna %>% select(patient_id, baseline_date), by = "patient_id") %>%
+    mutate(time_anchor = coalesce(baseline_date, as.Date(Sys.Date())))
+  cat("Created time_anchor column\n")
+}
+```
+
+```{r solution2_timedependent_cox}
+# ==============================
+# Solution 2: Time-Dependent Cox Model
+# ==============================
+# This addresses the time-dependent nature of ctDNA measurements
+# by allowing ctDNA status to change over time
+
+cat("\n=== Solution 2: Time-Dependent Cox Model ===\n")
+
+# Function to create time-dependent dataset
+# Each row represents a time interval where ctDNA status is constant
+create_timedep_data <- function(ctdna_long, survival_outcomes, baseline_ctdna) {
+  # Start with survival outcomes - handle missing time_anchor
+  if ("time_anchor" %in% names(survival_outcomes)) {
+    surv_base <- survival_outcomes %>%
+      select(patient_id, time_anchor, os_time, death_event) %>%
+      filter(!is.na(os_time), os_time > 0, !is.na(death_event), !is.na(time_anchor))
+  } else {
+    # If no time_anchor, create it from baseline_ctdna
+    surv_base <- survival_outcomes %>%
+      left_join(baseline_ctdna %>% select(patient_id, baseline_date), by = "patient_id") %>%
+      mutate(time_anchor = coalesce(baseline_date, as.Date(Sys.Date()))) %>%
+      select(patient_id, time_anchor, os_time, death_event) %>%
+      filter(!is.na(os_time), os_time > 0, !is.na(death_event), !is.na(time_anchor))
+  }
+  
+  if (nrow(surv_base) == 0) {
+    return(NULL)
+  }
+  
+  # Get all ctDNA measurements with time from anchor
+  ctdna_timed <- ctdna_long %>%
+    left_join(surv_base %>% select(patient_id, time_anchor), by = "patient_id") %>%
+    filter(!is.na(time_anchor), !is.na(ctdna_date), !is.na(ctdna_value)) %>%
+    mutate(
+      months_from_anchor = as.numeric(ctdna_date - time_anchor) / 30.44,
+      ctdna_status = case_when(
+        ctdna_value == 0 ~ "Negative",
+        ctdna_value > 0 ~ "Positive",
+        TRUE ~ "Unknown"
+      )
+    ) %>%
+    filter(!is.na(ctdna_status), ctdna_status != "Unknown", months_from_anchor >= 0) %>%
+    arrange(patient_id, months_from_anchor)
+  
+  if (nrow(ctdna_timed) == 0) {
+    return(NULL)
+  }
+  
+  # Create time intervals for each patient
+  timedep_list <- list()
+  
+  for (pid in unique(ctdna_timed$patient_id)) {
+    patient_ctdna <- ctdna_timed %>% filter(patient_id == pid)
+    patient_surv <- surv_base %>% filter(patient_id == pid)
+    
+    if (nrow(patient_ctdna) == 0 || nrow(patient_surv) == 0) next
+    
+    # Get baseline status
+    baseline_val <- baseline_ctdna %>% 
+      filter(patient_id == pid) %>% 
+      pull(baseline_value)
+    
+    initial_status <- if (length(baseline_val) > 0 && !is.na(baseline_val)) {
+      if (baseline_val == 0) "Negative" else "Positive"
+    } else {
+      first(patient_ctdna$ctdna_status)
+    }
+    
+    # Start with interval from time 0 to first measurement
+    if (nrow(patient_ctdna) > 0) {
+      first_measure_time <- first(patient_ctdna$months_from_anchor)
+      
+      intervals <- tibble(
+        patient_id = pid,
+        tstart = 0,
+        tstop = first_measure_time,
+        ctdna_status = initial_status
+      )
+      
+      # Add intervals between measurements
+      if (nrow(patient_ctdna) > 1) {
+        for (i in 1:(nrow(patient_ctdna) - 1)) {
+          intervals <- bind_rows(
+            intervals,
+            tibble(
+              patient_id = pid,
+              tstart = patient_ctdna$months_from_anchor[i],
+              tstop = patient_ctdna$months_from_anchor[i + 1],
+              ctdna_status = patient_ctdna$ctdna_status[i]
+            )
+          )
+        }
+      }
+      
+      # Add final interval from last measurement to end of follow-up
+      last_measurement_time <- max(patient_ctdna$months_from_anchor)
+      final_status <- last(patient_ctdna$ctdna_status)
+      
+      intervals <- bind_rows(
+        intervals,
+        tibble(
+          patient_id = pid,
+          tstart = last_measurement_time,
+          tstop = patient_surv$os_time,
+          ctdna_status = final_status
+        )
+      )
+      
+      # Add event indicator to final interval only
+      intervals$event <- c(rep(0, nrow(intervals) - 1), patient_surv$death_event)
+      
+      timedep_list[[pid]] <- intervals
+    }
+  }
+  
+  if (length(timedep_list) == 0) {
+    return(NULL)
+  }
+  
+  timedep_data <- bind_rows(timedep_list)
+  return(timedep_data)
+}
+
+# Create time-dependent dataset
+timedep_data <- tryCatch({
+  create_timedep_data(ctdna_long, survival_outcomes, baseline_ctdna)
+}, error = function(e) {
+  cat("Warning: Could not create time-dependent data:", e$message, "\n")
+  return(NULL)
+})
+
+# Fit time-dependent Cox model
+if (!is.null(timedep_data) && nrow(timedep_data) > 0) {
+  timedep_data_clean <- timedep_data %>% 
+    filter(ctdna_status != "Unknown", !is.na(tstart), !is.na(tstop), tstop > tstart)
+  
+  if (nrow(timedep_data_clean) > 0) {
+    # Check if we have both positive and negative groups
+    unique_statuses <- unique(timedep_data_clean$ctdna_status)
+    n_events <- sum(timedep_data_clean$event == 1, na.rm = TRUE)
+    
+    if (length(unique_statuses) > 1 && n_events > 0) {
+      timedep_cox <- tryCatch({
+        coxph(
+          Surv(tstart, tstop, event) ~ ctdna_status,
+          data = timedep_data_clean
+        )
+      }, error = function(e) {
+        cat("Error fitting time-dependent Cox model:", e$message, "\n")
+        return(NULL)
+      })
+      
+      if (!is.null(timedep_cox)) {
+        cat("\nTime-Dependent Cox Model Results:\n")
+        print(summary(timedep_cox))
+        
+        # Extract key results
+        timedep_summary <- summary(timedep_cox)
+        timedep_hr <- exp(coef(timedep_cox))
+        n_coefs <- length(timedep_hr)
+        timedep_ci <- tryCatch({
+          ci_result <- exp(confint(timedep_cox))
+          if (is.matrix(ci_result) && ncol(ci_result) == 2 && nrow(ci_result) == n_coefs) {
+            rownames(ci_result) <- names(timedep_hr)
+            return(ci_result)
+          } else if (is.matrix(ci_result) && ncol(ci_result) == 2) {
+            # Matrix but wrong number of rows - try to fix
+            if (nrow(ci_result) == 1 && n_coefs == 1) {
+              rownames(ci_result) <- names(timedep_hr)
+              return(ci_result)
+            } else {
+              # Mismatch - use summary instead
+              stop("Dimension mismatch in confint result")
+            }
+          } else if (is.vector(ci_result) && length(ci_result) == 2 && n_coefs == 1) {
+            # Single coefficient, vector of length 2
+            ci_matrix <- matrix(ci_result, nrow = 1, ncol = 2, 
+                               dimnames = list(names(timedep_hr), c("2.5 %", "97.5 %")))
+            return(ci_matrix)
+          } else {
+            # Unexpected format - use summary instead
+            stop("Unexpected confint format")
+          }
+        }, error = function(e) {
+          # If confint fails, use summary CI
+          if (!is.null(timedep_summary$conf.int) && nrow(timedep_summary$conf.int) > 0) {
+            ci_matrix <- as.matrix(timedep_summary$conf.int[, c("lower .95", "upper .95"), drop = FALSE])
+            rownames(ci_matrix) <- rownames(timedep_summary$conf.int)
+            # Ensure dimensions match
+            if (nrow(ci_matrix) == n_coefs) {
+              return(ci_matrix)
+            } else if (nrow(ci_matrix) == 1 && n_coefs == 1) {
+              rownames(ci_matrix) <- names(timedep_hr)
+              return(ci_matrix)
+            }
+          }
+          # Fallback: create NA matrix with correct dimensions
+          ci_matrix <- matrix(NA_real_, nrow = n_coefs, ncol = 2)
+          rownames(ci_matrix) <- names(timedep_hr)
+          colnames(ci_matrix) <- c("lower", "upper")
+          return(ci_matrix)
+        })
+        timedep_pval <- timedep_summary$coefficients[, "Pr(>|z|)"]
+        
+        # Get coefficient name for positive status
+        coef_name <- names(timedep_hr)[grepl("Positive", names(timedep_hr))]
+        if (length(coef_name) == 0) {
+          coef_name <- names(timedep_hr)[1]
+        }
+        
+        # Safely extract HR and CI values
+        hr_value <- NA_real_
+        ci_lower <- NA_real_
+        ci_upper <- NA_real_
+        p_value <- NA_real_
+        
+        if (length(coef_name) > 0 && coef_name %in% names(timedep_hr)) {
+          hr_value <- timedep_hr[coef_name]
+        }
+        
+        if (length(coef_name) > 0 && is.matrix(timedep_ci) && 
+            coef_name %in% rownames(timedep_ci) && ncol(timedep_ci) >= 1) {
+          ci_lower <- timedep_ci[coef_name, 1]
+          if (ncol(timedep_ci) >= 2) {
+            ci_upper <- timedep_ci[coef_name, 2]
+          }
+        }
+        
+        if (length(coef_name) > 0 && coef_name %in% names(timedep_pval)) {
+          p_value <- timedep_pval[coef_name]
+        }
+        
+        timedep_results <- tibble(
+          Approach = "Time-Dependent Cox Model",
+          N_Patients = length(unique(timedep_data_clean$patient_id)),
+          N_Intervals = nrow(timedep_data_clean),
+          N_Events = n_events,
+          HR_Positive_vs_Negative = hr_value,
+          HR_CI_Lower = ci_lower,
+          HR_CI_Upper = ci_upper,
+          P_Value = p_value
+        )
+      } else {
+        timedep_results <- tibble(
+          Approach = "Time-Dependent Cox Model",
+          N_Patients = 0,
+          N_Intervals = 0,
+          N_Events = 0,
+          HR_Positive_vs_Negative = NA_real_,
+          HR_CI_Lower = NA_real_,
+          HR_CI_Upper = NA_real_,
+          P_Value = NA_real_
+        )
+      }
+    } else {
+      cat("\nWarning: Insufficient data for time-dependent Cox model\n")
+      cat("  Unique statuses:", length(unique_statuses), "\n")
+      cat("  Number of events:", n_events, "\n")
+      timedep_results <- tibble(
+        Approach = "Time-Dependent Cox Model",
+        N_Patients = length(unique(timedep_data_clean$patient_id)),
+        N_Intervals = nrow(timedep_data_clean),
+        N_Events = n_events,
+        HR_Positive_vs_Negative = NA_real_,
+        HR_CI_Lower = NA_real_,
+        HR_CI_Upper = NA_real_,
+        P_Value = NA_real_
+      )
+    }
+  } else {
+    cat("\nWarning: No valid time-dependent data after cleaning\n")
+    timedep_results <- tibble(
+      Approach = "Time-Dependent Cox Model",
+      N_Patients = 0,
+      N_Intervals = 0,
+      N_Events = 0,
+      HR_Positive_vs_Negative = NA_real_,
+      HR_CI_Lower = NA_real_,
+      HR_CI_Upper = NA_real_,
+      P_Value = NA_real_
+    )
+  }
+} else {
+  cat("\nWarning: Time-dependent data not available\n")
+  timedep_results <- tibble(
+    Approach = "Time-Dependent Cox Model",
+    N_Patients = 0,
+    N_Intervals = 0,
+    N_Events = 0,
+    HR_Positive_vs_Negative = NA_real_,
+    HR_CI_Lower = NA_real_,
+    HR_CI_Upper = NA_real_,
+    P_Value = NA_real_
+  )
+}
+```
+
+```{r solution3_landmark_analysis}
+# ==============================
+# Solution 3: Landmark Analysis
+# ==============================
+# This addresses guarantee time bias by only including patients alive at landmark time
+# and classifying ctDNA status at that fixed time point
+
+cat("\n=== Solution 3: Landmark Analysis ===\n")
+
+perform_landmark_analysis <- function(landmark_months, ctdna_long, survival_outcomes, baseline_ctdna, anchor_type = "baseline") {
+  # anchor_type can be "baseline" (from first ctDNA) or "surgery" (from definitive surgery/cystectomy)
+  
+  # Determine anchor date based on anchor_type
+  if (anchor_type == "surgery") {
+    # Use surgery date as anchor
+    if ("surgery_1_date" %in% names(survival_outcomes)) {
+      anchor_date_col <- "surgery_1_date"
+    } else if ("first_surgery_date" %in% names(survival_outcomes)) {
+      anchor_date_col <- "first_surgery_date"
+    } else {
+      cat("Warning: Surgery date not found. Falling back to baseline anchor.\n")
+      anchor_type <- "baseline"
+    }
+  }
+  
+  if (anchor_type == "surgery" && exists("anchor_date_col")) {
+    # Get patients alive at landmark time from surgery
+    patients_at_landmark <- survival_outcomes %>%
+      filter(!is.na(os_time), !is.na(death_event), !is.na(.data[[anchor_date_col]])) %>%
+      mutate(
+        anchor_date = .data[[anchor_date_col]],
+        # Calculate os_time from surgery date
+        os_time_from_surgery = ifelse(
+          !is.na(death_date) & !is.na(anchor_date),
+          as.numeric(death_date - anchor_date) / 30.44,
+          ifelse(
+            !is.na(last_available_date) & !is.na(anchor_date),
+            as.numeric(last_available_date - anchor_date) / 30.44,
+            NA_real_
+          )
+        )
+      ) %>%
+      filter(!is.na(os_time_from_surgery), os_time_from_surgery > landmark_months) %>%
+      select(patient_id, time_anchor = anchor_date, os_time, death_event, os_time_from_surgery)
+  } else {
+    # Use baseline ctDNA date as anchor (original approach)
+    if ("time_anchor" %in% names(survival_outcomes)) {
+      patients_at_landmark <- survival_outcomes %>%
+        filter(!is.na(os_time), os_time > landmark_months, !is.na(death_event), !is.na(time_anchor)) %>%
+        select(patient_id, time_anchor, os_time, death_event)
+    } else {
+      # If no time_anchor, create it from baseline_ctdna
+      patients_at_landmark <- survival_outcomes %>%
+        left_join(baseline_ctdna %>% select(patient_id, baseline_date), by = "patient_id") %>%
+        mutate(time_anchor = coalesce(baseline_date, as.Date(Sys.Date()))) %>%
+        filter(!is.na(os_time), os_time > landmark_months, !is.na(death_event), !is.na(time_anchor)) %>%
+        select(patient_id, time_anchor, os_time, death_event)
+    }
+  }
+  
+  if (nrow(patients_at_landmark) == 0) {
+    return(list(
+      landmark_months = landmark_months,
+      n_patients = 0,
+      cox_model = NULL,
+      data = NULL,
+      results = tibble(
+        Approach = if (anchor_type == "surgery") {
+          paste0("Landmark ", landmark_months, " months (from surgery)")
+        } else {
+          paste0("Landmark ", landmark_months, " months (from baseline)")
+        },
+        N_Patients = 0,
+        N_Events = 0,
+        HR_Positive_vs_Negative = NA_real_,
+        HR_CI_Lower = NA_real_,
+        HR_CI_Upper = NA_real_,
+        P_Value = NA_real_
+      )
+    ))
+  }
+  
+  # Classify ctDNA status at landmark based on measurements up to landmark
+  if ("time_anchor" %in% names(patients_at_landmark)) {
+    ctdna_at_landmark <- ctdna_long %>%
+      left_join(patients_at_landmark %>% select(patient_id, time_anchor), by = "patient_id") %>%
+      filter(!is.na(time_anchor), !is.na(ctdna_date), !is.na(ctdna_value)) %>%
+      mutate(
+        months_from_anchor = as.numeric(ctdna_date - time_anchor) / 30.44
+      ) %>%
+      filter(months_from_anchor >= 0, months_from_anchor <= landmark_months) %>%
+      arrange(patient_id, months_from_anchor) %>%
+      group_by(patient_id) %>%
+      summarise(
+        # Use last measurement before/at landmark
+        last_value = last(ctdna_value),
+        last_status = case_when(
+          last_value == 0 ~ "Negative",
+          last_value > 0 ~ "Positive",
+          TRUE ~ "Unknown"
+        ),
+        # Or use pattern: ever positive before landmark
+        ever_positive = any(ctdna_value > 0, na.rm = TRUE),
+        pattern_status = case_when(
+          ever_positive ~ "Ever Positive",
+          !ever_positive & !is.na(last_value) ~ "Always Negative",
+          TRUE ~ "Unknown"
+        ),
+        .groups = "drop"
+      )
+  } else {
+    # If no time_anchor, use first ctDNA date as reference
+    first_dates <- ctdna_long %>%
+      group_by(patient_id) %>%
+      summarise(first_date = min(ctdna_date, na.rm = TRUE), .groups = "drop")
+    
+    ctdna_at_landmark <- ctdna_long %>%
+      left_join(first_dates, by = "patient_id") %>%
+      filter(!is.na(first_date), !is.na(ctdna_date), !is.na(ctdna_value)) %>%
+      mutate(
+        months_from_first = as.numeric(ctdna_date - first_date) / 30.44
+      ) %>%
+      filter(months_from_first >= 0, months_from_first <= landmark_months) %>%
+      arrange(patient_id, months_from_first) %>%
+      group_by(patient_id) %>%
+      summarise(
+        last_value = last(ctdna_value),
+        last_status = case_when(
+          last_value == 0 ~ "Negative",
+          last_value > 0 ~ "Positive",
+          TRUE ~ "Unknown"
+        ),
+        ever_positive = any(ctdna_value > 0, na.rm = TRUE),
+        pattern_status = case_when(
+          ever_positive ~ "Ever Positive",
+          !ever_positive & !is.na(last_value) ~ "Always Negative",
+          TRUE ~ "Unknown"
+        ),
+        .groups = "drop"
+      )
+  }
+  
+  # Create survival dataset from landmark time
+  if (anchor_type == "surgery" && "os_time_from_surgery" %in% names(patients_at_landmark)) {
+    # For surgery-based landmark, use os_time_from_surgery
+    landmark_survival <- patients_at_landmark %>%
+      left_join(ctdna_at_landmark, by = "patient_id") %>%
+      mutate(
+        # Survival time from landmark (from surgery)
+        os_time_from_landmark = os_time_from_surgery - landmark_months,
+        # Status at landmark
+        ctdna_status_landmark = last_status
+      ) %>%
+      filter(!is.na(ctdna_status_landmark), 
+             ctdna_status_landmark != "Unknown",
+             os_time_from_landmark > 0)
+  } else {
+    # For baseline-based landmark, use original os_time
+    landmark_survival <- patients_at_landmark %>%
+      left_join(ctdna_at_landmark, by = "patient_id") %>%
+      mutate(
+        # Survival time from landmark
+        os_time_from_landmark = os_time - landmark_months,
+        # Status at landmark
+        ctdna_status_landmark = last_status
+      ) %>%
+      filter(!is.na(ctdna_status_landmark), 
+             ctdna_status_landmark != "Unknown",
+             os_time_from_landmark > 0)
+  }
+  
+  if (nrow(landmark_survival) == 0) {
+    return(list(
+      landmark_months = landmark_months,
+      n_patients = 0,
+      cox_model = NULL,
+      data = NULL,
+      results = NULL
+    ))
+  }
+  
+  # Check if we have both positive and negative groups
+  unique_statuses <- unique(landmark_survival$ctdna_status_landmark)
+  n_events <- sum(landmark_survival$death_event == 1, na.rm = TRUE)
+  
+  if (length(unique_statuses) > 1 && n_events > 0) {
+    # Fit Cox model from landmark time
+    landmark_cox <- tryCatch({
+      coxph(
+        Surv(os_time_from_landmark, death_event) ~ ctdna_status_landmark,
+        data = landmark_survival
+      )
+    }, error = function(e) {
+      cat("Error fitting landmark Cox model:", e$message, "\n")
+      return(NULL)
+    })
+    
+      if (!is.null(landmark_cox)) {
+        landmark_summary <- summary(landmark_cox)
+        landmark_hr <- exp(coef(landmark_cox))
+        n_coefs_landmark <- length(landmark_hr)
+        landmark_ci <- tryCatch({
+          ci_result <- exp(confint(landmark_cox))
+          if (is.matrix(ci_result) && ncol(ci_result) == 2 && nrow(ci_result) == n_coefs_landmark) {
+            rownames(ci_result) <- names(landmark_hr)
+            return(ci_result)
+          } else if (is.matrix(ci_result) && ncol(ci_result) == 2) {
+            # Matrix but wrong number of rows - try to fix
+            if (nrow(ci_result) == 1 && n_coefs_landmark == 1) {
+              rownames(ci_result) <- names(landmark_hr)
+              return(ci_result)
+            } else {
+              # Mismatch - use summary instead
+              stop("Dimension mismatch in confint result")
+            }
+          } else if (is.vector(ci_result) && length(ci_result) == 2 && n_coefs_landmark == 1) {
+            # Single coefficient, vector of length 2
+            ci_matrix <- matrix(ci_result, nrow = 1, ncol = 2, 
+                               dimnames = list(names(landmark_hr), c("2.5 %", "97.5 %")))
+            return(ci_matrix)
+          } else {
+            # Unexpected format - use summary instead
+            stop("Unexpected confint format")
+          }
+        }, error = function(e) {
+          # If confint fails, use summary CI
+          if (!is.null(landmark_summary$conf.int) && nrow(landmark_summary$conf.int) > 0) {
+            ci_matrix <- as.matrix(landmark_summary$conf.int[, c("lower .95", "upper .95"), drop = FALSE])
+            rownames(ci_matrix) <- rownames(landmark_summary$conf.int)
+            # Ensure dimensions match
+            if (nrow(ci_matrix) == n_coefs_landmark) {
+              return(ci_matrix)
+            } else if (nrow(ci_matrix) == 1 && n_coefs_landmark == 1) {
+              rownames(ci_matrix) <- names(landmark_hr)
+              return(ci_matrix)
+            }
+          }
+          # Fallback: create NA matrix with correct dimensions
+          ci_matrix <- matrix(NA_real_, nrow = n_coefs_landmark, ncol = 2)
+          rownames(ci_matrix) <- names(landmark_hr)
+          colnames(ci_matrix) <- c("lower", "upper")
+          return(ci_matrix)
+        })
+        landmark_pval <- landmark_summary$coefficients[, "Pr(>|z|)"]
+        
+        # Get coefficient name for positive status
+        coef_name <- names(landmark_hr)[grepl("Positive", names(landmark_hr))]
+        if (length(coef_name) == 0) {
+          coef_name <- names(landmark_hr)[1]
+        }
+        
+        # Safely extract HR and CI values
+        hr_value <- NA_real_
+        ci_lower <- NA_real_
+        ci_upper <- NA_real_
+        p_value <- NA_real_
+        
+        if (length(coef_name) > 0 && coef_name %in% names(landmark_hr)) {
+          hr_value <- landmark_hr[coef_name]
+        }
+        
+        if (length(coef_name) > 0 && is.matrix(landmark_ci) && 
+            coef_name %in% rownames(landmark_ci) && ncol(landmark_ci) >= 1) {
+          ci_lower <- landmark_ci[coef_name, 1]
+          if (ncol(landmark_ci) >= 2) {
+            ci_upper <- landmark_ci[coef_name, 2]
+          }
+        }
+        
+        if (length(coef_name) > 0 && coef_name %in% names(landmark_pval)) {
+          p_value <- landmark_pval[coef_name]
+        }
+        
+        results <- tibble(
+          Approach = if (anchor_type == "surgery") {
+          paste0("Landmark ", landmark_months, " months (from surgery)")
+        } else {
+          paste0("Landmark ", landmark_months, " months (from baseline)")
+        },
+          N_Patients = nrow(landmark_survival),
+          N_Events = n_events,
+          HR_Positive_vs_Negative = hr_value,
+          HR_CI_Lower = ci_lower,
+          HR_CI_Upper = ci_upper,
+          P_Value = p_value
+        )
+      
+      return(list(
+        landmark_months = landmark_months,
+        n_patients = nrow(landmark_survival),
+        cox_model = landmark_cox,
+        data = landmark_survival,
+        results = results
+      ))
+    }
+  }
+  
+  # Return NULL model if insufficient data
+  return(list(
+    landmark_months = landmark_months,
+    n_patients = nrow(landmark_survival),
+    cox_model = NULL,
+    data = landmark_survival,
+    results = tibble(
+      Approach = paste0("Landmark ", landmark_months, " months"),
+      N_Patients = nrow(landmark_survival),
+      N_Events = n_events,
+      HR_Positive_vs_Negative = NA_real_,
+      HR_CI_Lower = NA_real_,
+      HR_CI_Upper = NA_real_,
+      P_Value = NA_real_
+    )
+  ))
+}
+
+# Perform landmark analyses at 3, 6, and 12 months
+# Option 1: From baseline ctDNA (original approach)
+landmark_3mo <- tryCatch({
+  result <- perform_landmark_analysis(3, ctdna_long, survival_outcomes, baseline_ctdna, anchor_type = "baseline")
+  if (!is.list(result)) {
+    stop("perform_landmark_analysis did not return a list")
+  }
+  result
+}, error = function(e) {
+  cat("Warning: Could not perform 3-month landmark analysis:", e$message, "\n")
+  list(landmark_months = 3, n_patients = 0, cox_model = NULL, data = NULL, 
+       results = tibble(Approach = "Landmark 3 months (from baseline)", N_Patients = 0, N_Events = 0,
+                       HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                       HR_CI_Upper = NA_real_, P_Value = NA_real_))
+})
+
+landmark_6mo <- tryCatch({
+  result <- perform_landmark_analysis(6, ctdna_long, survival_outcomes, baseline_ctdna, anchor_type = "baseline")
+  if (!is.list(result)) {
+    stop("perform_landmark_analysis did not return a list")
+  }
+  result
+}, error = function(e) {
+  cat("Warning: Could not perform 6-month landmark analysis:", e$message, "\n")
+  list(landmark_months = 6, n_patients = 0, cox_model = NULL, data = NULL,
+       results = tibble(Approach = "Landmark 6 months (from baseline)", N_Patients = 0, N_Events = 0,
+                       HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                       HR_CI_Upper = NA_real_, P_Value = NA_real_))
+})
+
+landmark_12mo <- tryCatch({
+  result <- perform_landmark_analysis(12, ctdna_long, survival_outcomes, baseline_ctdna, anchor_type = "baseline")
+  if (!is.list(result)) {
+    stop("perform_landmark_analysis did not return a list")
+  }
+  result
+}, error = function(e) {
+  cat("Warning: Could not perform 12-month landmark analysis:", e$message, "\n")
+  list(landmark_months = 12, n_patients = 0, cox_model = NULL, data = NULL,
+       results = tibble(Approach = "Landmark 12 months (from baseline)", N_Patients = 0, N_Events = 0,
+                       HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                       HR_CI_Upper = NA_real_, P_Value = NA_real_))
+})
+
+# Option 2: From definitive surgery/cystectomy (if surgery dates available)
+if (exists("survival_outcomes") && ("surgery_1_date" %in% names(survival_outcomes) || "first_surgery_date" %in% names(survival_outcomes))) {
+  cat("\n=== Performing Landmark Analysis from Definitive Surgery/Cystectomy ===\n")
+  
+  landmark_3mo_surgery <- tryCatch({
+    result <- perform_landmark_analysis(3, ctdna_long, survival_outcomes, baseline_ctdna, anchor_type = "surgery")
+    if (!is.list(result)) {
+      stop("perform_landmark_analysis did not return a list")
+    }
+    # Update approach name
+    if (!is.null(result$results)) {
+      result$results$Approach <- "Landmark 3 months (from surgery)"
+    }
+    result
+  }, error = function(e) {
+    cat("Warning: Could not perform 3-month landmark analysis from surgery:", e$message, "\n")
+    list(landmark_months = 3, n_patients = 0, cox_model = NULL, data = NULL,
+         results = tibble(Approach = "Landmark 3 months (from surgery)", N_Patients = 0, N_Events = 0,
+                         HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                         HR_CI_Upper = NA_real_, P_Value = NA_real_))
+  })
+  
+  landmark_6mo_surgery <- tryCatch({
+    result <- perform_landmark_analysis(6, ctdna_long, survival_outcomes, baseline_ctdna, anchor_type = "surgery")
+    if (!is.list(result)) {
+      stop("perform_landmark_analysis did not return a list")
+    }
+    if (!is.null(result$results)) {
+      result$results$Approach <- "Landmark 6 months (from surgery)"
+    }
+    result
+  }, error = function(e) {
+    cat("Warning: Could not perform 6-month landmark analysis from surgery:", e$message, "\n")
+    list(landmark_months = 6, n_patients = 0, cox_model = NULL, data = NULL,
+         results = tibble(Approach = "Landmark 6 months (from surgery)", N_Patients = 0, N_Events = 0,
+                         HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                         HR_CI_Upper = NA_real_, P_Value = NA_real_))
+  })
+  
+  landmark_12mo_surgery <- tryCatch({
+    result <- perform_landmark_analysis(12, ctdna_long, survival_outcomes, baseline_ctdna, anchor_type = "surgery")
+    if (!is.list(result)) {
+      stop("perform_landmark_analysis did not return a list")
+    }
+    if (!is.null(result$results)) {
+      result$results$Approach <- "Landmark 12 months (from surgery)"
+    }
+    result
+  }, error = function(e) {
+    cat("Warning: Could not perform 12-month landmark analysis from surgery:", e$message, "\n")
+    list(landmark_months = 12, n_patients = 0, cox_model = NULL, data = NULL,
+         results = tibble(Approach = "Landmark 12 months (from surgery)", N_Patients = 0, N_Events = 0,
+                         HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                         HR_CI_Upper = NA_real_, P_Value = NA_real_))
+  })
+} else {
+  cat("\nNote: Surgery dates not available. Skipping surgery-based landmark analysis.\n")
+  landmark_3mo_surgery <- list(landmark_months = 3, n_patients = 0, cox_model = NULL, data = NULL,
+                               results = tibble(Approach = "Landmark 3 months (from surgery)", N_Patients = 0, N_Events = 0,
+                                               HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                                               HR_CI_Upper = NA_real_, P_Value = NA_real_))
+  landmark_6mo_surgery <- list(landmark_months = 6, n_patients = 0, cox_model = NULL, data = NULL,
+                               results = tibble(Approach = "Landmark 6 months (from surgery)", N_Patients = 0, N_Events = 0,
+                                               HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                                               HR_CI_Upper = NA_real_, P_Value = NA_real_))
+  landmark_12mo_surgery <- list(landmark_months = 12, n_patients = 0, cox_model = NULL, data = NULL,
+                                results = tibble(Approach = "Landmark 12 months (from surgery)", N_Patients = 0, N_Events = 0,
+                                                HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                                                HR_CI_Upper = NA_real_, P_Value = NA_real_))
+}
+
+# Final safety check - ensure all landmark results are lists
+if (!is.list(landmark_3mo)) {
+  landmark_3mo <- list(landmark_months = 3, n_patients = 0, cox_model = NULL, data = NULL,
+                       results = tibble(Approach = "Landmark 3 months", N_Patients = 0, N_Events = 0,
+                                       HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                                       HR_CI_Upper = NA_real_, P_Value = NA_real_))
+}
+if (!is.list(landmark_6mo)) {
+  landmark_6mo <- list(landmark_months = 6, n_patients = 0, cox_model = NULL, data = NULL,
+                        results = tibble(Approach = "Landmark 6 months", N_Patients = 0, N_Events = 0,
+                                        HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                                        HR_CI_Upper = NA_real_, P_Value = NA_real_))
+}
+if (!is.list(landmark_12mo)) {
+  landmark_12mo <- list(landmark_months = 12, n_patients = 0, cox_model = NULL, data = NULL,
+                         results = tibble(Approach = "Landmark 12 months", N_Patients = 0, N_Events = 0,
+                                         HR_Positive_vs_Negative = NA_real_, HR_CI_Lower = NA_real_,
+                                         HR_CI_Upper = NA_real_, P_Value = NA_real_))
+}
+
+# Summarize landmark results
+cat("\n=== Landmark Analysis Results ===\n")
+if (is.list(landmark_3mo) && !is.null(landmark_3mo$cox_model)) {
+  cat("\n3-month landmark: N =", landmark_3mo$n_patients, "\n")
+  print(summary(landmark_3mo$cox_model))
+} else {
+  n_patients_3mo <- if (is.list(landmark_3mo)) landmark_3mo$n_patients else 0
+  cat("\n3-month landmark: Insufficient data (N =", n_patients_3mo, ")\n")
+}
+
+if (is.list(landmark_6mo) && !is.null(landmark_6mo$cox_model)) {
+  cat("\n6-month landmark: N =", landmark_6mo$n_patients, "\n")
+  print(summary(landmark_6mo$cox_model))
+} else {
+  n_patients_6mo <- if (is.list(landmark_6mo)) landmark_6mo$n_patients else 0
+  cat("\n6-month landmark: Insufficient data (N =", n_patients_6mo, ")\n")
+}
+
+if (is.list(landmark_12mo) && !is.null(landmark_12mo$cox_model)) {
+  cat("\n12-month landmark: N =", landmark_12mo$n_patients, "\n")
+  print(summary(landmark_12mo$cox_model))
+} else {
+  n_patients_12mo <- if (is.list(landmark_12mo)) landmark_12mo$n_patients else 0
+  cat("\n12-month landmark: Insufficient data (N =", n_patients_12mo, ")\n")
+}
+```
+
+```{r comparison_table}
+# ==============================
+# Comparison Table
+# ==============================
+
+# Combine results from all approaches
+results_list <- list()
+
+# Add time-dependent results if available
+if (exists("timedep_results") && !is.null(timedep_results) && nrow(timedep_results) > 0) {
+  results_list[[length(results_list) + 1]] <- timedep_results
+}
+
+# Add landmark results if available (from baseline)
+if (exists("landmark_3mo") && is.list(landmark_3mo) && !is.null(landmark_3mo$results) && nrow(landmark_3mo$results) > 0) {
+  results_list[[length(results_list) + 1]] <- landmark_3mo$results
+}
+if (exists("landmark_6mo") && is.list(landmark_6mo) && !is.null(landmark_6mo$results) && nrow(landmark_6mo$results) > 0) {
+  results_list[[length(results_list) + 1]] <- landmark_6mo$results
+}
+if (exists("landmark_12mo") && is.list(landmark_12mo) && !is.null(landmark_12mo$results) && nrow(landmark_12mo$results) > 0) {
+  results_list[[length(results_list) + 1]] <- landmark_12mo$results
+}
+
+# Add landmark results from surgery if available
+if (exists("landmark_3mo_surgery") && is.list(landmark_3mo_surgery) && !is.null(landmark_3mo_surgery$results) && nrow(landmark_3mo_surgery$results) > 0) {
+  results_list[[length(results_list) + 1]] <- landmark_3mo_surgery$results
+}
+if (exists("landmark_6mo_surgery") && is.list(landmark_6mo_surgery) && !is.null(landmark_6mo_surgery$results) && nrow(landmark_6mo_surgery$results) > 0) {
+  results_list[[length(results_list) + 1]] <- landmark_6mo_surgery$results
+}
+if (exists("landmark_12mo_surgery") && is.list(landmark_12mo_surgery) && !is.null(landmark_12mo_surgery$results) && nrow(landmark_12mo_surgery$results) > 0) {
+  results_list[[length(results_list) + 1]] <- landmark_12mo_surgery$results
+}
+
+# Create comparison table
+if (length(results_list) > 0) {
+  comparison_results <- bind_rows(results_list) %>%
+  mutate(
+    HR_Summary = ifelse(!is.na(HR_Positive_vs_Negative),
+                       paste0(round(HR_Positive_vs_Negative, 2), 
+                              " (", round(HR_CI_Lower, 2), "-", 
+                              round(HR_CI_Upper, 2), ")"),
+                       "N/A"),
+    P_Value_Formatted = case_when(
+      is.na(P_Value) ~ "N/A",
+      P_Value < 0.001 ~ "<0.001",
+      P_Value < 0.01 ~ as.character(round(P_Value, 3)),
+      TRUE ~ as.character(round(P_Value, 3))
+    ),
+    Addresses_Time_Dependence = case_when(
+      str_detect(Approach, "Time-Dependent") ~ "Yes",
+      str_detect(Approach, "Landmark") ~ "Partial",
+      TRUE ~ "No"
+    ),
+    Addresses_Guarantee_Time_Bias = case_when(
+      str_detect(Approach, "Landmark") ~ "Yes",
+      TRUE ~ "No"
+    )
+  ) %>%
+  select(Approach, N_Patients, N_Events, HR_Summary, P_Value_Formatted, 
+         Addresses_Time_Dependence, Addresses_Guarantee_Time_Bias)
+  
+  # Format table
+  comparison_table_formatted <- comparison_results %>%
+    rename(
+      `Approach` = Approach,
+      `N Patients` = N_Patients,
+      `N Events` = N_Events,
+      `HR (95% CI)` = HR_Summary,
+      `P Value` = P_Value_Formatted,
+      `Addresses Time Dependence` = Addresses_Time_Dependence,
+      `Addresses Guarantee Time Bias` = Addresses_Guarantee_Time_Bias
+    )
+  
+  kable(comparison_table_formatted, 
+        caption = "Comparison of Time-Dependent Cox Model and Landmark Analyses",
+        align = "l") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                  full_width = TRUE, font_size = 11) %>%
+    column_spec(1, bold = TRUE) %>%
+    add_footnote(c("Time-Dependent Cox Model: Accounts for changes in ctDNA status over time",
+                   "Landmark Analysis: Addresses guarantee time bias by only including patients alive at landmark time",
+                   "HR = Hazard Ratio for Positive vs Negative ctDNA status",
+                   "P < 0.05 indicates statistically significant difference"), 
+                 notation = "symbol")
+} else {
+  cat("\nNo results available for comparison table.\n")
+}
+```
+
+```{r survival_curves_landmark}
+# ==============================
+# Survival Curves for Landmark Analysis
+# ==============================
+
+# Create Kaplan-Meier plots for landmark analyses
+create_km_plot_landmark <- function(landmark_result, title_suffix) {
+  if (is.null(landmark_result$cox_model) || is.null(landmark_result$data)) {
+    return(NULL)
+  }
+  
+  data_plot <- landmark_result$data %>%
+    mutate(
+      surv_time = os_time_from_landmark,
+      surv_event = death_event,
+      surv_group = ctdna_status_landmark
+    ) %>%
+    filter(!is.na(surv_time), !is.na(surv_event), !is.na(surv_group),
+           surv_time > 0)
+  
+  if (nrow(data_plot) == 0) {
+    return(NULL)
+  }
+  
+  # Check if we have both groups
+  unique_groups <- unique(data_plot$surv_group)
+  if (length(unique_groups) < 2) {
+    return(NULL)
+  }
+  
+  # Fit survival curves - create Surv object first, then fit
+  surv_obj <- Surv(time = data_plot$surv_time, event = data_plot$surv_event)
+  
+  fit <- tryCatch({
+    survfit(surv_obj ~ surv_group, data = data_plot)
+  }, error = function(e) {
+    cat("Error fitting survival curves:", e$message, "\n")
+    return(NULL)
+  })
+  
+  if (is.null(fit)) {
+    return(NULL)
+  }
+  
+  # Check if fit is valid
+  if (is.null(fit$strata) || length(fit$strata) == 0 || length(fit$strata) < 2) {
+    return(NULL)
+  }
+  
+  # Create plot - ensure data_plot is in the environment
+  p <- tryCatch({
+    # Store data_plot in a way ggsurvplot can access it
+    plot_data <- data_plot
+    
+    # Create plot with explicit environment
+    ggsurvplot(
+      fit,
+      data = plot_data,
+      pval = TRUE,
+      pval.size = 4,
+      conf.int = FALSE,
+      risk.table = TRUE,
+      risk.table.height = 0.25,
+      risk.table.fontsize = 3.5,
+      risk.table.y.text = FALSE,
+      risk.table.title = "Number at risk",
+      ggtheme = theme_minimal(),
+      title = paste0("Landmark Analysis at ", landmark_result$landmark_months, " months", title_suffix),
+      xlab = "Time from Landmark (months)",
+      ylab = "Overall Survival",
+      legend = "right",
+      legend.title = "ctDNA Status at Landmark",
+      legend.labs = sort(unique_groups),
+      palette = c("#2E7D32", "#E53935")[1:length(unique_groups)],
+      font.main = 12,
+      font.x = 10,
+      font.y = 10,
+      font.tickslab = 9
+    )
+  }, error = function(e) {
+    cat("Error creating survival plot with ggsurvplot:", e$message, "\n")
+    cat("Attempting alternative plotting method...\n")
+    # Try simpler approach without ggsurvplot
+    tryCatch({
+      # Use base plot as fallback
+      plot(fit, 
+           col = c("#2E7D32", "#E53935")[1:length(unique_groups)],
+           xlab = "Time from Landmark (months)",
+           ylab = "Overall Survival",
+           main = paste0("Landmark Analysis at ", landmark_result$landmark_months, " months", title_suffix))
+      legend("topright", legend = sort(unique_groups), 
+             col = c("#2E7D32", "#E53935")[1:length(unique_groups)], lty = 1)
+      return(list(plot = recordPlot()))  # Return a list to match ggsurvplot structure
+    }, error = function(e2) {
+      cat("Alternative plot method also failed:", e2$message, "\n")
+      return(NULL)
+    })
+  })
+  
+  return(p)
+}
+
+# Create plots for each landmark
+p_landmark_6mo <- NULL
+if (is.list(landmark_6mo) && !is.null(landmark_6mo$cox_model) && !is.null(landmark_6mo$data) && nrow(landmark_6mo$data) > 0) {
+  p_landmark_6mo <- tryCatch({
+    create_km_plot_landmark(landmark_6mo, "")
+  }, error = function(e) {
+    cat("Warning: Could not create 6-month landmark plot:", e$message, "\n")
+    return(NULL)
+  })
+  
+  if (!is.null(p_landmark_6mo)) {
+    # Handle both ggsurvplot output (list with $plot) and base plots
+    if (is.list(p_landmark_6mo) && "plot" %in% names(p_landmark_6mo)) {
+      print(p_landmark_6mo$plot)
+    } else if (is.list(p_landmark_6mo)) {
+      # ggsurvplot returns a list, print the whole thing
+      print(p_landmark_6mo)
+    } else {
+      print(p_landmark_6mo)
+    }
+  }
+}
+
+p_landmark_12mo <- NULL
+if (is.list(landmark_12mo) && !is.null(landmark_12mo$cox_model) && !is.null(landmark_12mo$data) && nrow(landmark_12mo$data) > 0) {
+  p_landmark_12mo <- tryCatch({
+    create_km_plot_landmark(landmark_12mo, "")
+  }, error = function(e) {
+    cat("Warning: Could not create 12-month landmark plot:", e$message, "\n")
+    return(NULL)
+  })
+  
+  if (!is.null(p_landmark_12mo)) {
+    # Handle both ggsurvplot output (list with $plot) and base plots
+    if (is.list(p_landmark_12mo) && "plot" %in% names(p_landmark_12mo)) {
+      print(p_landmark_12mo$plot)
+    } else if (is.list(p_landmark_12mo)) {
+      # ggsurvplot returns a list, print the whole thing
+      print(p_landmark_12mo)
+    } else {
+      print(p_landmark_12mo)
+    }
+  }
+}
+```
+
+```{r summary_interpretation}
+# ==============================
+# Summary and Interpretation
+# ==============================
+
+cat("\n=== SUMMARY AND INTERPRETATION ===\n\n")
+
+cat("Solution 2: Time-Dependent Cox Model\n")
+cat("  - Addresses: Time-dependent nature of ctDNA measurements\n")
+cat("  - How: Allows ctDNA status to change at each measurement time\n")
+cat("  - Advantage: Captures dynamic changes in ctDNA over time\n")
+cat("  - Limitation: Does not directly address guarantee time bias\n\n")
+
+cat("Solution 3: Landmark Analysis\n")
+cat("  - Addresses: Guarantee time bias (patients must survive to landmark)\n")
+cat("  - How: Only includes patients alive at fixed time point (landmark)\n")
+cat("  - Advantage: Eliminates guarantee time bias by ensuring all patients survive to landmark\n")
+cat("  - Limitation: Loses patients who die before landmark; choice of landmark time is somewhat arbitrary\n\n")
+
+cat("Recommendations:\n")
+cat("  1. Use landmark analysis at 6 months as PRIMARY sensitivity analysis\n")
+cat("  2. Use time-dependent Cox model to explore dynamic changes\n")
+cat("  3. Compare results across different landmark times (3, 6, 12 months)\n")
+cat("  4. Report both approaches in manuscript with clear interpretation\n")
+cat("  5. Acknowledge limitations of each approach\n")
+```
+

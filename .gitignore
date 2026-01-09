@@ -1,0 +1,132 @@
+# R
+# ============================================================================
+.Rhistory
+.RData
+.RDataTmp
+.Ruserdata
+.Rproj.user/
+*.Rproj
+.Rprofile
+
+# R Markdown output files (regenerate with knitting)
+# ============================================================================
+# HTML outputs (in outputs/ directory)
+outputs/*.html
+outputs/*.nb.html
+*.html
+*.nb.html
+
+# PDF and DOCX outputs (in outputs/ and documents/ directories)
+outputs/*.pdf
+documents/*.pdf
+*.pdf
+documents/*.docx
+*.docx
+
+# R Markdown cache
+# ============================================================================
+*_cache/
+*_files/
+*.utf8.md
+*.knit.md
+
+# R package files
+# ============================================================================
+.Rcheck/
+*.tar.gz
+
+# Data files (if large or sensitive)
+# ============================================================================
+# Uncomment if you don't want to track data files
+# data/*.xlsx
+# data/*.csv
+# data/*.xls
+# *.xlsx
+# *.csv
+# *.xls
+
+# Temporary Excel files
+# ============================================================================
+~$*.xlsx
+~$*.xls
+~$*.docx
+~$*.doc
+
+# R workspace and session files
+# ============================================================================
+.Rapp.history
+.Rhistory
+*.Rhistory
+
+# Cursor/IDE specific
+# ============================================================================
+.DS_Store
+.cursor/
+.vscode/
+
+# Output plots (regenerate with scripts)
+# ============================================================================
+# Figures directory (generated plots)
+figures/*.png
+figures/*.jpg
+figures/*.jpeg
+figures/*.eps
+figures/*.svg
+figures/*.afpub
+*.png
+*.jpg
+*.jpeg
+*.eps
+*.svg
+*.afpub
+# Keep only if you want to version control figures
+# Comment out the extensions above if you want to keep plots
+
+# Cache files
+# ============================================================================
+cache/
+data/*.rds
+*.rds
+*.RData
+*.rda
+
+# Temporary files
+# ============================================================================
+# Temporary directory (should not be tracked)
+temp/
+*.tmp
+*.temp
+*~
+.*.swp
+.*.swo
+*.bak
+
+# OS files
+# ============================================================================
+.DS_Store
+Thumbs.db
+
+# Log files
+# ============================================================================
+*.log
+
+# Python cache
+# ============================================================================
+python/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# JSON files (if generated)
+# ============================================================================
+# Uncomment if you don't want to track JSON files
+# data/*.json
+# *.json
+
+# Keep important files (override ignores)
+# ============================================================================
+# If you have specific files you want to keep, add them with ! prefix
+# !data/important_data.xlsx
+# !outputs/final_report.pdf
+# !figures/important_figure.png

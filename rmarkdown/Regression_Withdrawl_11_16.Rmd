@@ -1,0 +1,1010 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+
+#Packages load
+
+install.packages("readxl")
+install.packages("writexl")
+install.packages("kableExtra")
+install.packages("tidyr")
+install.packages("car")
+install.packages("GGally")
+install.packages("mgcv")
+install.packages("glmnet")
+install.packages("openxlsx")
+install.packages("caret")
+install.packages("tible")
+library(tidyr)
+
+
+
+# Load the readxl library
+library(readxl)
+# Load required libraries
+library(dplyr)
+library(kableExtra)
+
+
+
+
+
+
+```
+
+```{r}
+
+#Load data
+
+# Set the file path
+file_path <- "Cleaned_Clinical_Trial_Data.xlsx"
+setwd("~/R")
+getwd()
+
+library(readxl)
+Cleaned_Clinical_Trial_Data <- read_excel("Cleaned_Clinical_Trial_Data.xlsx", 
+    col_types = c("text","numeric", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric"))
+View(Cleaned_Clinical_Trial_Data)
+
+library(readxl)
+
+
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+
+#Regression attempt 
+# Load necessary libraries
+library(dplyr)
+library(caret)
+library(glmnet)
+library(ggplot2)
+
+# Step 1: Read and Preprocess the Data
+data <- read_excel("Cleaned_Clinical_Trial_Data.xlsx", 
+    col_types = c("text","numeric", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric"))
+
+# Add Death Rate Column
+if ("Withdrew_Due_To_Death" %in% colnames(data) & "Number_Enrolled_In_Trial" %in% colnames(data)) {
+  # Calculate death_rate while avoiding division by zero
+  data <- data %>%
+    mutate(death_rate = ifelse(Number_Enrolled_In_Trial > 0,
+                               Withdrew_Due_To_Death / Number_Enrolled_In_Trial,
+                               NA))
+  cat("Death rate column added successfully.\n")
+} else {
+  stop("Columns 'Withdrew_Due_To_Death' or 'Number_Enrolled_In_Trial' are not present in the dataset.")
+}
+
+# Variables to exclude
+excluded_vars <- c("Trial_number",
+    "Withdrawl_Rate_Without_Clear_Reason_In_Control_Arm",
+    "Withdrawl_Rate_Without_Clear_Reason_Interventional_Arm",
+    "Unspecified_Loss_To_F/U",
+    "Total_N_For_Other_Reasonsof_Withdrawl",
+    "Number_Withdrew_From_Control_Arm",
+    "Number_Withdrew_From_Control_Arm_Due_To_Adverse_Event",
+    "Number_Withdrew_From_Control_Arm_Due_To_Progression_Of_Dz",
+    "Number_Withdrew_From_Control_Arm_Due_Patient_Withdrawl_Of_Consent",
+    "Total_Withdrawl/Discontinuation",
+    "Total_Withdrawl_Of_Patient_Consent_W/O_Clear_Reasons",
+    "Total_Withdrew_Due_To_Progression_Of_Dz",
+    "Total_Withdrawl_Due_To_Complicating_Medical_Disease",
+    "Total_Withdrawl__To_Seek_Alternative_Tx",
+    "Total_Investigator_Initated_Withdrawl_Due_To_No_Longer_Meeting_Study_Eligibility_Criteria",
+    "Withdrew_By_Sponser_Due_To_Non-Compliance",
+    "Number_Withdrew_From_Treatment_Arm",
+    "Withdrew_Due_To_Death",
+    "Treatment_Related_Discontinuation__In_Control_Arm",
+    "Number_Withdrew_From_Treatment_Arm_Due_To_Progression_Of_Disease",
+    "Number_Withdrew_From_Treatment_Arm_Due_Patient_Withdrawl_Of_Consent"
+)
+
+
+
+
+# Step 2: Rename target column to `outcome` if needed
+if ("Total_Withdrawl_Rate_Without_Clear_Reason" %in% colnames(data)) {
+  data <- data %>%
+    rename(outcome = Total_Withdrawl_Rate_Without_Clear_Reason)
+} else if (!"outcome" %in% colnames(data)) {
+  stop("The target variable `outcome` or `Total_Withdrawl_Rate_Without_Clear_Reason` is not found in the dataset.")
+}
+
+# Rest of the script continues...
+
+# Step 3: Preprocess the dataset
+# Handle missing values
+if (any(is.na(data$outcome))) {
+  cat("Removing rows with missing `outcome` values.\n")
+  data <- data %>%
+    filter(!is.na(outcome))
+}
+
+# Ensure `outcome` is numeric
+if (!is.numeric(data$outcome)) {
+  cat("Converting `outcome` to numeric.\n")
+  data$outcome <- as.numeric(data$outcome)
+}
+
+# Check for sufficient data points
+if (length(unique(data$outcome)) < 2) {
+  stop("The target variable `outcome` must have at least two distinct data points.")
+}
+
+# Ensure sufficient dataset size
+if (nrow(data) < 10) {
+  stop("The dataset does not contain enough rows for partitioning.")
+}
+
+# Ensure Follow_Up_Period_Years is numeric
+if (!is.numeric(data$Follow_Up_Period_Years)) {
+    cat("Converting Follow_Up_Period_Years to numeric.\n")
+    data$Follow_Up_Period_Years <- as.numeric(data$Follow_Up_Period_Years)
+}
+
+# Step 4: Split dataset into training (80%), validation (10%), and test (10%) sets
+set.seed(123)
+trainIndex <- createDataPartition(data$outcome, p = 0.8, list = FALSE)
+train_data <- data[trainIndex, ]
+remaining_data <- data[-trainIndex, ]
+
+set.seed(123)
+valIndex <- createDataPartition(remaining_data$outcome, p = 0.5, list = FALSE)
+validation_data <- remaining_data[valIndex, ]
+test_data <- remaining_data[-valIndex, ]
+
+cat("Training set size:", nrow(train_data), "\n")
+cat("Validation set size:", nrow(validation_data), "\n")
+cat("Test set size:", nrow(test_data), "\n")
+
+# Step 5: Separate predictors and outcome
+train_outcome <- train_data$outcome
+validation_outcome <- validation_data$outcome
+test_outcome <- test_data$outcome
+
+train_data <- train_data %>% select(-outcome)
+validation_data <- validation_data %>% select(-outcome)
+test_data <- test_data %>% select(-outcome)
+
+# Remove excluded variables
+train_data <- train_data %>% select(-one_of(excluded_vars))
+validation_data <- validation_data %>% select(-one_of(excluded_vars))
+test_data <- test_data %>% select(-one_of(excluded_vars))
+
+# Step 6: Convert factor columns to dummy variables using the same `dummyVars` object
+dummy <- dummyVars(" ~ .", data = train_data)  # Create dummyVars object using training data
+
+# Transform the datasets using the same dummyVars object
+train_data_numeric <- as.data.frame(predict(dummy, newdata = train_data))
+validation_data_numeric <- as.data.frame(predict(dummy, newdata = validation_data))
+#test_data_numeric <- as.data.frame(predict(dummy, newdata = test_data))
+
+# Function to add missing columns with zeros
+add_missing_columns <- function(reference_data, target_data) {
+  # Identify columns in reference_data that are missing in target_data
+  missing_cols <- setdiff(colnames(reference_data), colnames(target_data))
+  
+  # Add missing columns to target_data, initializing them with zeros
+  if (length(missing_cols) > 0) {
+    for (col in missing_cols) {
+      target_data[[col]] <- 0
+    }
+  }
+  
+  # Reorder columns in target_data to match reference_data
+  target_data <- target_data[, colnames(reference_data)]
+  return(target_data)
+}
+
+# Ensure consistency in columns by adding missing columns with zeros
+validation_data_numeric <- add_missing_columns(train_data_numeric, validation_data_numeric)
+test_data_numeric <- add_missing_columns(train_data_numeric, test_data_numeric)
+
+# Add missing columns to validation and test datasets
+validation_data_numeric <- add_missing_columns(train_data_numeric, validation_data_numeric)
+test_data_numeric <- add_missing_columns(train_data_numeric, test_data_numeric)
+
+# Check that all datasets now have the same number of columns
+cat("Number of columns in train_data_numeric:", ncol(train_data_numeric), "\n")
+cat("Number of columns in validation_data_numeric:", ncol(validation_data_numeric), "\n")
+cat("Number of columns in test_data_numeric:", ncol(test_data_numeric), "\n")
+
+# Inspect dummy variables
+cat("Dummy variable columns for Follow_Up_Period_Years:\n")
+print(grep("Follow_Up_Period_Years", colnames(train_data_numeric), value = TRUE))
+
+# Step 7: Impute missing values
+preProc <- preProcess(train_data_numeric, method = "medianImpute")  # Create preprocessing object
+
+# Impute missing values in all datasets
+train_data_imputed <- predict(preProc, train_data_numeric)
+validation_data_imputed <- predict(preProc, validation_data_numeric)
+test_data_imputed <- predict(preProc, test_data_numeric)
+
+# Convert datasets to matrices for glmnet
+train_matrix <- as.matrix(train_data_imputed)
+validation_matrix <- as.matrix(validation_data_imputed)
+test_matrix <- as.matrix(test_data_imputed)
+
+# Ensure all matrices have consistent dimensions
+cat("Number of columns in train_matrix:", ncol(train_matrix), "\n")
+cat("Number of columns in validation_matrix:", ncol(validation_matrix), "\n")
+cat("Number of columns in test_matrix:", ncol(test_matrix), "\n")
+
+# Step 8: Fit Ridge regression model with cross-validation
+set.seed(123)
+cv_ridge <- cv.glmnet(
+    train_matrix, train_outcome,
+    alpha = 0,  # Ridge regression
+    lambda = 10^seq(10, -2, length = 100),
+    standardize = TRUE,
+    nfolds = 10
+)
+
+# Optimal lambda
+best_lambda <- cv_ridge$lambda.min
+cat("Best lambda for ridge regularization:", best_lambda, "\n")
+
+# Final Ridge regression model
+ridge_model <- glmnet(
+    train_matrix, train_outcome,
+    alpha = 0,
+    lambda = best_lambda,
+    standardize = TRUE
+)
+
+# Step 9: Evaluate the model
+# Training set performance
+train_predictions <- predict(ridge_model, s = best_lambda, newx = train_matrix)
+train_rss <- sum((train_outcome - train_predictions)^2)
+train_tss <- sum((train_outcome - mean(train_outcome))^2)
+train_r_squared <- 1 - train_rss / train_tss
+cat("Training R-squared:", train_r_squared, "\n")
+
+# Validation set performance
+validation_predictions <- predict(ridge_model, s = best_lambda, newx = validation_matrix)
+validation_rss <- sum((validation_outcome - validation_predictions)^2)
+validation_tss <- sum((validation_outcome - mean(validation_outcome))^2)
+validation_r_squared <- 1 - validation_rss / validation_tss
+cat("Validation R-squared:", validation_r_squared, "\n")
+
+# Test set performance
+test_predictions <- predict(ridge_model, s = best_lambda, newx = test_matrix)
+test_rss <- sum((test_outcome - test_predictions)^2)
+test_tss <- sum((test_outcome - mean(test_outcome))^2)
+test_r_squared <- 1 - test_rss / test_tss
+cat("Test R-squared:", test_r_squared, "\n")
+
+# Step 10: Visualize observed vs predicted values for the test set
+test_predictions <- as.vector(test_predictions)
+test_results <- data.frame(Observed = test_outcome, Predicted = test_predictions)
+ggplot(test_results, aes(x = Predicted, y = Observed)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+    labs(title = "Observed vs Predicted Plot - Test Set",
+         x = "Predicted Values",
+         y = "Observed Values") +
+    theme_minimal()
+
+ridge_coefficients <- coef(ridge_model, s = best_lambda)
+retained_variables <- as.data.frame(as.matrix(ridge_coefficients))
+colnames(retained_variables) <- c("Coefficient")
+retained_variables <- retained_variables[retained_variables$Coefficient != 0, , drop = FALSE]
+print(retained_variables)
+```
+
+
+
+```{r}
+library(tibble)
+
+# Sort retained variables by absolute coefficient value
+retained_variables <- retained_variables %>%
+    rownames_to_column("Variable") %>%
+    mutate(AbsCoefficient = abs(Coefficient)) %>%
+    arrange(desc(AbsCoefficient))
+
+# Display top 10 most influential variables
+cat("Top 10 most influential variables based on coefficients:\n")
+print(head(retained_variables, 10))
+
+```
+```{r}
+
+#Intervention arm only
+
+# Load necessary libraries
+library(dplyr)
+library(caret)
+library(glmnet)
+library(ggplot2)
+
+# Step 1: Read and Preprocess the Data
+data <- read_excel("Cleaned_Clinical_Trial_Data.xlsx", 
+    col_types = c("text", "numeric", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric"))
+
+# Add Death Rate Column
+if ("Withdrew_Due_To_Death" %in% colnames(data) & "Number_Enrolled_In_Trial" %in% colnames(data)) {
+  data <- data %>%
+    mutate(death_rate = ifelse(Number_Enrolled_In_Trial > 0,
+                               Withdrew_Due_To_Death / Number_Enrolled_In_Trial,
+                               NA))
+  cat("Death rate column added successfully.\n")
+} else {
+  stop("Columns 'Withdrew_Due_To_Death' or 'Number_Enrolled_In_Trial' are not present in the dataset.")
+}
+
+# Variables to exclude
+excluded_vars <- c("Trial_number", "Total_Withdrawl_Rate_Without_Clear_Reason",
+    "Withdrawl_Rate_Without_Clear_Reason_In_Control_Arm",
+    "Unspecified_Loss_To_F/U",
+    "Total_N_For_Other_Reasonsof_Withdrawl",
+    "Number_Withdrew_From_Control_Arm",
+    "Number_Withdrew_From_Control_Arm_Due_To_Adverse_Event",
+    "Number_Withdrew_From_Control_Arm_Due_To_Progression_Of_Dz",
+    "Number_Withdrew_From_Control_Arm_Due_Patient_Withdrawl_Of_Consent",
+    "Total_Withdrawl/Discontinuation",
+    "Total_Withdrawl_Of_Patient_Consent_W/O_Clear_Reasons",
+    "Total_Withdrew_Due_To_Progression_Of_Dz",
+    "Total_Withdrawl_Due_To_Complicating_Medical_Disease",
+    "Total_Withdrawl__To_Seek_Alternative_Tx",
+    "Total_Investigator_Initated_Withdrawl_Due_To_No_Longer_Meeting_Study_Eligibility_Criteria",
+    "Withdrew_By_Sponser_Due_To_Non-Compliance",
+    "Number_Withdrew_From_Treatment_Arm",
+    "Withdrew_Due_To_Death",
+    "Treatment_Related_Discontinuation__In_Control_Arm",
+    "Number_Withdrew_From_Treatment_Arm_Due_To_Progression_Of_Disease",
+    "Number_Withdrew_From_Treatment_Arm_Due_Patient_Withdrawl_Of_Consent"
+)
+
+# Step 2: Rename target column to `outcome`
+if ("Withdrawl_Rate_Without_Clear_Reason_Interventional_Arm" %in% colnames(data)) {
+  data <- data %>%
+    rename(outcome = Withdrawl_Rate_Without_Clear_Reason_Interventional_Arm)
+} else {
+  stop("The target variable `Withdrawl_Rate_Without_Clear_Reason_Interventional_Arm` is not found in the dataset.")
+}
+
+# Rest of the script continues...
+
+# Step 3: Preprocess the dataset
+# Handle missing values
+if (any(is.na(data$outcome))) {
+  cat("Removing rows with missing `outcome` values.\n")
+  data <- data %>%
+    filter(!is.na(outcome))
+}
+
+# Ensure `outcome` is numeric
+if (!is.numeric(data$outcome)) {
+  cat("Converting `outcome` to numeric.\n")
+  data$outcome <- as.numeric(data$outcome)
+}
+
+# Check for sufficient data points
+if (length(unique(data$outcome)) < 2) {
+  stop("The target variable `outcome` must have at least two distinct data points.")
+}
+
+# Ensure sufficient dataset size
+if (nrow(data) < 10) {
+  stop("The dataset does not contain enough rows for partitioning.")
+}
+
+# Ensure Follow_Up_Period_Years is numeric
+if (!is.numeric(data$Follow_Up_Period_Years)) {
+    cat("Converting Follow_Up_Period_Years to numeric.\n")
+    data$Follow_Up_Period_Years <- as.numeric(data$Follow_Up_Period_Years)
+}
+
+# Step 4: Split dataset into training (80%), validation (10%), and test (10%) sets
+set.seed(123)
+trainIndex <- createDataPartition(data$outcome, p = 0.8, list = FALSE)
+train_data <- data[trainIndex, ]
+remaining_data <- data[-trainIndex, ]
+
+set.seed(123)
+valIndex <- createDataPartition(remaining_data$outcome, p = 0.5, list = FALSE)
+validation_data <- remaining_data[valIndex, ]
+test_data <- remaining_data[-valIndex, ]
+
+cat("Training set size:", nrow(train_data), "\n")
+cat("Validation set size:", nrow(validation_data), "\n")
+cat("Test set size:", nrow(test_data), "\n")
+
+# Step 5: Separate predictors and outcome
+train_outcome <- train_data$outcome
+validation_outcome <- validation_data$outcome
+test_outcome <- test_data$outcome
+
+train_data <- train_data %>% select(-outcome)
+validation_data <- validation_data %>% select(-outcome)
+test_data <- test_data %>% select(-outcome)
+
+# Remove excluded variables
+train_data <- train_data %>% select(-one_of(excluded_vars))
+validation_data <- validation_data %>% select(-one_of(excluded_vars))
+test_data <- test_data %>% select(-one_of(excluded_vars))
+
+# Step 6: Convert factor columns to dummy variables using the same `dummyVars` object
+dummy <- dummyVars(" ~ .", data = train_data)  # Create dummyVars object using training data
+
+# Transform the datasets using the same dummyVars object
+train_data_numeric <- as.data.frame(predict(dummy, newdata = train_data))
+#validation_data_numeric <- as.data.frame(predict(dummy, newdata = validation_data))
+#test_data_numeric <- as.data.frame(predict(dummy, newdata = test_data))
+
+# Function to add missing columns with zeros
+add_missing_columns <- function(reference_data, target_data) {
+  # Identify columns in reference_data that are missing in target_data
+  missing_cols <- setdiff(colnames(reference_data), colnames(target_data))
+  
+  # Add missing columns to target_data, initializing them with zeros
+  if (length(missing_cols) > 0) {
+    for (col in missing_cols) {
+      target_data[[col]] <- 0
+    }
+  }
+  
+  # Reorder columns in target_data to match reference_data
+  target_data <- target_data[, colnames(reference_data)]
+  return(target_data)
+}
+
+# Ensure consistency in columns by adding missing columns with zeros
+validation_data_numeric <- add_missing_columns(train_data_numeric, validation_data_numeric)
+test_data_numeric <- add_missing_columns(train_data_numeric, test_data_numeric)
+
+# Add missing columns to validation and test datasets
+validation_data_numeric <- add_missing_columns(train_data_numeric, validation_data_numeric)
+test_data_numeric <- add_missing_columns(train_data_numeric, test_data_numeric)
+
+# Check that all datasets now have the same number of columns
+cat("Number of columns in train_data_numeric:", ncol(train_data_numeric), "\n")
+cat("Number of columns in validation_data_numeric:", ncol(validation_data_numeric), "\n")
+cat("Number of columns in test_data_numeric:", ncol(test_data_numeric), "\n")
+
+# Inspect dummy variables
+cat("Dummy variable columns for Follow_Up_Period_Years:\n")
+print(grep("Follow_Up_Period_Years", colnames(train_data_numeric), value = TRUE))
+
+# Step 7: Impute missing values
+preProc <- preProcess(train_data_numeric, method = "medianImpute")  # Create preprocessing object
+
+# Impute missing values in all datasets
+train_data_imputed <- predict(preProc, train_data_numeric)
+validation_data_imputed <- predict(preProc, validation_data_numeric)
+test_data_imputed <- predict(preProc, test_data_numeric)
+
+# Convert datasets to matrices for glmnet
+train_matrix <- as.matrix(train_data_imputed)
+validation_matrix <- as.matrix(validation_data_imputed)
+test_matrix <- as.matrix(test_data_imputed)
+
+# Ensure all matrices have consistent dimensions
+cat("Number of columns in train_matrix:", ncol(train_matrix), "\n")
+cat("Number of columns in validation_matrix:", ncol(validation_matrix), "\n")
+cat("Number of columns in test_matrix:", ncol(test_matrix), "\n")
+
+# Step 8: Fit Ridge regression model with cross-validation
+set.seed(123)
+cv_ridge <- cv.glmnet(
+    train_matrix, train_outcome,
+    alpha = 0,  # Ridge regression
+    lambda = 10^seq(10, -2, length = 100),
+    standardize = TRUE,
+    nfolds = 10
+)
+
+# Optimal lambda
+best_lambda <- cv_ridge$lambda.min
+cat("Best lambda for ridge regularization:", best_lambda, "\n")
+
+# Final Ridge regression model
+ridge_model <- glmnet(
+    train_matrix, train_outcome,
+    alpha = 0,
+    lambda = best_lambda,
+    standardize = TRUE
+)
+
+# Step 9: Evaluate the model
+# Training set performance
+train_predictions <- predict(ridge_model, s = best_lambda, newx = train_matrix)
+train_rss <- sum((train_outcome - train_predictions)^2)
+train_tss <- sum((train_outcome - mean(train_outcome))^2)
+train_r_squared <- 1 - train_rss / train_tss
+cat("Training R-squared:", train_r_squared, "\n")
+
+# Validation set performance
+validation_predictions <- predict(ridge_model, s = best_lambda, newx = validation_matrix)
+validation_rss <- sum((validation_outcome - validation_predictions)^2)
+validation_tss <- sum((validation_outcome - mean(validation_outcome))^2)
+validation_r_squared <- 1 - validation_rss / validation_tss
+cat("Validation R-squared:", validation_r_squared, "\n")
+
+# Test set performance
+test_predictions <- predict(ridge_model, s = best_lambda, newx = test_matrix)
+test_rss <- sum((test_outcome - test_predictions)^2)
+test_tss <- sum((test_outcome - mean(test_outcome))^2)
+test_r_squared <- 1 - test_rss / test_tss
+cat("Test R-squared:", test_r_squared, "\n")
+
+# Step 10: Visualize observed vs predicted values for the test set
+test_predictions <- as.vector(test_predictions)
+test_results <- data.frame(Observed = test_outcome, Predicted = test_predictions)
+ggplot(test_results, aes(x = Predicted, y = Observed)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+    labs(title = "Observed vs Predicted Plot - Test Set",
+         x = "Predicted Values",
+         y = "Observed Values") +
+    theme_minimal()
+
+ridge_coefficients <- coef(ridge_model, s = best_lambda)
+retained_variables <- as.data.frame(as.matrix(ridge_coefficients))
+colnames(retained_variables) <- c("Coefficient")
+retained_variables <- retained_variables[retained_variables$Coefficient != 0, , drop = FALSE]
+print(retained_variables)
+```
+```{r}
+#Withdrawl rate to categorical
+
+# Load necessary libraries
+library(dplyr)
+library(caret)
+library(glmnet)
+library(ggplot2)
+library(pROC)
+
+
+# Step 1: Read and Preprocess the Data
+data <- read_excel("Cleaned_Clinical_Trial_Data.xlsx", 
+    col_types = c("text", "numeric", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric"))
+
+# Add Death Rate Column
+if ("Withdrew_Due_To_Death" %in% colnames(data) & "Number_Enrolled_In_Trial" %in% colnames(data)) {
+  data <- data %>%
+    mutate(death_rate = ifelse(Number_Enrolled_In_Trial > 0,
+                               Withdrew_Due_To_Death / Number_Enrolled_In_Trial,
+                               NA))
+  cat("Death rate column added successfully.\n")
+} else {
+  stop("Columns 'Withdrew_Due_To_Death' or 'Number_Enrolled_In_Trial' are not present in the dataset.")
+}
+
+# Variables to exclude
+excluded_vars <- c("Trial_number",
+    "Withdrawl_Rate_Without_Clear_Reason_In_Control_Arm",
+    "Unspecified_Loss_To_F/U",
+    "Total_N_For_Other_Reasonsof_Withdrawl",
+    "Number_Withdrew_From_Control_Arm",
+    "Number_Withdrew_From_Control_Arm_Due_To_Adverse_Event",
+    "Number_Withdrew_From_Control_Arm_Due_To_Progression_Of_Dz",
+    "Number_Withdrew_From_Control_Arm_Due_Patient_Withdrawl_Of_Consent",
+    "Total_Withdrawl/Discontinuation",
+    "Total_Withdrawl_Of_Patient_Consent_W/O_Clear_Reasons",
+    "Total_Withdrew_Due_To_Progression_Of_Dz",
+    "Total_Withdrawl_Due_To_Complicating_Medical_Disease",
+    "Total_Withdrawl__To_Seek_Alternative_Tx",
+    "Total_Investigator_Initated_Withdrawl_Due_To_No_Longer_Meeting_Study_Eligibility_Criteria",
+    "Withdrew_By_Sponser_Due_To_Non-Compliance",
+    "Number_Withdrew_From_Treatment_Arm",
+    "Withdrew_Due_To_Death",
+    "Treatment_Related_Discontinuation__In_Control_Arm",
+    "Number_Withdrew_From_Treatment_Arm_Due_To_Progression_Of_Disease",
+    "Number_Withdrew_From_Treatment_Arm_Due_Patient_Withdrawl_Of_Consent"
+)
+
+# Step 2: Rename target column to `outcome` and binarize it
+if ("Withdrawl_Rate_Without_Clear_Reason_Interventional_Arm" %in% colnames(data)) {
+  data <- data %>%
+    rename(outcome = Withdrawl_Rate_Without_Clear_Reason_Interventional_Arm) %>%
+    mutate(outcome = ifelse(outcome <= 0.1, "Low (<0.1)", "High (>0.1)"))
+} else {
+  stop("The target variable `Withdrawl_Rate_Without_Clear_Reason_Interventional_Arm` is not found in the dataset.")
+}
+
+# Convert outcome to a factor
+data$outcome <- as.factor(data$outcome)
+
+# Step 3: Preprocess the dataset
+# Drop excluded variables
+data <- data %>% select(-one_of(excluded_vars))
+
+# Split dataset into training (80%), validation (10%), and test (10%) sets
+set.seed(123)
+trainIndex <- createDataPartition(data$outcome, p = 0.8, list = FALSE)
+train_data <- data[trainIndex, ]
+remaining_data <- data[-trainIndex, ]
+
+set.seed(123)
+valIndex <- createDataPartition(remaining_data$outcome, p = 0.5, list = FALSE)
+validation_data <- remaining_data[valIndex, ]
+test_data <- remaining_data[-valIndex, ]
+
+cat("Training set size:", nrow(train_data), "\n")
+cat("Validation set size:", nrow(validation_data), "\n")
+cat("Test set size:", nrow(test_data), "\n")
+
+# Step 4: Convert categorical columns to factors
+categorical_columns <- c(
+    "Randomized?", "Study_Type", "Control_Group", "Type_Of_Drug_Control",
+    "Mono_Or_Combo_Therapy_In_Control_Arm", "Mono_Or_Combo_Therapy_In_Interventional_Arm",
+    "Type_Of_Drug_Interventional", "Subtype", "Blinding_Practice",
+    "Lines_Of_Treatment", "Disease_Status", "Sponser", "Location_Of_Trial",
+    "Single_Site_Or_Multi_Site", "Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal",
+    "Data_Availability_After_Withdrawl", "Contact_Patients_Lost_To_F/U", "Encouragement",
+    "Home_Nursing", "No_Mitigation_Stratigies", "Patient_Education",
+    "Protocol_Amendments", "Supportive_Care", "Telemedicine", "Non-Specific_Effort",
+    "Unblinding_Or_Cross-Over", "Dosing_Or_Schedule_Adjustments",
+    "Continued_Tx_After_Withdrawl_Or_Re-Challenge"
+)
+
+# Convert to factors
+train_data[categorical_columns] <- lapply(train_data[categorical_columns], as.factor)
+validation_data[categorical_columns] <- lapply(validation_data[categorical_columns], as.factor)
+test_data[categorical_columns] <- lapply(test_data[categorical_columns], as.factor)
+
+# Ensure consistent levels between datasets
+match_levels <- function(reference_data, target_data) {
+  for (col in colnames(reference_data)) {
+    if (is.factor(reference_data[[col]]) && col %in% colnames(target_data)) {
+      target_data[[col]] <- factor(target_data[[col]], levels = levels(reference_data[[col]]))
+    }
+  }
+  return(target_data)
+}
+validation_data <- match_levels(train_data, validation_data)
+test_data <- match_levels(train_data, test_data)
+
+# Step 5: Create dummy variables
+dummy <- dummyVars(" ~ .", data = train_data)
+train_data_numeric <- as.data.frame(predict(dummy, newdata = train_data))
+validation_data_numeric <- as.data.frame(predict(dummy, newdata = validation_data))
+test_data_numeric <- as.data.frame(predict(dummy, newdata = test_data))
+
+# Impute missing values in all datasets
+preProc <- preProcess(train_data_numeric, method = "medianImpute")  # Create preprocessing object
+train_data_numeric <- predict(preProc, train_data_numeric)
+validation_data_numeric <- predict(preProc, validation_data_numeric)
+test_data_numeric <- predict(preProc, test_data_numeric)
+
+# Remove rows with NA in outcome
+train_data <- train_data[!is.na(train_data$outcome), ]
+validation_data <- validation_data[!is.na(validation_data$outcome), ]
+test_data <- test_data[!is.na(test_data$outcome), ]
+
+# Recreate dummy variables
+dummy <- dummyVars(" ~ .", data = train_data)
+train_data_numeric <- as.data.frame(predict(dummy, newdata = train_data))
+validation_data_numeric <- as.data.frame(predict(dummy, newdata = validation_data))
+test_data_numeric <- as.data.frame(predict(dummy, newdata = test_data))
+
+# Impute missing values using preProcess
+library(caret)
+
+# Impute missing values in training, validation, and test datasets
+preProc <- preProcess(train_data_numeric, method = "medianImpute")
+train_data_numeric <- predict(preProc, train_data_numeric)
+validation_data_numeric <- predict(preProc, validation_data_numeric)
+test_data_numeric <- predict(preProc, test_data_numeric)
+
+# Check for remaining missing values
+cat("Remaining missing values in training data:", sum(is.na(train_data_numeric)), "\n")
+cat("Remaining missing values in validation data:", sum(is.na(validation_data_numeric)), "\n")
+cat("Remaining missing values in test data:", sum(is.na(test_data_numeric)), "\n")
+
+# Check for any remaining NA values
+cat("Remaining missing values in training data:", sum(is.na(train_data_numeric)), "\n")
+cat("Remaining missing values in validation data:", sum(is.na(validation_data_numeric)), "\n")
+cat("Remaining missing values in test data:", sum(is.na(test_data_numeric)), "\n")
+
+# Step 6: Fit Logistic Ridge Regression Model
+set.seed(123)
+cv_glmnet <- cv.glmnet(
+    as.matrix(train_data_numeric), as.numeric(train_data$outcome) - 1,
+    alpha = 0,  # Ridge regression
+    family = "binomial",
+    lambda = 10^seq(10, -2, length = 100),
+    nfolds = 10
+)
+
+# Optimal lambda
+best_lambda <- cv_glmnet$lambda.min
+cat("Best lambda for logistic ridge regularization:", best_lambda, "\n")
+
+# Final logistic ridge regression model
+logistic_model <- glmnet(
+    as.matrix(train_data_numeric), as.numeric(train_data$outcome) - 1,
+    alpha = 0,
+    family = "binomial",
+    lambda = best_lambda
+)
+
+# Step 7: Evaluate Model Performance
+# Training set performance
+train_predictions <- predict(logistic_model, newx = as.matrix(train_data_numeric), s = best_lambda, type = "response")
+train_class <- ifelse(train_predictions > 0.5, "High (>0.1)", "Low (<0.1)")
+train_accuracy <- mean(train_class == as.character(train_data$outcome))
+cat("Training accuracy:", train_accuracy, "\n")
+
+# Validation set performance
+validation_predictions <- predict(logistic_model, newx = as.matrix(validation_data_numeric), s = best_lambda, type = "response")
+validation_class <- ifelse(validation_predictions > 0.5, "High (>0.1)", "Low (<0.1)")
+validation_accuracy <- mean(validation_class == as.character(validation_data$outcome))
+cat("Validation accuracy:", validation_accuracy, "\n")
+
+# Test set performance
+test_predictions <- predict(logistic_model, newx = as.matrix(test_data_numeric), s = best_lambda, type = "response")
+test_class <- ifelse(test_predictions > 0.5, "High (>0.1)", "Low (<0.1)")
+test_accuracy <- mean(test_class == as.character(test_data$outcome))
+cat("Test accuracy:", test_accuracy, "\n")
+
+# Step 8: Visualize ROC Curve for Test Set
+library(pROC)
+test_roc <- roc(as.numeric(test
+
+
+```
+```{r}
+
+#Random Forest approach
+# Load necessary libraries
+library(dplyr)
+library(caret)
+library(randomForest)
+library(ggplot2)
+
+# Step 1: Read and Preprocess the Data
+data <- read_excel("Cleaned_Clinical_Trial_Data.xlsx", 
+    col_types = c("text", "numeric", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric"))
+
+# Add Death Rate Column
+if ("Withdrew_Due_To_Death" %in% colnames(data) & "Number_Enrolled_In_Trial" %in% colnames(data)) {
+  data <- data %>%
+    mutate(death_rate = ifelse(Number_Enrolled_In_Trial > 0,
+                               Withdrew_Due_To_Death / Number_Enrolled_In_Trial,
+                               NA))
+  cat("Death rate column added successfully.\n")
+} else {
+  stop("Columns 'Withdrew_Due_To_Death' or 'Number_Enrolled_In_Trial' are not present in the dataset.")
+}
+
+# Variables to exclude
+excluded_vars <- c("Trial_number",
+    "Withdrawl_Rate_Without_Clear_Reason_In_Control_Arm",
+    "Withdrawl_Rate_Without_Clear_Reason_Interventional_Arm",
+    "Unspecified_Loss_To_F/U",
+    "Total_N_For_Other_Reasonsof_Withdrawl",
+    "Number_Withdrew_From_Control_Arm",
+    "Number_Withdrew_From_Control_Arm_Due_To_Adverse_Event",
+    "Number_Withdrew_From_Control_Arm_Due_To_Progression_Of_Dz",
+    "Number_Withdrew_From_Control_Arm_Due_Patient_Withdrawl_Of_Consent",
+    "Total_Withdrawl/Discontinuation",
+    "Total_Withdrawl_Of_Patient_Consent_W/O_Clear_Reasons",
+    "Total_Withdrew_Due_To_Progression_Of_Dz",
+    "Total_Withdrawl_Due_To_Complicating_Medical_Disease",
+    "Total_Withdrawl__To_Seek_Alternative_Tx",
+    "Total_Investigator_Initated_Withdrawl_Due_To_No_Longer_Meeting_Study_Eligibility_Criteria",
+    "Withdrew_By_Sponser_Due_To_Non-Compliance",
+    "Number_Withdrew_From_Treatment_Arm",
+    "Withdrew_Due_To_Death",
+    "Treatment_Related_Discontinuation__In_Control_Arm",
+    "Number_Withdrew_From_Treatment_Arm_Due_To_Progression_Of_Disease",
+    "Number_Withdrew_From_Treatment_Arm_Due_Patient_Withdrawl_Of_Consent"
+)
+
+# Step 2: Rename target column to `outcome`
+if ("Total_Withdrawl_Rate_Without_Clear_Reason" %in% colnames(data)) {
+  data <- data %>%
+    rename(outcome = Total_Withdrawl_Rate_Without_Clear_Reason)
+} else if (!"outcome" %in% colnames(data)) {
+  stop("The target variable `outcome` or `Total_Withdrawl_Rate_Without_Clear_Reason` is not found in the dataset.")
+}
+
+# Handle missing values
+data <- data %>%
+    filter(!is.na(outcome))
+
+# Ensure `outcome` is numeric
+if (!is.numeric(data$outcome)) {
+  data$outcome <- as.numeric(data$outcome)
+}
+
+# Ensure Follow_Up_Period_Years is numeric
+if (!is.numeric(data$Follow_Up_Period_Years)) {
+    data$Follow_Up_Period_Years <- as.numeric(data$Follow_Up_Period_Years)
+}
+
+# Step 3: Split dataset into training, validation, and test sets
+set.seed(123)
+trainIndex <- createDataPartition(data$outcome, p = 0.8, list = FALSE)
+train_data <- data[trainIndex, ]
+remaining_data <- data[-trainIndex, ]
+
+set.seed(123)
+valIndex <- createDataPartition(remaining_data$outcome, p = 0.5, list = FALSE)
+validation_data <- remaining_data[valIndex, ]
+test_data <- remaining_data[-valIndex, ]
+
+# Step 4: Separate predictors and outcome
+train_outcome <- train_data$outcome
+validation_outcome <- validation_data$outcome
+test_outcome <- test_data$outcome
+
+train_data <- train_data %>% select(-outcome)
+validation_data <- validation_data %>% select(-outcome)
+test_data <- test_data %>% select(-outcome)
+
+# Remove excluded variables
+train_data <- train_data %>% select(-one_of(excluded_vars))
+validation_data <- validation_data %>% select(-one_of(excluded_vars))
+test_data <- test_data %>% select(-one_of(excluded_vars))
+
+problematic_columns <- sapply(train_data, function(x) is.factor(x) && length(unique(x)) < 2)
+if (any(problematic_columns)) {
+    cat("Columns with fewer than 2 levels detected and removed:\n")
+    print(names(problematic_columns[problematic_columns]))
+    train_data <- train_data[, !problematic_columns]
+    validation_data <- validation_data[, !problematic_columns]
+    test_data <- test_data[, !problematic_columns]
+}
+
+
+# Step 5: Impute missing values and create dummy variables
+dummy <- dummyVars(" ~ .", data = train_data)
+train_data_numeric <- as.data.frame(predict(dummy, newdata = train_data))
+validation_data_numeric <- as.data.frame(predict(dummy, newdata = validation_data))
+
+
+# Function to add missing columns with default values (0) to match reference data
+add_missing_columns <- function(reference_data, target_data) {
+  missing_cols <- setdiff(names(reference_data), names(target_data))
+  for (col in missing_cols) {
+    target_data[[col]] <- 0  # Add missing columns with default value 0
+  }
+  # Reorder columns to match reference data
+  target_data <- target_data[, names(reference_data), drop = FALSE]
+  return(target_data)
+}
+
+# Add missing columns to validation and test datasets
+validation_data_numeric <- add_missing_columns(train_data_numeric, validation_data_numeric)
+test_data_numeric <- add_missing_columns(train_data_numeric, test_data_numeric)
+
+preProc <- preProcess(train_data_numeric, method = "medianImpute")
+train_data_numeric <- predict(preProc, train_data_numeric)
+validation_data_numeric <- predict(preProc, validation_data_numeric)
+test_data_numeric <- predict(preProc, test_data_numeric)
+
+# Step 6: Fit Random Forest Model
+set.seed(123)
+rf_model <- randomForest(
+    x = train_data_numeric,
+    y = train_outcome,
+    ntree = 500,
+    mtry = floor(sqrt(ncol(train_data_numeric))),
+    importance = TRUE
+)
+
+# Step 7: Evaluate Model Performance
+# Training set predictions
+train_predictions <- predict(rf_model, newdata = train_data_numeric)
+train_r_squared <- 1 - sum((train_outcome - train_predictions)^2) / sum((train_outcome - mean(train_outcome))^2)
+cat("Training R-squared:", train_r_squared, "\n")
+
+# Validation set predictions
+validation_predictions <- predict(rf_model, newdata = validation_data_numeric)
+validation_r_squared <- 1 - sum((validation_outcome - validation_predictions)^2) / sum((validation_outcome - mean(validation_outcome))^2)
+cat("Validation R-squared:", validation_r_squared, "\n")
+
+# Test set predictions
+test_predictions <- predict(rf_model, newdata = test_data_numeric)
+test_r_squared <- 1 - sum((test_outcome - test_predictions)^2) / sum((test_outcome - mean(test_outcome))^2)
+cat("Test R-squared:", test_r_squared, "\n")
+
+# Step 8: Feature Importance
+importance_values <- importance(rf_model)
+cat("Feature importance:\n")
+print(importance_values)
+
+# Step 9: Visualize Observed vs Predicted Values
+test_results <- data.frame(Observed = test_outcome, Predicted = test_predictions)
+ggplot(test_results, aes(x = Predicted, y = Observed)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+    labs(title = "Observed vs Predicted Plot - Test Set",
+         x = "Predicted Values",
+         y = "Observed Values") +
+    theme_minimal()
+```
+
+

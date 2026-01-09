@@ -1,0 +1,37 @@
+---
+title: "ctDNA_Share"
+author: "Alex Karol"
+date: "2025-10-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# ==============================
+# Setup
+# ==============================
+# Keep paths stable without setwd()
+knitr::opts_knit$set(root.dir = "~/R")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Core libraries (loaded once)
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(knitr)
+  library(kableExtra)
+})
+
+# Cohort sizes (for ≈expected scaling)
+TOTAL_N    <- 310  # Full target cohort
+SCREENED_N <- 108  # Subset with current data
+```
+
+```{r test}
+# Test chunk
+print("This is a test")
+```

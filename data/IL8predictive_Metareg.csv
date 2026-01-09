@@ -1,0 +1,10 @@
+﻿Study_ID,"Cytokine (if multiple, each row gets it's own cytokine)",Type of Biomarker,LogHR_OS,SE_OS,IL8_Cutoff_pgmL,Time of cytokine assesment
+Carril-Ajuria 2022-2,IL-8,Predictive,-0.438254931,0.692946174,15.9,baseline (prior to first dose)
+Schalper 2020-1,IL-8,Predictive,-0.947789399,0.178221083,23,baseline
+Schalper 2020-2,IL-8,Predictive,-0.722705983,0.155844154,23,baseline
+Schalper 2020-3,IL-8,Predictive,-1.118414916,0.185651201,23,baseline
+Schalper 2020-4,IL-8,Predictive,-0.940007258,0.153519745,23,baseline
+Schalper 2020-5,IL-8,Predictive,-0.609765572,0.221000869,23,baseline
+Schalper 2020-6,IL-8,Predictive,-0.641853886,0.147337355,23,baseline
+Shi 2021-3,IL-8,Predictive,-1.441492522,1.106738078,76,within 7 days of therapy initiation
+Shi 2021-6,IL-8,Predictive,-0.59663628,0.490498537,4.9,0-7d prior to first dose and during treatment 

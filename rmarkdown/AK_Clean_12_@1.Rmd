@@ -1,0 +1,74 @@
+---
+title: "AK_Clean"
+author: "Alex Karol"
+date: "2024-12-21"
+output: html_document
+---
+
+
+```{r, echo=FALSE}
+
+#Packages load
+
+install.packages("readxl")
+install.packages("writexl")
+install.packages("kableExtra")
+install.packages("tidyr")
+install.packages("car")
+install.packages("GGally")
+install.packages("mgcv")
+install.packages("glmnet")
+install.packages("openxlsx")
+install.packages("caret")
+install.packages("tible")
+
+
+```
+
+
+```{r, echo=FALSE}
+
+library(tidyr)
+library(readxl)
+library(dplyr)
+library(kableExtra)
+library(readxl)
+library(dplyr)
+library(writexl)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(GGally)
+
+```
+
+```{r, echo=FALSE}
+
+#Load data
+
+# Set the file path
+file_path <- "AK_Clean.xlsx"
+setwd("~/R")
+getwd()
+
+
+
+# Read the Excel file from the specified path
+AK_Clean <- read_excel("AK_Clean.xlsx", col_types = c("text", 
+"numeric", "numeric", "numeric", "numeric", 
+ "numeric", "numeric", "numeric", "numeric", 
+"numeric", "numeric", "text", "numeric", 
+ "numeric", "text", "text", "numeric", 
+"numeric", "text", "text", "text", "numeric", 
+"numeric", "numeric", "numeric", "numeric", 
+"numeric", "numeric", "numeric", "numeric", 
+"numeric", "numeric", "numeric", "numeric", 
+"numeric", "numeric", "numeric", "numeric", 
+"numeric", "numeric", "numeric", "numeric", 
+"numeric", "numeric", "numeric", "numeric", 
+"numeric", "numeric", "text", "text"))
+
+# View the first few rows of the data to confirm it's loaded correctly
+head(AK_Clean)
+```
+

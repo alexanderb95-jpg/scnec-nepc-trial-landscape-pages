@@ -1,0 +1,1087 @@
+---
+title: "ctDNA_Swimmer_UTUC"
+author: "Alex Karol"
+date: "2025-11-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# ==============================
+# Setup
+# ==============================
+# Keep paths stable without setwd()
+knitr::opts_knit$set(root.dir = "~/R")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Core libraries (loaded once)
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(knitr)
+  library(kableExtra)
+  library(ggplot2)
+  library(patchwork)
+})
+
+# Cohort sizes (for ≈expected scaling)
+TOTAL_N    <- 310  # Full target cohort
+SCREENED_N <- 108  # Subset with current data
+
+# ---- Helpers ----
+# Print tibble/data.frame safely with n control
+safe_print_tbl <- function(x, n = 50, ...) {
+  if (inherits(x, "tbl_df")) print(x, n = n, ...) else print(tibble::as_tibble(x), n = n, ...)
+}
+
+# Robust date parser: handles Excel serials & common strings
+as_date_safe <- function(x) {
+  v <- as.character(x)
+  num <- suppressWarnings(as.numeric(v))
+  out <- rep(as.Date(NA), length(v))
+  # Excel serials (roughly 1955–2064)
+  is_serial <- !is.na(num) & num > 20000 & num < 60000
+  out[is_serial] <- as.Date(num[is_serial], origin = "1899-12-30")
+  # Strings
+  left <- !is_serial
+  if (any(left)) {
+    parsed <- suppressWarnings(parse_date_time(v[left], orders = c("Y-m-d","m/d/Y","d/m/Y","m/d/y","d/m/y","Ymd"), tz = "UTC"))
+    out[left] <- as.Date(parsed)
+  }
+  # Clamp to reasonable range
+  bad <- is.na(out) | year(out) < 2000 | year(out) > 2100
+  out[bad] <- as.Date(NA)
+  out
+}
+
+safe_min_date <- function(x) { dx <- as_date_safe(x); if (all(is.na(dx))) as.Date(NA) else suppressWarnings(min(dx, na.rm = TRUE)) }
+safe_max_date <- function(x) { dx <- as_date_safe(x); if (all(is.na(dx))) as.Date(NA) else suppressWarnings(max(dx, na.rm = TRUE)) }
+
+# Build long ctDNA (values + dates) from wide columns
+build_ctdna_long <- function(dat, id_col) {
+  val <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+$")) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp", values_to = "ctdna_value_raw") %>%
+    mutate(ctdna_value = suppressWarnings(as.numeric(gsub("^<\\s*", "", gsub(",", "", as.character(ctdna_value_raw))))) )
+  dt  <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+_date$")) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp_date", values_to = "ctdna_date_raw")
+  out <- val %>%
+    mutate(tp_idx = as.integer(str_extract(tp, "\\d+"))) %>%
+    left_join(dt %>% mutate(tp_idx = as.integer(str_extract(tp_date, "\\d+"))) %>% select(all_of(id_col), tp_idx, ctdna_date_raw),
+              by = c(id_col, "tp_idx")) %>%
+    mutate(ctdna_date = as_date_safe(ctdna_date_raw)) %>%
+    filter(!is.na(ctdna_date)) %>%
+    select(all_of(id_col), ctdna_date, ctdna_value)
+  out
+}
+
+# Clean/harmonize regimen names and settings
+clean_regimen <- function(x) {
+  y <- tolower(str_squish(x))
+  case_when(
+    str_detect(y, "enfortumab.*pembrolizumab|\\bev\\b.*\\bpemb|\\bev/pembro") ~ "Enfortumab Vedotin + Pembrolizumab",
+    str_detect(y, "gem.*cis.*nivo")                                              ~ "Gemcitabine + Cisplatin + Nivolumab",
+    str_detect(y, "gem.*cis")                                                    ~ "Gemcitabine + Cisplatin",
+    str_detect(y, "gem.*carb")                                                   ~ "Gemcitabine + Carboplatin",
+    str_detect(y, "^nivolumab|\\bnivo\\b")                                     ~ "Nivolumab",
+    str_detect(y, "pembrolizumab|\\bpembro\\b")                               ~ "Pembrolizumab",
+    str_detect(y, "atezolizumab|\\batezo\\b")                                 ~ "Atezolizumab",
+    str_detect(y, "durvalumab|\\bdurva\\b")                                   ~ "Durvalumab",
+    str_detect(y, "clinical trial")                                             ~ "Clinical trial (other)",
+    str_detect(y, "other \\(see notes\\)|^other$")                              ~ "Other (see notes)",
+    TRUE                                                                          ~ str_to_title(y)
+  )
+}
+
+# Categorize therapy type: ICI, ADC, Chemo, or combinations
+categorize_therapy_type <- function(x) {
+  y <- tolower(str_squish(x))
+  has_ici <- str_detect(y, "nivolumab|pembrolizumab|atezolizumab|durvalumab|avelumab|ipi|ipilimumab|tremelimumab|pd-1|pd-l1|ctla-4|checkpoint|immunotherapy")
+  has_adc <- str_detect(y, "enfortumab|vedotin|sacituzumab|govitecan|t-dxd|trastuzumab.*deruxtecan|adc|antibody.*drug.*conjugate")
+  has_chemo <- str_detect(y, "gemcitabine|cisplatin|carboplatin|paclitaxel|docetaxel|vinflunine|methotrexate|doxorubicin|cyclophosphamide|ifosfamide|mvac|ddmvac|chemotherapy|chemo")
+  
+  # Determine category (use & instead of && for vectorized operations)
+  case_when(
+    has_ici & has_adc & has_chemo ~ "ICI+ADC+Chemo",
+    has_ici & has_adc ~ "ICI+ADC",
+    has_ici & has_chemo ~ "ICI+Chemo",
+    has_adc & has_chemo ~ "ADC+Chemo",
+    has_ici ~ "ICI",
+    has_adc ~ "ADC",
+    has_chemo ~ "Chemo",
+    TRUE ~ "Other"
+  )
+}
+
+clean_setting <- function(x) {
+  y <- tolower(str_squish(as.character(x)))
+  case_when(
+    y %in% c("neo","neoadjuvant","neoadjuvant therapy","neoadjuvant systemic therapy") ~ "Neoadjuvant",
+    y %in% c("adjuvant","adjuvant therapy","adjuvant systemic therapy")                   ~ "Adjuvant",
+    y %in% c("palliative","metastatic","1l metastatic","2l metastatic")                  ~ "Palliative",
+    y %in% c("","na","n/a","unknown","other","other (see notes)")                    ~ NA_character_,
+    TRUE ~ str_to_title(y)
+  )
+}
+```
+
+```{r load_and_clean, include=FALSE}
+# ==============================
+# Load and tidy the raw sheet
+# ==============================
+file_path <- "Natera_Sheet_UTUC.xlsx"
+raw <- read_excel(file_path, sheet = "Sheet1", col_names = FALSE)
+
+# Transpose: first column = variable names; columns = patients
+var_names <- raw[[1]]
+dat <- as.data.frame(t(raw[, -1]), stringsAsFactors = FALSE)
+# Make column names unique to avoid duplicate name errors
+colnames(dat) <- make.unique(var_names, sep = "_")
+var_names_unique <- colnames(dat)
+
+# Extract primary site and histology BEFORE cleaning names
+# Row 8 = primary tumor location, Row 16 = histology (in original Excel)
+primary_site_row <- 8
+histology_row <- 16
+
+# Get the column names by position (since make.unique preserves order)
+# Row 8 = primary tumor location, Row 16 = histology
+primary_site_col_name <- if (primary_site_row <= length(var_names_unique)) var_names_unique[primary_site_row] else NULL
+histology_col_name <- if (histology_row <= length(var_names_unique)) var_names_unique[histology_row] else NULL
+
+cat("Primary site column name (row 8, position", primary_site_row, "):", primary_site_col_name, "\n")
+cat("Histology column name (row 16, position", histology_row, "):", histology_col_name, "\n")
+cat("Column exists check - Primary site:", primary_site_col_name %in% names(dat), "\n")
+cat("Column exists check - Histology:", histology_col_name %in% names(dat), "\n")
+
+# Identify patient ID column before cleaning - it's "Record ID (Linking key)"
+id_col_temp <- if ("Record ID (Linking key)" %in% names(dat)) {
+  "Record ID (Linking key)"
+} else if ("record_id_linking_key" %in% names(dat)) {
+  "record_id_linking_key"
+} else {
+  # Try to find patient ID column
+  id_candidates <- names(dat)[str_detect(names(dat), regex("id.*linking|linking.*key|record.*id", ignore_case = TRUE))]
+  if (length(id_candidates) > 0) {
+    id_candidates[1]
+  } else {
+    names(dat)[2]  # Usually second column after "Primary Variables"
+  }
+}
+
+cat("Using patient ID column:", id_col_temp, "\n")
+
+# Extract these columns before cleaning - keep row order intact
+patient_characteristics_pre <- dat %>%
+  mutate(row_num = row_number()) %>%
+  select(row_num, all_of(id_col_temp))
+
+# Add primary site - use column index directly to avoid name issues
+if (!is.null(primary_site_col_name) && primary_site_row <= ncol(dat)) {
+  # Use column index instead of name to be safe
+  primary_site_values <- as.character(dat[[primary_site_row]])
+  # Trim whitespace and handle NA values - but preserve valid values like "Renal Pelvis"
+  primary_site_values <- str_trim(primary_site_values)
+  # Only set to NA if truly empty or "NA" string - preserve all other values
+  primary_site_values[primary_site_values == "" | primary_site_values == "NA" | is.na(primary_site_values)] <- NA_character_
+  
+  # Extract by matching row_num (which is 1-based row index in dat)
+  patient_characteristics_pre <- patient_characteristics_pre %>%
+    mutate(primary_site = ifelse(row_num <= length(primary_site_values), 
+                                 primary_site_values[row_num], 
+                                 NA_character_))
+  
+  # Debug: Check specific patients
+  cat("\nExtraction debug for patients 311, 334, 335:\n")
+  for (pid in c("311", "334", "335")) {
+    pid_match <- patient_characteristics_pre[[id_col_temp]] == pid | 
+                 as.character(patient_characteristics_pre[[id_col_temp]]) == pid |
+                 as.numeric(patient_characteristics_pre[[id_col_temp]]) == as.numeric(pid)
+    if (any(pid_match, na.rm = TRUE)) {
+      idx <- which(pid_match)[1]
+      cat("Patient", pid, "- row_num:", patient_characteristics_pre$row_num[idx], 
+          ", primary_site extracted:", patient_characteristics_pre$primary_site[idx], 
+          ", direct check dat[[8]][", patient_characteristics_pre$row_num[idx], "]:", 
+          as.character(dat[[primary_site_row]][patient_characteristics_pre$row_num[idx]]), "\n")
+    } else {
+      cat("Patient", pid, "not found in patient_characteristics_pre\n")
+    }
+  }
+  
+  cat("Extracted primary site from column index", primary_site_row, ":", primary_site_col_name, "\n")
+  cat("Total primary_site values extracted:", sum(!is.na(patient_characteristics_pre$primary_site)), 
+      "out of", nrow(patient_characteristics_pre), "patients\n")
+} else {
+  patient_characteristics_pre <- patient_characteristics_pre %>%
+    mutate(primary_site = NA_character_)
+  cat("WARNING: Primary site column not found at index", primary_site_row, "!\n")
+}
+
+# Add histology - use column index directly
+if (!is.null(histology_col_name) && histology_row <= ncol(dat)) {
+  # Use column index instead of name to be safe
+  histology_values <- as.character(dat[[histology_row]])
+  patient_characteristics_pre <- patient_characteristics_pre %>%
+    mutate(histology = histology_values[row_num])
+  cat("Extracted histology from column index", histology_row, ":", histology_col_name, "\n")
+} else {
+  patient_characteristics_pre <- patient_characteristics_pre %>%
+    mutate(histology = NA_character_)
+  cat("WARNING: Histology column not found at index", histology_row, "!\n")
+}
+
+# Clean column names to snake_case
+dat <- clean_names(dat)
+
+# Filter out patients with blank/empty Record IDs early in the process
+# This ensures all downstream processing excludes these patients
+id_col_temp_clean <- if ("record_id_linking_key" %in% names(dat)) {
+  "record_id_linking_key"
+} else {
+  # Find the ID column after cleaning
+  id_candidates <- names(dat)[str_detect(names(dat), regex("record.*id|id.*linking|linking.*key", ignore_case = TRUE))]
+  if (length(id_candidates) > 0) {
+    id_candidates[1]
+  } else {
+    names(dat)[2]  # Usually second column
+  }
+}
+
+# Filter out blank/empty/NA Record IDs
+# Keep only rows where the ID is not NA, not empty string, and not "NA"
+dat <- dat %>%
+  mutate(id_check = as.character(.data[[id_col_temp_clean]])) %>%
+  filter(!is.na(id_check)) %>%
+  filter(str_trim(id_check) != "") %>%
+  filter(str_trim(id_check) != "NA") %>%
+  select(-id_check)
+
+cat("Total patients after filtering blank Record IDs:", nrow(dat), "\n")
+cat("Sample patient IDs (first 10):", paste(head(dat[[id_col_temp_clean]], 10), collapse = ", "), "\n")
+cat("Sample patient IDs (last 10):", paste(tail(dat[[id_col_temp_clean]], 10), collapse = ", "), "\n")
+
+# Patient ID (create if missing)
+id_col <- if ("record_id_linking_key" %in% names(dat)) "record_id_linking_key" else {
+  dat$record_id_linking_key <- seq_len(nrow(dat)); "record_id_linking_key"
+}
+
+# Since patient_characteristics_pre already has the patient ID (as id_col_temp),
+# we just need to rename it to match the cleaned id_col name
+# The row order is preserved, so we can directly rename the column
+
+# First, verify what columns we have
+cat("patient_characteristics_pre columns:", paste(names(patient_characteristics_pre), collapse = ", "), "\n")
+cat("id_col_temp:", id_col_temp, "\n")
+cat("id_col (target):", id_col, "\n")
+
+# Rename id_col_temp to id_col if they're different
+if (id_col_temp %in% names(patient_characteristics_pre)) {
+  if (id_col_temp != id_col) {
+    patient_characteristics <- patient_characteristics_pre %>%
+      rename(!!sym(id_col) := !!sym(id_col_temp))
+    cat("Renamed", id_col_temp, "to", id_col, "\n")
+  } else {
+    patient_characteristics <- patient_characteristics_pre
+  }
+} else {
+  # If id_col_temp is not found, try to get it from dat after cleaning
+  dat_with_row <- dat %>%
+    mutate(row_num = row_number())
+  
+  if (id_col %in% names(dat_with_row)) {
+    join_data <- dat_with_row %>% 
+      select(row_num, all_of(id_col))
+    
+    patient_characteristics <- patient_characteristics_pre %>%
+      left_join(join_data, by = "row_num")
+    cat("Joined id_col from dat\n")
+  } else {
+    # Last resort: create sequential ID
+    patient_characteristics <- patient_characteristics_pre %>%
+      mutate(!!sym(id_col) := row_num)
+    cat("Created sequential ID column:", id_col, "\n")
+  }
+}
+
+# Verify we have the required columns
+cat("patient_characteristics columns:", paste(names(patient_characteristics), collapse = ", "), "\n")
+required_cols <- c(id_col, "histology", "primary_site")
+missing_cols <- setdiff(required_cols, names(patient_characteristics))
+if (length(missing_cols) > 0) {
+  cat("ERROR: Missing required columns:", paste(missing_cols, collapse = ", "), "\n")
+  stop("Cannot proceed without required columns")
+}
+
+# Now select the final columns (remove row_num if it exists)
+patient_characteristics <- patient_characteristics %>%
+  select(all_of(id_col), histology, primary_site)
+
+# Convert any *date* columns
+date_cols <- names(dat)[str_detect(names(dat), regex("date", ignore_case = TRUE))]
+dat <- dat %>% mutate(across(all_of(date_cols), as_date_safe))
+
+# Normalize ctDNA value column names (e.g., ct_dna_level13 -> ct_dna_level_13)
+names(dat) <- str_replace_all(names(dat), regex("^ct[_ ]?dna[_ ]?level(\\d+)$", ignore_case = TRUE), "ct_dna_level_\\1")
+
+# Ensure ctDNA numeric columns are numeric
+ctdna_value_cols <- names(dat)[str_detect(names(dat), regex("^ct_dna_level_\\d+$", ignore_case = TRUE))]
+if (length(ctdna_value_cols)) {
+  dat[ctdna_value_cols] <- lapply(dat[ctdna_value_cols], function(x) {
+    y <- gsub(",", "", as.character(x))
+    y <- gsub("^<\\s*", "", y)
+    y[y %in% c("", "NA", "N/A", "na", "n/a", "Not detected", "Undetected", "NEGATIVE", "Negative", "neg", "ND")] <- NA
+    suppressWarnings(as.numeric(y))
+  })
+}
+
+# Build long ctDNA data
+ctdna_long <- build_ctdna_long(dat, id_col)
+
+# Build therapy long data
+therapy_long <- dat %>%
+  select(all_of(id_col), matches("^systemic_therapy_\\d+$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "regimen_raw") %>%
+  mutate(therapy_idx = as.integer(str_extract(var, "\\d+"))) %>%
+  select(-var) %>%
+  filter(!is.na(regimen_raw), regimen_raw != "")
+
+# Get ctDNA timeline per patient
+ctdna_timeline <- ctdna_long %>%
+  group_by(.data[[id_col]]) %>%
+  summarise(
+    first_ctdna_date = min(ctdna_date, na.rm = TRUE),
+    last_ctdna_date = max(ctdna_date, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Get follow-up dates
+follow_up_cols <- names(dat)[str_detect(names(dat), regex("last.*follow.*up.*date|follow.*up.*date|last.*visit.*date", ignore_case = TRUE))]
+
+if (length(follow_up_cols) > 0) {
+  follow_up_dates <- dat %>%
+    select(all_of(id_col), all_of(follow_up_cols[1])) %>%
+    rename(follow_up_date = all_of(follow_up_cols[1])) %>%
+    mutate(follow_up_date = as_date_safe(follow_up_date))
+} else {
+  # Use last ctDNA date as proxy if no follow-up date column
+  follow_up_dates <- ctdna_timeline %>%
+    rename(follow_up_date = last_ctdna_date)
+  cat("Note: Using last ctDNA date as follow-up date proxy\n")
+}
+
+# Build therapy start/end data (needed before calculating first_therapy_start)
+therapy_start_dates <- dat %>%
+  select(all_of(id_col), matches("^systemic_therapy_\\d+_start_date$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "start_date_raw") %>%
+  mutate(therapy_idx = as.integer(str_extract(var, "\\d+"))) %>%
+  select(-var) %>%
+  mutate(start_date = as_date_safe(start_date_raw))
+
+# Get first therapy start date per patient
+first_therapy_start <- therapy_start_dates %>%
+  filter(!is.na(start_date)) %>%
+  group_by(.data[[id_col]]) %>%
+  summarise(first_therapy_start = min(start_date, na.rm = TRUE), .groups = "drop")
+
+# Get first surgery date per patient (for upper tract, this might be nephroureterectomy or other procedures)
+first_surgery_date <- NULL
+surgery_date_cols_temp <- names(dat)[str_detect(names(dat), regex("surgery.*date|surgery_\\d+_date", ignore_case = TRUE))]
+
+if (length(surgery_date_cols_temp) > 0) {
+  surgery_data_temp <- dat %>%
+    select(all_of(id_col), all_of(surgery_date_cols_temp)) %>%
+    pivot_longer(-all_of(id_col), names_to = "surgery_var", values_to = "surgery_date_raw") %>%
+    mutate(surgery_date = as_date_safe(surgery_date_raw)) %>%
+    filter(!is.na(surgery_date)) %>%
+    group_by(.data[[id_col]]) %>%
+    summarise(first_surgery_date = min(surgery_date, na.rm = TRUE), .groups = "drop")
+  
+  first_surgery_date <- surgery_data_temp
+}
+
+# Start with ALL patients from dat, not just those with ctDNA data
+# This ensures patients like 334, 335 are included even if they don't have ctDNA dates
+# Note: blank Record IDs have already been filtered out from dat above
+all_patients <- dat %>%
+  select(all_of(id_col)) %>%
+  distinct()
+
+cat("Total patients for timeline (after blank ID filtering):", nrow(all_patients), "\n")
+
+# Combine patient timeline info and calculate first known event
+# Start with all patients and left join all timeline data
+patient_timeline <- all_patients %>%
+  left_join(ctdna_timeline, by = id_col) %>%
+  left_join(follow_up_dates, by = id_col) %>%
+  left_join(first_therapy_start, by = id_col) %>%
+  {if (!is.null(first_surgery_date)) {
+    left_join(., first_surgery_date, by = id_col)
+  } else {
+    mutate(., first_surgery_date = as.Date(NA))
+  }} %>%
+  mutate(
+    # First known event = minimum of: first ctDNA, first therapy start, first surgery, follow-up start
+    first_known_event = pmin(
+      first_ctdna_date,
+      first_therapy_start,
+      first_surgery_date,
+      follow_up_date,
+      na.rm = TRUE
+    ),
+    # Use follow-up date or last ctDNA date as end anchor
+    time_anchor = coalesce(follow_up_date, last_ctdna_date),
+    # Per-patient bar: time from first known event to last follow-up
+    follow_up_interval_days = as.numeric(time_anchor - first_known_event),
+    follow_up_interval_months = follow_up_interval_days / 30.44
+  ) %>%
+  # Ensure time_anchor and first_known_event are Date objects
+  mutate(
+    time_anchor = as.Date(time_anchor),
+    first_known_event = as.Date(first_known_event),
+    # If time_anchor is missing but first_known_event exists, use first_known_event as anchor
+    # Use case_when or direct assignment to preserve Date class (ifelse converts to numeric)
+    time_anchor = case_when(
+      is.na(time_anchor) & !is.na(first_known_event) ~ first_known_event,
+      TRUE ~ time_anchor
+    )
+  ) %>%
+  # Recalculate intervals - ensure both are Date objects before subtraction
+  mutate(
+    follow_up_interval_days = case_when(
+      !is.na(time_anchor) & !is.na(first_known_event) ~ as.numeric(time_anchor - first_known_event),
+      TRUE ~ NA_real_
+    ),
+    follow_up_interval_months = follow_up_interval_days / 30.44
+  ) %>%
+  # Only filter out patients with NO timeline data at all
+  # Must have at least first_known_event (which means they have at least one date: ctDNA, therapy, surgery, or follow-up)
+  filter(!is.na(first_known_event))
+
+# Debug: Check patients before and after filtering
+cat("\n=== Before filtering patient_timeline ===\n")
+patient_timeline_before_filter <- patient_timeline
+cat("Total patients before filter:", nrow(patient_timeline_before_filter), "\n")
+for (pid in c("311", "334", "335")) {
+  patient_check <- patient_timeline_before_filter %>%
+    filter(.data[[id_col]] == pid | .data[[id_col]] == as.numeric(pid) | as.character(.data[[id_col]]) == pid)
+  if (nrow(patient_check) > 0) {
+    cat("Patient", pid, "BEFORE filter - first_known_event:", as.character(patient_check$first_known_event[1]), 
+        ", primary_site:", patient_check$primary_site[1], "\n")
+  } else {
+    cat("Patient", pid, "NOT FOUND before filter\n")
+  }
+}
+
+# Apply the filter
+patient_timeline <- patient_timeline %>%
+  filter(!is.na(first_known_event))
+
+# Debug: Check patients after filtering
+cat("\n=== After filtering patient_timeline ===\n")
+cat("Total patients after filter:", nrow(patient_timeline), "\n")
+for (pid in c("311", "334", "335")) {
+  patient_check <- patient_timeline %>%
+    filter(.data[[id_col]] == pid | .data[[id_col]] == as.numeric(pid) | as.character(.data[[id_col]]) == pid)
+  if (nrow(patient_check) > 0) {
+    cat("Patient", pid, "AFTER filter - first_known_event:", as.character(patient_check$first_known_event[1]), 
+        ", primary_site:", patient_check$primary_site[1], "\n")
+  } else {
+    cat("Patient", pid, "FILTERED OUT - no first_known_event\n")
+  }
+}
+
+# Get all ctDNA data for all patients (anchored to first known event)
+plot_ctdna <- ctdna_long %>%
+  inner_join(patient_timeline %>% select(all_of(id_col), time_anchor, first_known_event), by = id_col) %>%
+  mutate(
+    # Time from first known event (anchor = 0)
+    months_from_anchor = as.numeric(ctdna_date - first_known_event) / 30.44,
+    ctdna_status = case_when(
+      ctdna_value == 0 ~ "Negative",
+      ctdna_value > 0 ~ "Positive",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# Build therapy end data
+therapy_end_dates <- dat %>%
+  select(all_of(id_col), matches("^systemic_therapy_\\d+_end_date$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "end_date_raw") %>%
+  mutate(therapy_idx = as.integer(str_extract(var, "\\d+"))) %>%
+  select(-var) %>%
+  mutate(end_date = as_date_safe(end_date_raw))
+
+therapy_settings <- dat %>%
+  select(all_of(id_col), matches("^systemic_therapy_\\d+_treatment_setting$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "setting_raw") %>%
+  mutate(therapy_idx = as.integer(str_extract(var, "\\d+"))) %>%
+  select(-var)
+
+# Combine therapy information
+therapy_complete <- therapy_long %>%
+  left_join(therapy_start_dates %>% select(all_of(id_col), therapy_idx, start_date), 
+            by = c(id_col, "therapy_idx")) %>%
+  left_join(therapy_end_dates %>% select(all_of(id_col), therapy_idx, end_date), 
+            by = c(id_col, "therapy_idx")) %>%
+  left_join(therapy_settings %>% select(all_of(id_col), therapy_idx, setting_raw), 
+            by = c(id_col, "therapy_idx")) %>%
+  filter(!is.na(start_date)) %>%
+  mutate(
+    regimen_clean = clean_regimen(regimen_raw),
+    setting_clean = clean_setting(setting_raw),
+    therapy_type = categorize_therapy_type(regimen_raw)
+  )
+
+# Get therapy periods relative to first known event
+therapy_periods <- therapy_complete %>%
+  inner_join(patient_timeline %>% select(all_of(id_col), first_known_event, time_anchor), by = id_col) %>%
+  mutate(
+    start_months = as.numeric(start_date - first_known_event) / 30.44,
+    end_months = case_when(
+      !is.na(end_date) ~ as.numeric(end_date - first_known_event) / 30.44,
+      TRUE ~ NA_real_
+    ),
+    # Clean setting for labeling
+    setting_label = case_when(
+      setting_clean == "Neoadjuvant" ~ "Neoadjuvant",
+      setting_clean == "Adjuvant" ~ "Adjuvant",
+      setting_clean == "Palliative" ~ "Palliative",
+      is.na(setting_clean) | setting_clean == "" ~ "Clinical trial",
+      TRUE ~ "Clinical trial"
+    )
+  ) %>%
+  select(all_of(id_col), start_months, end_months, therapy_type, regimen_clean, setting_clean, setting_label)
+
+# Get surgery dates (relative to first known event)
+surgery_date_cols <- names(dat)[str_detect(names(dat), regex("surgery.*date|surgery_\\d+_date", ignore_case = TRUE))]
+surgery_dates <- NULL
+if (length(surgery_date_cols) > 0) {
+  surgery_dates <- dat %>%
+    select(all_of(id_col), all_of(surgery_date_cols)) %>%
+    pivot_longer(-all_of(id_col), names_to = "surgery_var", values_to = "surgery_date_raw") %>%
+    mutate(surgery_date = as_date_safe(surgery_date_raw)) %>%
+    filter(!is.na(surgery_date)) %>%
+    inner_join(patient_timeline %>% select(all_of(id_col), first_known_event), by = id_col) %>%
+    mutate(surgery_months = as.numeric(surgery_date - first_known_event) / 30.44) %>%
+    select(all_of(id_col), surgery_date, surgery_months)
+  cat("Surgery dates found:", nrow(surgery_dates), "events\n")
+}
+
+# Get radiation dates (relative to first known event)
+rad_start_cols <- names(dat)[str_detect(names(dat), regex("^(radiation|rt).*?(start|date_start|start_date)$", ignore_case = TRUE))]
+radiation_dates <- NULL
+if (length(rad_start_cols) > 0) {
+  radiation_dates <- dat %>%
+    select(all_of(id_col), all_of(rad_start_cols)) %>%
+    pivot_longer(-all_of(id_col), names_to = "rad_var", values_to = "rad_date_raw") %>%
+    mutate(rad_date = as_date_safe(rad_date_raw)) %>%
+    filter(!is.na(rad_date)) %>%
+    inner_join(patient_timeline %>% select(all_of(id_col), first_known_event), by = id_col) %>%
+    mutate(rad_months = as.numeric(rad_date - first_known_event) / 30.44) %>%
+    select(all_of(id_col), rad_date, rad_months)
+  cat("Radiation dates found:", nrow(radiation_dates), "events\n")
+}
+
+# Get metastatic relapse dates (relative to first known event)
+metastatic_relapse_cols <- names(dat)[str_detect(names(dat), regex("metastatic.*relapse.*date|relapse.*date|metastasis.*date", ignore_case = TRUE))]
+metastatic_relapse_dates <- NULL
+if (length(metastatic_relapse_cols) > 0) {
+  metastatic_relapse_dates <- dat %>%
+    select(all_of(id_col), all_of(metastatic_relapse_cols)) %>%
+    pivot_longer(-all_of(id_col), names_to = "relapse_var", values_to = "relapse_date_raw") %>%
+    mutate(relapse_date = as_date_safe(relapse_date_raw)) %>%
+    filter(!is.na(relapse_date)) %>%
+    inner_join(patient_timeline %>% select(all_of(id_col), first_known_event), by = id_col) %>%
+    mutate(relapse_months = as.numeric(relapse_date - first_known_event) / 30.44) %>%
+    select(all_of(id_col), relapse_date, relapse_months)
+  cat("Metastatic relapse dates found:", nrow(metastatic_relapse_dates), "events\n")
+}
+
+# patient_characteristics was already created above with the correct id_col
+# No need to recreate it here - it's already been set up correctly
+
+cat("Extracted histology values for", sum(!is.na(patient_characteristics$histology) & patient_characteristics$histology != "" & patient_characteristics$histology != "NA"), "patients\n")
+cat("Extracted primary site values for", sum(!is.na(patient_characteristics$primary_site) & patient_characteristics$primary_site != "" & patient_characteristics$primary_site != "NA"), "patients\n")
+
+# Debug: Show sample of primary sites and check specific patients
+if (nrow(patient_characteristics) > 0) {
+  sample_primary_sites <- patient_characteristics %>%
+    filter(!is.na(primary_site) & primary_site != "" & primary_site != "NA" & primary_site != "Unknown") %>%
+    head(10)
+  if (nrow(sample_primary_sites) > 0) {
+    cat("Sample primary sites:\n")
+    print(sample_primary_sites %>% select(all_of(id_col), primary_site))
+  }
+  
+  # Check for specific patients
+  for (pid in c("311", "334", "335")) {
+    patient_check <- patient_characteristics %>%
+      filter(.data[[id_col]] == pid | .data[[id_col]] == as.numeric(pid))
+    if (nrow(patient_check) > 0) {
+      cat("Patient", pid, "primary site:", patient_check$primary_site[1], "\n")
+    } else {
+      cat("Patient", pid, "not found in patient_characteristics\n")
+    }
+  }
+  
+  # Show unique primary sites
+  unique_sites <- unique(patient_characteristics$primary_site)
+  cat("Unique primary sites found:", paste(unique_sites[!is.na(unique_sites) & unique_sites != ""], collapse = ", "), "\n")
+}
+
+# Clean up histology and primary_site
+# First, check what we have before cleaning
+cat("\nBefore cleaning - checking patients 311, 334, 335:\n")
+for (pid in c("311", "334", "335")) {
+  patient_check <- patient_characteristics %>%
+    filter(.data[[id_col]] == pid | .data[[id_col]] == as.numeric(pid) | as.character(.data[[id_col]]) == pid)
+  if (nrow(patient_check) > 0) {
+    cat("Patient", pid, "- primary_site before cleaning:", patient_check$primary_site[1], "\n")
+  }
+}
+
+patient_characteristics <- patient_characteristics %>%
+  mutate(
+    histology = ifelse(is.na(histology) | histology == "" | histology == "N/A", "Unknown", as.character(histology)),
+    # Abbreviate urothelial/transitional as urothelial
+    histology = str_replace_all(histology, regex("urothelial/transitional|transitional/urothelial", ignore_case = TRUE), "urothelial"),
+    # Only convert to "Unknown" if truly missing - preserve "Renal Pelvis" and other valid values
+    primary_site = str_trim(as.character(primary_site)),
+    primary_site = ifelse(is.na(primary_site) | primary_site == "" | primary_site == "NA" | primary_site == "N/A", "Unknown", primary_site)
+  ) %>%
+  select(all_of(id_col), histology, primary_site)
+
+# Check after cleaning
+cat("\nAfter cleaning - checking patients 311, 334, 335:\n")
+for (pid in c("311", "334", "335")) {
+  patient_check <- patient_characteristics %>%
+    filter(.data[[id_col]] == pid | .data[[id_col]] == as.numeric(pid) | as.character(.data[[id_col]]) == pid)
+  if (nrow(patient_check) > 0) {
+    cat("Patient", pid, "- primary_site after cleaning:", patient_check$primary_site[1], "\n")
+  } else {
+    cat("Patient", pid, "not found in patient_characteristics after cleaning\n")
+  }
+}
+
+# Include all patients (not just those with systemic therapy)
+# No filtering needed - include all patients with timeline data
+
+# Add histology and primary site to patient timeline
+# Check before join
+cat("\nBefore joining with patient_timeline:\n")
+for (pid in c("311", "334", "335")) {
+  patient_check <- patient_characteristics %>%
+    filter(.data[[id_col]] == pid | .data[[id_col]] == as.numeric(pid) | as.character(.data[[id_col]]) == pid)
+  if (nrow(patient_check) > 0) {
+    cat("Patient", pid, "in patient_characteristics - primary_site:", patient_check$primary_site[1], "\n")
+  }
+  patient_check_timeline <- patient_timeline %>%
+    filter(.data[[id_col]] == pid | .data[[id_col]] == as.numeric(pid) | as.character(.data[[id_col]]) == pid)
+  if (nrow(patient_check_timeline) > 0) {
+    cat("Patient", pid, "in patient_timeline\n")
+  } else {
+    cat("Patient", pid, "NOT in patient_timeline (may be filtered out)\n")
+  }
+}
+
+patient_timeline <- patient_timeline %>%
+  left_join(patient_characteristics, by = id_col) %>%
+  mutate(
+    histology = ifelse(is.na(histology), "Unknown", histology),
+    # Only convert to "Unknown" if truly missing - preserve valid values like "Renal Pelvis"
+    primary_site = ifelse(is.na(primary_site) | primary_site == "", "Unknown", primary_site)
+  )
+
+# Check after join
+cat("\nAfter joining with patient_timeline:\n")
+for (pid in c("311", "334", "335")) {
+  patient_check <- patient_timeline %>%
+    filter(.data[[id_col]] == pid | .data[[id_col]] == as.numeric(pid) | as.character(.data[[id_col]]) == pid)
+  if (nrow(patient_check) > 0) {
+    cat("Patient", pid, "in patient_timeline - primary_site:", patient_check$primary_site[1], "\n")
+  } else {
+    cat("Patient", pid, "NOT in patient_timeline after join\n")
+  }
+}
+
+cat("Total patients with timeline data:", nrow(patient_timeline), "\n")
+cat("Histology types:", paste(unique(patient_timeline$histology), collapse = ", "), "\n")
+```
+
+```{r on_treatment_swimmer_plots}
+# ==============================
+# Create swimmer plots by histology type
+# ==============================
+
+# Debug: Check if Renal Pelvis patients are in patient_timeline
+cat("\n=== Checking Renal Pelvis patients in patient_timeline ===\n")
+for (pid in c("311", "334", "335")) {
+  patient_check <- patient_timeline %>%
+    filter(.data[[id_col]] == pid | .data[[id_col]] == as.numeric(pid) | as.character(.data[[id_col]]) == pid)
+  if (nrow(patient_check) > 0) {
+    cat("Patient", pid, "FOUND in patient_timeline:\n")
+    cat("  Primary site:", patient_check$primary_site[1], "\n")
+    cat("  Histology:", patient_check$histology[1], "\n")
+    cat("  first_known_event:", as.character(patient_check$first_known_event[1]), "\n")
+    cat("  time_anchor:", as.character(patient_check$time_anchor[1]), "\n")
+  } else {
+    cat("Patient", pid, "NOT FOUND in patient_timeline\n")
+    # Check if they're in patient_characteristics
+    char_check <- patient_characteristics %>%
+      filter(.data[[id_col]] == pid | .data[[id_col]] == as.numeric(pid) | as.character(.data[[id_col]]) == pid)
+    if (nrow(char_check) > 0) {
+      cat("  But found in patient_characteristics with primary_site:", char_check$primary_site[1], "\n")
+    }
+  }
+}
+
+# Get unique histology types, excluding "Unknown"
+histology_types <- unique(patient_timeline$histology)
+histology_types <- histology_types[!is.na(histology_types) & histology_types != "" & histology_types != "Unknown"]
+cat("\nCreating plots for histology types:", paste(histology_types, collapse = ", "), "\n")
+cat("Excluding 'Unknown' histology from plots\n")
+
+# Check which histology type contains Renal Pelvis patients
+cat("\nChecking which histology contains Renal Pelvis patients:\n")
+for (hist_type in histology_types) {
+  patients_in_hist <- patient_timeline %>%
+    filter(histology == hist_type) %>%
+    filter(primary_site == "Renal Pelvis" | str_detect(primary_site, regex("renal.*pelvis", ignore_case = TRUE)))
+  if (nrow(patients_in_hist) > 0) {
+    cat("Histology", hist_type, "contains", nrow(patients_in_hist), "Renal Pelvis patients:\n")
+    print(patients_in_hist %>% select(all_of(id_col), primary_site, histology))
+  }
+}
+
+# Check all Renal Pelvis patients regardless of histology
+cat("\nAll Renal Pelvis patients in patient_timeline:\n")
+renal_pelvis_patients <- patient_timeline %>%
+  filter(primary_site == "Renal Pelvis" | str_detect(primary_site, regex("renal.*pelvis", ignore_case = TRUE)))
+if (nrow(renal_pelvis_patients) > 0) {
+  print(renal_pelvis_patients %>% select(all_of(id_col), primary_site, histology, first_known_event))
+} else {
+  cat("No Renal Pelvis patients found!\n")
+}
+
+# Function to create swimmer plot for a specific histology type
+create_histology_plot <- function(histology_name) {
+  # Get patients with this histology
+  patients_this_histology <- patient_timeline %>%
+    filter(histology == histology_name) %>%
+    pull(.data[[id_col]])
+  
+  # Debug: Check if Renal Pelvis patients are in this histology
+  if (histology_name %in% c("urothelial cell carcinoma", "Unknown")) {
+    renal_pelvis_in_hist <- patient_timeline %>%
+      filter(histology == histology_name) %>%
+      filter(primary_site == "Renal Pelvis" | str_detect(primary_site, regex("renal.*pelvis", ignore_case = TRUE))) %>%
+      pull(.data[[id_col]])
+    if (length(renal_pelvis_in_hist) > 0) {
+      cat("Histology", histology_name, "contains", length(renal_pelvis_in_hist), "Renal Pelvis patients:", paste(renal_pelvis_in_hist, collapse = ", "), "\n")
+    }
+  }
+  
+  if (length(patients_this_histology) == 0) return(NULL)
+  
+  # Sample if too many patients - but ALWAYS include Renal Pelvis patients
+  renal_pelvis_pids <- patient_timeline %>%
+    filter(.data[[id_col]] %in% patients_this_histology) %>%
+    filter(primary_site == "Renal Pelvis" | str_detect(primary_site, regex("renal.*pelvis", ignore_case = TRUE))) %>%
+    pull(.data[[id_col]])
+  
+  n_show <- min(30, length(patients_this_histology))
+  if (length(patients_this_histology) > n_show) {
+    set.seed(123)
+    # Ensure Renal Pelvis patients are always included
+    other_patients <- setdiff(patients_this_histology, renal_pelvis_pids)
+    n_other <- n_show - length(renal_pelvis_pids)
+    if (n_other > 0 && length(other_patients) > 0) {
+      sampled_other <- sample(other_patients, size = min(n_other, length(other_patients)), replace = FALSE)
+      patients_this_histology <- c(renal_pelvis_pids, sampled_other)
+    } else {
+      patients_this_histology <- renal_pelvis_pids
+    }
+    cat("Sampled", length(patients_this_histology), "patients for", histology_name, 
+        "(including", length(renal_pelvis_pids), "Renal Pelvis patients)\n")
+  }
+  
+  # Order patients by first known event, then by primary site
+  patient_order <- patient_timeline %>%
+    filter(.data[[id_col]] %in% patients_this_histology) %>%
+    arrange(first_known_event, primary_site, .data[[id_col]]) %>%
+    pull(.data[[id_col]])
+  
+  # Prepare plot data
+  plot_timeline_histology <- patient_timeline %>%
+    filter(.data[[id_col]] %in% patients_this_histology) %>%
+    mutate(
+      patient_id_ordered = factor(.data[[id_col]], levels = patient_order),
+      follow_up_months = as.numeric(time_anchor - first_known_event) / 30.44,
+      # Create label with patient ID and primary site
+      patient_label = paste0(.data[[id_col]], " (", primary_site, ")")
+    )
+  
+  plot_ctdna_histology <- plot_ctdna %>%
+    filter(.data[[id_col]] %in% patients_this_histology) %>%
+    mutate(
+      patient_id_ordered = factor(.data[[id_col]], levels = patient_order),
+      ctdna_detectable = ctdna_value > 0
+    )
+  
+  # Get all therapy periods for these patients
+  plot_therapy_histology <- therapy_periods %>%
+    filter(.data[[id_col]] %in% patients_this_histology) %>%
+    left_join(plot_timeline_histology %>% select(all_of(id_col), follow_up_months), by = id_col) %>%
+    mutate(
+      patient_id_ordered = factor(.data[[id_col]], levels = patient_order),
+      end_months_final = ifelse(is.na(end_months), follow_up_months, end_months),
+      setting_label = case_when(
+        setting_label == "Neoadjuvant" ~ "Neoadjuvant",
+        setting_label == "Adjuvant" ~ "Adjuvant",
+        setting_label == "Palliative" ~ "Palliative",
+        is.na(setting_label) | setting_label == "" ~ "Clinical trial",
+        TRUE ~ "Clinical trial"
+      )
+    )
+  
+  # Get surgery dates
+  plot_surgery_histology <- if (!is.null(surgery_dates) && nrow(surgery_dates) > 0) {
+    surgery_dates %>%
+      filter(.data[[id_col]] %in% patients_this_histology) %>%
+      mutate(patient_id_ordered = factor(.data[[id_col]], levels = patient_order))
+  } else NULL
+  
+  plot_radiation_histology <- if (!is.null(radiation_dates) && nrow(radiation_dates) > 0) {
+    radiation_dates %>%
+      filter(.data[[id_col]] %in% patients_this_histology) %>%
+      mutate(patient_id_ordered = factor(.data[[id_col]], levels = patient_order))
+  } else NULL
+  
+  plot_relapse_histology <- if (!is.null(metastatic_relapse_dates) && nrow(metastatic_relapse_dates) > 0) {
+    metastatic_relapse_dates %>%
+      filter(.data[[id_col]] %in% patients_this_histology) %>%
+      mutate(patient_id_ordered = factor(.data[[id_col]], levels = patient_order))
+  } else NULL
+  
+  # Calculate x-axis limits
+  x_min_data <- c(
+    plot_therapy_histology$start_months,
+    if (!is.null(plot_surgery_histology) && nrow(plot_surgery_histology) > 0) plot_surgery_histology$surgery_months else NULL,
+    if (!is.null(plot_radiation_histology) && nrow(plot_radiation_histology) > 0) plot_radiation_histology$rad_months else NULL,
+    plot_ctdna_histology$months_from_anchor
+  )
+  x_max_data <- c(
+    plot_timeline_histology$follow_up_months,
+    if (!is.null(plot_relapse_histology) && nrow(plot_relapse_histology) > 0) plot_relapse_histology$relapse_months else NULL,
+    plot_therapy_histology$end_months_final
+  )
+  x_min <- floor(min(x_min_data, na.rm = TRUE)) - 3
+  x_max <- ceiling(max(x_max_data, na.rm = TRUE)) + 3
+  x_min <- max(x_min, -12)
+  x_breaks <- seq(floor(x_min / 6) * 6, ceiling(x_max / 6) * 6, by = 6)
+  
+  # Create labels for y-axis with primary site
+  y_labels <- plot_timeline_histology %>%
+    arrange(patient_id_ordered) %>%
+    distinct(patient_id_ordered, primary_site) %>%
+    mutate(y_label = paste0(patient_id_ordered, " (", primary_site, ")")) %>%
+    pull(y_label)
+  
+  # Create plot
+  p <- ggplot() +
+    # Per-patient follow-up interval bars
+    geom_segment(
+      data = plot_timeline_histology,
+      aes(x = 0, xend = follow_up_months,
+          y = patient_id_ordered, yend = patient_id_ordered),
+      linewidth = 3, color = "gray85", alpha = 0.6
+    ) +
+    # Therapy period bars (color by setting)
+    geom_segment(
+      data = plot_therapy_histology,
+      aes(x = start_months, 
+          xend = end_months_final,
+          y = patient_id_ordered, yend = patient_id_ordered,
+          color = setting_label),
+      linewidth = 3.5, alpha = 0.8, lineend = "round"
+    ) +
+    # ctDNA positive markers
+    geom_point(
+      data = plot_ctdna_histology %>% filter(ctdna_detectable),
+      aes(x = months_from_anchor, y = patient_id_ordered),
+      size = 2, shape = 21, fill = "red", color = "white", stroke = 0.3
+    ) +
+    # ctDNA negative markers
+    geom_point(
+      data = plot_ctdna_histology %>% filter(!ctdna_detectable),
+      aes(x = months_from_anchor, y = patient_id_ordered),
+      size = 2, shape = 21, fill = "green3", color = "white", stroke = 0.3
+    ) +
+    # Surgery events
+    {if (!is.null(plot_surgery_histology) && nrow(plot_surgery_histology) > 0) {
+      geom_point(
+        data = plot_surgery_histology,
+        aes(x = surgery_months, y = patient_id_ordered),
+        size = 3.5, shape = 15, fill = "darkblue", color = "darkblue"
+      )
+    }} +
+    # Radiation events
+    {if (!is.null(plot_radiation_histology) && nrow(plot_radiation_histology) > 0) {
+      geom_point(
+        data = plot_radiation_histology,
+        aes(x = rad_months, y = patient_id_ordered),
+        size = 3.5, shape = 17, fill = "darkorange", color = "darkorange"
+      )
+    }} +
+    # Metastatic relapse events
+    {if (!is.null(plot_relapse_histology) && nrow(plot_relapse_histology) > 0) {
+      geom_point(
+        data = plot_relapse_histology,
+        aes(x = relapse_months, y = patient_id_ordered),
+        size = 5, shape = 23, fill = "red3", color = "darkred", stroke = 1.2
+      )
+    }} +
+    # Vertical line at anchor (time anchor = 0)
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.7, alpha = 0.7) +
+    # Color scales for therapy setting
+    scale_color_manual(
+      values = c(
+        "Neoadjuvant" = "#4E79A7",      # Blue
+        "Adjuvant" = "#59A14F",          # Green
+        "Palliative" = "#9C755F",        # Brown/Tan
+        "Clinical trial" = "#F28E2B"      # Orange
+      ),
+      guide = "none"
+    ) +
+    scale_y_discrete(labels = y_labels) +
+    labs(
+      title = paste0(histology_name, " (n = ", length(patient_order), ")"),
+      x = "Time from First Known Event (months)",
+      y = "Patient ID (Primary Site)"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5, margin = margin(b = 5)),
+      axis.text.y = element_text(size = 6, color = "black"),
+      axis.text.x = element_text(size = 9, color = "black"),
+      axis.title = element_text(size = 10, face = "bold"),
+      axis.title.y = element_text(margin = margin(r = 8)),
+      axis.title.x = element_text(margin = margin(t = 8)),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.major.x = element_line(color = "gray92", linewidth = 0.5),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      plot.margin = margin(l = 10, r = 8, t = 8, b = 8)
+    ) +
+    scale_x_continuous(breaks = x_breaks, limits = c(x_min, x_max), expand = c(0.02, 0))
+  
+  return(p)
+}
+
+# Create plots for each histology type
+plots_list <- list()
+for (hist_type in histology_types) {
+  p_histology <- create_histology_plot(hist_type)
+  if (!is.null(p_histology)) {
+    plots_list[[hist_type]] <- p_histology
+  }
+}
+
+# Arrange plots in grid
+if (length(plots_list) > 0) {
+  # Order plots by histology type (alphabetically or by frequency)
+  histology_order <- names(plots_list)[order(names(plots_list))]
+  plots_ordered <- plots_list[histology_order]
+  
+  # Arrange in grid based on number of plots
+  n_plots <- length(plots_ordered)
+  if (n_plots == 1) {
+    combined_plot <- plots_ordered[[1]]
+  } else if (n_plots == 2) {
+    combined_plot <- plots_ordered[[1]] | plots_ordered[[2]]
+  } else if (n_plots == 3) {
+    combined_plot <- (plots_ordered[[1]] | plots_ordered[[2]]) / plots_ordered[[3]]
+  } else if (n_plots == 4) {
+    combined_plot <- (plots_ordered[[1]] | plots_ordered[[2]]) / (plots_ordered[[3]] | plots_ordered[[4]])
+  } else if (n_plots == 5) {
+    # For 5 plots, arrange in a 2x3 grid (2 on top, 3 on bottom, or 3 on top, 2 on bottom)
+    # Put the most important ones (with Renal Pelvis patients) first
+    # Check which plot has Renal Pelvis patients
+    has_renal_pelvis <- sapply(plots_ordered, function(p) {
+      # Check if this plot's data contains Renal Pelvis patients
+      # We'll check by looking at the plot data
+      any(grepl("Renal Pelvis", names(plots_ordered), ignore.case = TRUE))
+    })
+    # Arrange: 3 plots on top row, 2 on bottom row
+    combined_plot <- (plots_ordered[[1]] | plots_ordered[[2]] | plots_ordered[[3]]) / 
+                     (plots_ordered[[4]] | plots_ordered[[5]])
+  } else {
+    # For more than 5, arrange in 3x2 grid (show first 6)
+    combined_plot <- (plots_ordered[[1]] | plots_ordered[[2]] | plots_ordered[[3]]) / 
+                     (plots_ordered[[4]] | plots_ordered[[5]] | plots_ordered[[6]])
+    cat("Note: Showing first 6 histology types. Total available:", n_plots, "\n")
+  }
+  
+  # Create legend plot with visual elements
+  legend_plot <- ggplot() +
+    # ctDNA positive
+    annotate("point", x = 0.1, y = 0.9, size = 3.5, shape = 21, fill = "red", color = "white", stroke = 0.3) +
+    annotate("text", x = 0.25, y = 0.9, label = "ctDNA+", hjust = 0, size = 3.5, vjust = 0.5) +
+    # ctDNA negative
+    annotate("point", x = 0.1, y = 0.8, size = 3.5, shape = 21, fill = "green3", color = "white", stroke = 0.3) +
+    annotate("text", x = 0.25, y = 0.8, label = "ctDNA-", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Surgery
+    annotate("point", x = 0.1, y = 0.7, size = 4, shape = 15, fill = "darkblue", color = "darkblue") +
+    annotate("text", x = 0.25, y = 0.7, label = "Surgery", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Radiation
+    annotate("point", x = 0.1, y = 0.6, size = 4, shape = 17, fill = "darkorange", color = "darkorange") +
+    annotate("text", x = 0.25, y = 0.6, label = "Radiation", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Relapse
+    annotate("point", x = 0.1, y = 0.5, size = 5, shape = 23, fill = "red3", color = "darkred", stroke = 1.2) +
+    annotate("text", x = 0.25, y = 0.5, label = "Metastatic relapse", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Therapy settings - Neoadjuvant
+    annotate("segment", x = 0.05, xend = 0.2, y = 0.4, yend = 0.4, linewidth = 4, color = "#4E79A7", alpha = 0.8) +
+    annotate("text", x = 0.25, y = 0.4, label = "Neoadjuvant", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Therapy settings - Adjuvant
+    annotate("segment", x = 0.05, xend = 0.2, y = 0.3, yend = 0.3, linewidth = 4, color = "#59A14F", alpha = 0.8) +
+    annotate("text", x = 0.25, y = 0.3, label = "Adjuvant", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Therapy settings - Palliative
+    annotate("segment", x = 0.05, xend = 0.2, y = 0.2, yend = 0.2, linewidth = 4, color = "#9C755F", alpha = 0.8) +
+    annotate("text", x = 0.25, y = 0.2, label = "Palliative", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Therapy settings - Clinical trial
+    annotate("segment", x = 0.05, xend = 0.2, y = 0.1, yend = 0.1, linewidth = 4, color = "#F28E2B", alpha = 0.8) +
+    annotate("text", x = 0.25, y = 0.1, label = "Clinical trial", hjust = 0, size = 3.5, vjust = 0.5) +
+    xlim(0, 1) +
+    ylim(0, 1) +
+    theme_void() +
+    theme(
+      plot.margin = margin(20, 20, 20, 20),
+      plot.background = element_rect(fill = "white", color = NA)
+    )
+  
+  # Add overall title and combine with legend
+  combined_plot <- combined_plot +
+    plot_annotation(
+      title = "ctDNA dynamics of upper tract urothelial carcinoma patients",
+      subtitle = "Time anchored at first known event (first ctDNA, first therapy start, first surgery, or follow-up start). Separate plots by histology type. Primary tumor site shown in patient labels.",
+      theme = theme(
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 10, hjust = 0.5)
+      )
+    )
+  
+  # Combine plot with legend on the right
+  final_plot <- combined_plot | legend_plot
+  final_plot <- final_plot + plot_layout(widths = c(4, 1))
+  
+  print(final_plot)
+  
+  cat("\nSwimmer plots created for", length(plots_ordered), "histology type(s):", paste(names(plots_ordered), collapse = ", "), "\n")
+} else {
+  cat("\nNo patients found for the specified histology types.\n")
+}
+```

@@ -1,0 +1,800 @@
+---
+title: "Patients Missing Bajorin Risk Factors"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Patients Missing Bajorin Risk Factors
+
+This document identifies patients who were included in the final analysis cohorts for **Question 1 (Baseline ctDNA Prognosis)** and **Question 2 (On-Treatment ctDNA Response)** but did not have Bajorin risk factors (KPS and visceral metastases) available.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, comment = "")
+knitr::opts_knit$set(root.dir = "~/R")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load shared setup
+source("ctDNA_Research_Questions_Shared_Setup.R")
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(knitr)
+  library(kableExtra)
+})
+```
+
+```{r load_data, include=FALSE}
+# Load minimal data
+data_list <- load_minimal_data(include_survival = TRUE)
+dat_combined <- data_list$dat_combined
+ctdna_long <- data_list$ctdna_long
+survival_data <- data_list$survival_data
+```
+
+```{r load_bajorin_data, include=FALSE}
+# ====================================================================================
+# Load Bajorin Risk Factors Data (KPS and Visceral Metastases)
+# ====================================================================================
+bajorin_data <- tryCatch({
+  bajorin_raw <- read_excel("ctDNA_Bajorin_Lexi.xlsx", sheet = 1, skip = 1)
+  
+  cat("Bajorin file loaded:\n")
+  cat("  Total rows:", nrow(bajorin_raw), "\n")
+  cat("  Total columns:", ncol(bajorin_raw), "\n")
+  
+  # Check if we have enough columns (need at least 6: Patient ID, Therapy Line, KPS, Visceral Mets)
+  if (nrow(bajorin_raw) > 0 && ncol(bajorin_raw) >= 6) {
+    # Check column types
+    cat("  Column 2 (Patient ID) class:", class(bajorin_raw[[2]]), "\n")
+    cat("  Column 4 (Therapy Line) class:", class(bajorin_raw[[4]]), "\n")
+    cat("  Column 5 (KPS) class:", class(bajorin_raw[[5]]), "\n")
+    cat("  Column 6 (Visceral Mets) class:", class(bajorin_raw[[6]]), "\n")
+    
+    bajorin_clean <- tibble(
+      patient_id_raw = bajorin_raw[[2]],  # Column 2: Patient ID
+      therapy_line_raw = bajorin_raw[[4]],  # Column 4: Therapy Line
+      kps_raw = bajorin_raw[[5]],  # Column 5: KPS (not column 6!)
+      visceral_mets_raw = bajorin_raw[[6]]  # Column 6: Visceral Mets (not column 7!)
+    ) %>%
+      # Convert to character for processing
+      mutate(
+        patient_id_raw = as.character(patient_id_raw),
+        therapy_line_raw = as.character(therapy_line_raw),
+        kps_raw = as.character(kps_raw),
+        visceral_mets_raw = as.character(visceral_mets_raw)
+      ) %>%
+      filter(!str_detect(tolower(patient_id_raw), "patient|id|screener|mrn|therapy")) %>%
+      filter(!is.na(patient_id_raw), patient_id_raw != "", patient_id_raw != "NA") %>%
+      mutate(
+        # Convert patient_id to character - handle both numeric and character inputs
+        # If numeric (like 22, 179), convert to character; if already character, keep as is
+        # Remove any decimal points if Excel stored as numeric (e.g., 22.0 -> 22)
+        patient_id_char = as.character(patient_id_raw),
+        # Normalize: if it's a pure number (possibly with .0), convert to integer string
+        patient_id_char = ifelse(!is.na(suppressWarnings(as.numeric(patient_id_char))) & 
+                                 str_detect(patient_id_char, "^\\.?\\d+\\.?0*$"), 
+                                 as.character(as.integer(suppressWarnings(as.numeric(patient_id_char)))), 
+                                 patient_id_char),
+        patient_id = str_trim(patient_id_char),
+        therapy_line = case_when(
+          str_detect(toupper(str_trim(therapy_line_raw)), "^1L$") ~ 1,
+          str_detect(toupper(str_trim(therapy_line_raw)), "^2L$") ~ 2,
+          str_detect(toupper(str_trim(therapy_line_raw)), "^3L$") ~ 3,
+          str_detect(toupper(str_trim(therapy_line_raw)), "^4L\\+") ~ 4,
+          str_detect(str_trim(therapy_line_raw), "^\\d+") ~ as.numeric(str_extract(str_trim(therapy_line_raw), "^\\d+")),
+          # Also handle if therapy_line_raw is already a number
+          !is.na(suppressWarnings(as.numeric(str_trim(therapy_line_raw)))) ~ as.numeric(str_trim(therapy_line_raw)),
+          TRUE ~ NA_real_
+        ),
+        kps_binary = case_when(
+          str_trim(kps_raw) == "1" | (!is.na(suppressWarnings(as.numeric(kps_raw))) & as.numeric(kps_raw) == 1) ~ 1,
+          str_trim(kps_raw) == "0" | (!is.na(suppressWarnings(as.numeric(kps_raw))) & as.numeric(kps_raw) == 0) ~ 0,
+          TRUE ~ NA_real_
+        ),
+        visceral_mets_binary = case_when(
+          str_detect(tolower(str_trim(visceral_mets_raw)), "^yes$|^y$") ~ 1,
+          str_detect(tolower(str_trim(visceral_mets_raw)), "^no$|^n$") ~ 0,
+          TRUE ~ NA_real_
+        )
+      ) %>%
+      filter(!is.na(patient_id), !is.na(therapy_line), patient_id != "") %>%
+      select(patient_id, therapy_line, kps_binary, visceral_mets_binary)
+    
+    cat("Loaded Bajorin data:\n")
+    cat("  Total observations:", nrow(bajorin_clean), "\n")
+    cat("  Unique patients:", length(unique(bajorin_clean$patient_id)), "\n")
+    cat("  Observations with KPS:", sum(!is.na(bajorin_clean$kps_binary)), "\n")
+    cat("  Observations with Visceral Mets:", sum(!is.na(bajorin_clean$visceral_mets_binary)), "\n")
+    cat("  Observations with both:", sum(!is.na(bajorin_clean$kps_binary) & !is.na(bajorin_clean$visceral_mets_binary)), "\n")
+    cat("  Sample patient IDs:", paste(head(unique(bajorin_clean$patient_id), 10), collapse = ", "), "\n")
+    
+    # Show any rows that were filtered out
+    total_before_filter <- nrow(tibble(
+      patient_id_raw = as.character(bajorin_raw[[2]]),
+      therapy_line_raw = as.character(bajorin_raw[[4]])
+    ) %>% filter(!str_detect(tolower(patient_id_raw), "patient|id|screener|mrn|therapy")))
+    
+    if (nrow(bajorin_clean) < total_before_filter) {
+      cat("  Warning:", total_before_filter - nrow(bajorin_clean), "rows filtered out (missing patient_id or therapy_line)\n")
+    }
+    
+    bajorin_clean
+  } else {
+    tibble(patient_id = character(0), therapy_line = numeric(0), 
+           kps_binary = numeric(0), visceral_mets_binary = numeric(0))
+  }
+}, error = function(e) {
+  cat("Warning: Could not load Bajorin data file:", e$message, "\n")
+  tibble(patient_id = character(0), therapy_line = numeric(0), 
+         kps_binary = numeric(0), visceral_mets_binary = numeric(0))
+})
+```
+
+```{r normalize_patient_ids_main_data, include=FALSE}
+# Normalize patient IDs in main dataset to match Bajorin data format
+# This ensures consistent matching when joining
+dat_combined <- dat_combined %>%
+  mutate(
+    patient_id_orig = patient_id,
+    patient_id_char = as.character(patient_id),
+    # Normalize: if it's a pure number (possibly with .0), convert to integer string
+    patient_id_char = ifelse(!is.na(suppressWarnings(as.numeric(patient_id_char))) & 
+                             str_detect(patient_id_char, "^\\.?\\d+\\.?0*$"), 
+                             as.character(as.integer(suppressWarnings(as.numeric(patient_id_char)))), 
+                             patient_id_char),
+    patient_id = str_trim(patient_id_char)
+  ) %>%
+  select(-patient_id_char, -patient_id_orig)
+
+# Also normalize in ctdna_long
+ctdna_long <- ctdna_long %>%
+  mutate(
+    patient_id_char = as.character(patient_id),
+    patient_id_char = ifelse(!is.na(suppressWarnings(as.numeric(patient_id_char))) & 
+                             str_detect(patient_id_char, "^\\.?\\d+\\.?0*$"), 
+                             as.character(as.integer(suppressWarnings(as.numeric(patient_id_char)))), 
+                             patient_id_char),
+    patient_id = str_trim(patient_id_char)
+  ) %>%
+  select(-patient_id_char)
+```
+
+```{r define_universe_q1, include=FALSE}
+# ====================================================================================
+# QUESTION 1: Baseline ctDNA Prognosis Analysis
+# Replicate universe and outcomes definition from Question1_Baseline_ctDNA_Prognosis.Rmd
+# ====================================================================================
+
+# Extract therapy start dates and settings
+therapy_start_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*start.*date", ignore_case = TRUE))]
+therapy_setting_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*treatment.*setting", ignore_case = TRUE))]
+
+# Get all palliative therapy lines
+all_palliative_therapy_lines <- tibble(patient_id = character(0), therapy_line = integer(0), therapy_start_date = as.Date(character(0)))
+
+if (length(therapy_start_cols) > 0 && length(therapy_setting_cols) > 0) {
+  therapy_dates_with_lines <- dat_combined %>%
+    select(patient_id, any_of(therapy_start_cols)) %>%
+    pivot_longer(-patient_id, names_to = "therapy_var", values_to = "start_date_raw") %>%
+    mutate(
+      start_date = as_date_safe(start_date_raw),
+      therapy_line = as.integer(str_extract(therapy_var, "\\d+"))
+    ) %>%
+    filter(!is.na(start_date), !is.na(therapy_line)) %>%
+    select(patient_id, therapy_line, therapy_start_date = start_date)
+  
+  therapy_settings_with_lines <- dat_combined %>%
+    select(patient_id, any_of(therapy_setting_cols)) %>%
+    pivot_longer(-patient_id, names_to = "setting_var", values_to = "setting_raw") %>%
+    mutate(
+      setting = as.character(setting_raw),
+      therapy_line = as.integer(str_extract(setting_var, "\\d+"))
+    ) %>%
+    filter(!is.na(therapy_line)) %>%
+    select(patient_id, therapy_line, setting)
+  
+  all_palliative_therapy_lines <- therapy_dates_with_lines %>%
+    left_join(therapy_settings_with_lines, by = c("patient_id", "therapy_line")) %>%
+    mutate(
+      setting_lower = tolower(setting),
+      is_palliative = str_detect(setting_lower, "palliative|metastatic|1l.*metastatic|2l.*metastatic|3l.*metastatic")
+    ) %>%
+    filter(is_palliative) %>%
+    select(patient_id, therapy_line, therapy_start_date) %>%
+    arrange(patient_id, therapy_line)
+}
+
+# Identify patients with confirmed metastatic disease
+clinical_state_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("clinical_disease_state.*metastatic|clinical_disease_state.*first.*ct", ignore_case = TRUE))]
+metastatic_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("metastatic_disease_ever_diagnosed|metastatic.*yes.*no", ignore_case = TRUE))]
+m_stage_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("pathology_m_stage", ignore_case = TRUE))]
+
+first_palliative_therapy <- all_palliative_therapy_lines %>%
+  group_by(patient_id) %>%
+  summarise(first_palliative_start = min(therapy_start_date, na.rm = TRUE), .groups = "drop")
+
+metastatic_status <- dat_combined %>%
+  select(patient_id, 
+         any_of(clinical_state_cols),
+         any_of(metastatic_cols),
+         any_of(m_stage_cols)) %>%
+  mutate(
+    metastatic_at_ctdna = if (length(clinical_state_cols) > 0) {
+      str_detect(tolower(as.character(.data[[clinical_state_cols[1]]])), "metastatic|advanced")
+    } else {
+      NA
+    },
+    metastatic_ever_diagnosed = if (length(metastatic_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[metastatic_cols[1]]])), "yes|y|1") ~ TRUE,
+        str_detect(tolower(as.character(.data[[metastatic_cols[1]]])), "no|n|0") ~ FALSE,
+        TRUE ~ NA
+      )
+    } else {
+      NA
+    },
+    m_stage_metastatic = if (length(m_stage_cols) > 0) {
+      str_detect(toupper(as.character(.data[[m_stage_cols[1]]])), "M1")
+    } else {
+      NA
+    }
+  ) %>%
+  left_join(first_palliative_therapy, by = "patient_id") %>%
+  mutate(
+    has_palliative_therapy = !is.na(first_palliative_start),
+    has_metastatic_disease = case_when(
+      !is.na(metastatic_at_ctdna) & metastatic_at_ctdna == TRUE ~ TRUE,
+      has_palliative_therapy == TRUE ~ TRUE,
+      !is.na(m_stage_metastatic) & m_stage_metastatic == TRUE ~ TRUE,
+      !is.na(metastatic_ever_diagnosed) & metastatic_ever_diagnosed == TRUE ~ TRUE,
+      TRUE ~ NA
+    )
+  ) %>%
+  filter(has_metastatic_disease == TRUE) %>%
+  select(patient_id)
+
+# Create universe for Question 1
+universe_q1 <- all_palliative_therapy_lines %>%
+  inner_join(metastatic_status, by = "patient_id") %>%
+  left_join(ctdna_long, by = "patient_id") %>%
+  filter(
+    !is.na(ctdna_date),
+    ctdna_date <= therapy_start_date,
+    ctdna_date >= (therapy_start_date - days(21))
+  ) %>%
+  arrange(patient_id, therapy_line, desc(ctdna_date)) %>%
+  group_by(patient_id, therapy_line, therapy_start_date) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(patient_id, therapy_line, therapy_start_date, 
+         ctdna_date, ctdna_value) %>%
+  rename(
+    ctdna_before_line_date = ctdna_date,
+    ctdna_before_line_value = ctdna_value
+  ) %>%
+  mutate(time_zero_date = therapy_start_date)
+```
+
+```{r extract_outcomes_q1, include=FALSE}
+# Extract outcomes for Question 1 (with survival data filtering)
+death_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                       !str_detect(names(dat_combined), regex("cause|reason", ignore_case = TRUE))]
+survival_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                     !str_detect(names(dat_combined), regex("death", ignore_case = TRUE))]
+alive_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^alive_yes_no$|alive.*yes.*no", ignore_case = TRUE))]
+imaging_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("obvious.*disease.*imaging|disease.*present.*imaging", ignore_case = TRUE))]
+
+outcomes_q1 <- universe_q1 %>%
+  left_join(
+    dat_combined %>%
+      select(patient_id, all_of(c(death_date_cols, survival_cols, alive_cols, imaging_cols))),
+    by = "patient_id"
+  ) %>%
+  mutate(
+    death_date = if (length(death_date_cols) > 0) {
+      as_date_safe(.data[[death_date_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    last_fu_date = if (length(survival_cols) > 0) {
+      as_date_safe(.data[[survival_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    alive_status = if (length(alive_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_
+      )
+    } else {
+      NA_character_
+    },
+    imaging_disease_present = if (length(imaging_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[imaging_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[imaging_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_
+      )
+    } else {
+      NA_character_
+    },
+    event_or_censor_date = case_when(
+      !is.na(death_date) ~ death_date,
+      !is.na(last_fu_date) ~ last_fu_date,
+      TRUE ~ as.Date(NA)
+    ),
+    mfs_time = as.numeric(event_or_censor_date - time_zero_date),
+    mfs_event = case_when(
+      !is.na(death_date) ~ 1,
+      alive_status == "No" ~ 1,
+      alive_status == "Yes" & imaging_disease_present == "Yes" ~ 1,
+      alive_status == "Yes" & imaging_disease_present == "No" ~ 0,
+      alive_status == "Yes" & is.na(imaging_disease_present) ~ NA_real_,
+      TRUE ~ NA_real_
+    ),
+    imaging_required = case_when(
+      !is.na(death_date) ~ FALSE,
+      alive_status == "No" ~ FALSE,
+      alive_status == "Yes" ~ TRUE,
+      TRUE ~ TRUE
+    )
+  ) %>%
+  filter(!is.na(mfs_time), mfs_time > 0, 
+         !(imaging_required == TRUE & is.na(imaging_disease_present)))
+
+# Join Bajorin data for Question 1
+# First, ensure patient_id formats match (convert both to character and trim)
+# The main dataset uses patient_id from record_id_linking_key which may be numeric or character
+# Normalize both to character, removing any decimal points from numeric conversions
+outcomes_q1 <- outcomes_q1 %>%
+  mutate(
+    patient_id_char = as.character(patient_id),
+    # Normalize: if it's a pure number (possibly with .0), convert to integer string
+    patient_id_char = ifelse(!is.na(suppressWarnings(as.numeric(patient_id_char))) & 
+                             str_detect(patient_id_char, "^\\.?\\d+\\.?0*$"), 
+                             as.character(as.integer(suppressWarnings(as.numeric(patient_id_char)))), 
+                             patient_id_char),
+    patient_id = str_trim(patient_id_char)
+  ) %>%
+  select(-patient_id_char)
+
+# Bajorin data should already be character, but ensure it's trimmed and normalized
+bajorin_data <- bajorin_data %>%
+  mutate(
+    patient_id_char = as.character(patient_id),
+    # Normalize: if it's a pure number (possibly with .0), convert to integer string
+    patient_id_char = ifelse(!is.na(suppressWarnings(as.numeric(patient_id_char))) & 
+                             str_detect(patient_id_char, "^\\.?\\d+\\.?0*$"), 
+                             as.character(as.integer(suppressWarnings(as.numeric(patient_id_char)))), 
+                             patient_id_char),
+    patient_id = str_trim(patient_id_char)
+  ) %>%
+  select(-patient_id_char)
+
+# IMPORTANT: Normalize therapy lines >= 4 to 4 for matching
+# Bajorin data converts "4L+" to therapy_line = 4, but analysis may have therapy_line = 4, 5, 6, etc.
+# All therapy lines >= 4 should match with Bajorin data therapy_line = 4
+bajorin_data_normalized <- bajorin_data %>%
+  mutate(therapy_line_match = ifelse(therapy_line >= 4, 4, therapy_line))
+
+outcomes_q1_normalized <- outcomes_q1 %>%
+  mutate(therapy_line_match = ifelse(therapy_line >= 4, 4, therapy_line))
+
+# Diagnostic: Check patient ID matching
+cat("=== DIAGNOSTIC: Patient ID Matching for Question 1 ===\n")
+cat("Total outcomes_q1 observations:", nrow(outcomes_q1), "\n")
+cat("Total bajorin_data observations:", nrow(bajorin_data), "\n")
+cat("Unique patient IDs in outcomes_q1:", length(unique(outcomes_q1$patient_id)), "\n")
+cat("Unique patient IDs in bajorin_data:", length(unique(bajorin_data$patient_id)), "\n")
+
+# Check overlap with normalized therapy lines
+outcomes_patient_lines <- outcomes_q1_normalized %>%
+  select(patient_id, therapy_line_match) %>%
+  distinct()
+bajorin_patient_lines_normalized <- bajorin_data_normalized %>%
+  select(patient_id, therapy_line_match) %>%
+  distinct()
+
+matched_lines <- inner_join(outcomes_patient_lines, bajorin_patient_lines_normalized, 
+                            by = c("patient_id", "therapy_line_match"))
+cat("Matched patient-line observations (with normalized therapy lines):", nrow(matched_lines), "\n")
+cat("Unmatched patient-line observations in outcomes:", 
+    nrow(outcomes_patient_lines) - nrow(matched_lines), "\n")
+
+# Show sample of unmatched
+unmatched <- anti_join(outcomes_patient_lines, bajorin_patient_lines_normalized, 
+                       by = c("patient_id", "therapy_line_match"))
+if (nrow(unmatched) > 0) {
+  cat("Sample unmatched patient IDs:", 
+      paste(head(unique(unmatched$patient_id), 10), collapse = ", "), "\n")
+}
+
+outcomes_q1_with_bajorin <- outcomes_q1_normalized %>%
+  left_join(
+    bajorin_data_normalized %>% select(patient_id, therapy_line_match, kps_binary, visceral_mets_binary),
+    by = c("patient_id", "therapy_line_match")
+  ) %>%
+  select(-therapy_line_match)
+
+# Identify patients missing Bajorin risk factors in Question 1
+missing_bajorin_q1 <- outcomes_q1_with_bajorin %>%
+  filter(is.na(kps_binary) | is.na(visceral_mets_binary)) %>%
+  mutate(
+    missing_kps = is.na(kps_binary),
+    missing_visceral_mets = is.na(visceral_mets_binary),
+    missing_both = is.na(kps_binary) & is.na(visceral_mets_binary)
+  ) %>%
+  select(patient_id, therapy_line, missing_kps, missing_visceral_mets, missing_both) %>%
+  distinct()
+```
+
+```{r define_universe_q2, include=FALSE}
+# ====================================================================================
+# QUESTION 2: On-Treatment ctDNA Response Analysis
+# Replicate landmark analysis setup from Question2_Landmark_Analysis.Rmd
+# ====================================================================================
+
+# Use the same universe as Question 1
+universe_q2 <- universe_q1
+
+# Extract outcomes for Question 2 (same as Question 1)
+outcomes_q2 <- outcomes_q1
+
+# Landmark analysis: find on-treatment ctDNA within 6-16 weeks
+landmark_window_start_days <- 6 * 7
+landmark_window_end_days <- 16 * 7
+
+landmark_data_q2 <- outcomes_q2 %>%
+  select(patient_id, therapy_line, time_zero_date, ctdna_before_line_date, 
+         ctdna_before_line_value, mfs_time, mfs_event) %>%
+  left_join(
+    ctdna_long %>%
+      select(patient_id, ctdna_date, ctdna_value),
+    by = "patient_id"
+  ) %>%
+  mutate(
+    days_from_therapy_start = as.numeric(ctdna_date - time_zero_date),
+    in_landmark_window = days_from_therapy_start >= landmark_window_start_days & 
+                         days_from_therapy_start <= landmark_window_end_days
+  ) %>%
+  filter(in_landmark_window) %>%
+  arrange(patient_id, therapy_line, desc(days_from_therapy_start)) %>%
+  group_by(patient_id, therapy_line) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  mutate(
+    baseline_ctdna = ctdna_before_line_value,
+    on_tx_ctdna = ctdna_value,
+    landmark_time = days_from_therapy_start
+  ) %>%
+  select(patient_id, therapy_line, time_zero_date, landmark_time,
+         baseline_ctdna, on_tx_ctdna)
+```
+
+```{r extract_landmark_outcomes_q2, include=FALSE}
+# Perform landmark analysis: only include patients who survived to landmark
+# Join landmark_data_q2 with outcomes_q2 to get mfs_time and mfs_event
+# This matches the exact logic from Question2_Landmark_Analysis.Rmd
+landmark_outcomes_q2 <- landmark_data_q2 %>%
+  left_join(
+    outcomes_q2 %>% 
+      select(patient_id, therapy_line, time_zero_date, mfs_time, mfs_event, imaging_disease_present),
+    by = c("patient_id", "therapy_line", "time_zero_date")
+  ) %>%
+  left_join(
+    dat_combined %>%
+      select(patient_id, all_of(c(death_date_cols, alive_cols))),
+    by = "patient_id"
+  ) %>%
+  mutate(
+    death_date = if (length(death_date_cols) > 0) {
+      as_date_safe(.data[[death_date_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    alive_status = if (length(alive_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_
+      )
+    } else {
+      NA_character_
+    },
+    # Calculate landmark survival variables AFTER joining mfs_time from outcomes_q2
+    survived_to_landmark = !is.na(mfs_time) & mfs_time >= landmark_time,
+    mfs_time_from_landmark = mfs_time - landmark_time,
+    mfs_event_from_landmark = mfs_event,
+    # Determine if imaging data is required (only for alive patients)
+    imaging_required = case_when(
+      !is.na(death_date) ~ FALSE,
+      alive_status == "No" ~ FALSE,
+      alive_status == "Yes" ~ TRUE,
+      TRUE ~ TRUE
+    )
+  ) %>%
+  filter(survived_to_landmark, 
+         !is.na(mfs_time_from_landmark) & mfs_time_from_landmark > 0,
+         !(imaging_required == TRUE & is.na(imaging_disease_present)))
+
+# Join Bajorin data for Question 2
+# Ensure patient_id formats match (convert to character and trim, normalize numeric)
+landmark_outcomes_q2 <- landmark_outcomes_q2 %>%
+  mutate(
+    patient_id_char = as.character(patient_id),
+    # Normalize: if it's a pure number (possibly with .0), convert to integer string
+    patient_id_char = ifelse(!is.na(suppressWarnings(as.numeric(patient_id_char))) & 
+                             str_detect(patient_id_char, "^\\.?\\d+\\.?0*$"), 
+                             as.character(as.integer(suppressWarnings(as.numeric(patient_id_char)))), 
+                             patient_id_char),
+    patient_id = str_trim(patient_id_char)
+  ) %>%
+  select(-patient_id_char)
+
+# Normalize therapy lines for Question 2 as well
+landmark_outcomes_q2_normalized <- landmark_outcomes_q2 %>%
+  mutate(therapy_line_match = ifelse(therapy_line >= 4, 4, therapy_line))
+
+# Diagnostic: Check patient ID matching for Question 2
+cat("\n=== DIAGNOSTIC: Patient ID Matching for Question 2 ===\n")
+cat("Total landmark_outcomes_q2 observations:", nrow(landmark_outcomes_q2), "\n")
+
+landmark_patient_lines <- landmark_outcomes_q2_normalized %>%
+  select(patient_id, therapy_line_match) %>%
+  distinct()
+
+matched_lines_q2 <- inner_join(landmark_patient_lines, bajorin_patient_lines_normalized, 
+                               by = c("patient_id", "therapy_line_match"))
+cat("Matched patient-line observations (with normalized therapy lines):", nrow(matched_lines_q2), "\n")
+cat("Unmatched patient-line observations in landmark outcomes:", 
+    nrow(landmark_patient_lines) - nrow(matched_lines_q2), "\n")
+
+# Show sample of unmatched
+unmatched_q2 <- anti_join(landmark_patient_lines, bajorin_patient_lines_normalized, 
+                         by = c("patient_id", "therapy_line_match"))
+if (nrow(unmatched_q2) > 0) {
+  cat("Sample unmatched patient IDs:", 
+      paste(head(unique(unmatched_q2$patient_id), 10), collapse = ", "), "\n")
+}
+
+landmark_outcomes_q2_with_bajorin <- landmark_outcomes_q2_normalized %>%
+  left_join(
+    bajorin_data_normalized %>% select(patient_id, therapy_line_match, kps_binary, visceral_mets_binary),
+    by = c("patient_id", "therapy_line_match")
+  ) %>%
+  select(-therapy_line_match)
+
+# Identify patients missing Bajorin risk factors in Question 2
+missing_bajorin_q2 <- landmark_outcomes_q2_with_bajorin %>%
+  filter(is.na(kps_binary) | is.na(visceral_mets_binary)) %>%
+  mutate(
+    missing_kps = is.na(kps_binary),
+    missing_visceral_mets = is.na(visceral_mets_binary),
+    missing_both = is.na(kps_binary) & is.na(visceral_mets_binary)
+  ) %>%
+  select(patient_id, therapy_line, missing_kps, missing_visceral_mets, missing_both) %>%
+  distinct()
+```
+
+## Diagnostic: Patient ID Matching
+
+```{r diagnostic_matching, echo=FALSE}
+# Check specific patient IDs mentioned by user
+check_patients <- c("179", "22", "250", "343")
+
+cat("### Checking Specific Patient IDs\n\n")
+for (pid in check_patients) {
+  pid_char <- str_trim(as.character(pid))  # Ensure consistent format
+  cat("**Patient ID:", pid_char, "**\n")
+  
+  # Check in outcomes_q1 (after formatting)
+  in_q1 <- outcomes_q1 %>%
+    filter(patient_id == pid_char) %>%
+    select(patient_id, therapy_line) %>%
+    distinct()
+  
+  # Check in bajorin_data (after formatting)
+  in_bajorin <- bajorin_data %>%
+    filter(patient_id == pid_char) %>%
+    select(patient_id, therapy_line, kps_binary, visceral_mets_binary) %>%
+    distinct()
+  
+  # Check the actual join result
+  joined_check <- outcomes_q1 %>%
+    filter(patient_id == pid_char) %>%
+    left_join(
+      bajorin_data %>% select(patient_id, therapy_line, kps_binary, visceral_mets_binary),
+      by = c("patient_id", "therapy_line")
+    ) %>%
+    select(patient_id, therapy_line, kps_binary, visceral_mets_binary) %>%
+    distinct()
+  
+  # Check what patient_id values actually exist (for debugging)
+  q1_ids <- outcomes_q1 %>%
+    filter(str_detect(str_trim(as.character(patient_id)), paste0("^", pid_char, "$"))) %>%
+    select(patient_id) %>%
+    distinct()
+  
+  bajorin_ids <- bajorin_data %>%
+    filter(str_detect(str_trim(as.character(patient_id)), paste0("^", pid_char, "$"))) %>%
+    select(patient_id) %>%
+    distinct()
+  
+  cat("- In Question 1 analysis:", if(nrow(in_q1) > 0) paste("Yes (", nrow(in_q1), "therapy lines)", sep="") else "No", "\n")
+  if (nrow(q1_ids) > 0 && nrow(in_q1) == 0) {
+    cat("  - Note: Found similar IDs in Q1:", paste(head(unique(q1_ids$patient_id), 5), collapse=", "), "\n")
+  }
+  
+  cat("- In Bajorin data:", if(nrow(in_bajorin) > 0) paste("Yes (", nrow(in_bajorin), "therapy lines)", sep="") else "No", "\n")
+  if (nrow(bajorin_ids) > 0 && nrow(in_bajorin) == 0) {
+    cat("  - Note: Found similar IDs in Bajorin:", paste(head(unique(bajorin_ids$patient_id), 5), collapse=", "), "\n")
+  }
+  
+  if (nrow(in_q1) > 0) {
+    cat("- Therapy lines in analysis:", paste(in_q1$therapy_line, collapse=", "), "\n")
+  }
+  if (nrow(in_bajorin) > 0) {
+    cat("- Therapy lines in Bajorin data:", paste(in_bajorin$therapy_line, collapse=", "), "\n")
+    cat("- KPS values:", paste(ifelse(is.na(in_bajorin$kps_binary), "NA", in_bajorin$kps_binary), collapse=", "), "\n")
+    cat("- Visceral Mets values:", paste(ifelse(is.na(in_bajorin$visceral_mets_binary), "NA", in_bajorin$visceral_mets_binary), collapse=", "), "\n")
+  }
+  
+  # Show join result
+  if (nrow(joined_check) > 0) {
+    cat("- After join - therapy lines with Bajorin data:", 
+        paste(joined_check$therapy_line[!is.na(joined_check$kps_binary) | !is.na(joined_check$visceral_mets_binary)], collapse=", "), "\n")
+    cat("- After join - therapy lines missing Bajorin data:", 
+        paste(joined_check$therapy_line[is.na(joined_check$kps_binary) | is.na(joined_check$visceral_mets_binary)], collapse=", "), "\n")
+  }
+  
+  # Check in missing list (after formatting)
+  in_missing_q1 <- missing_bajorin_q1 %>%
+    filter(str_trim(as.character(patient_id)) == pid_char)
+  
+  if (nrow(in_missing_q1) > 0) {
+    cat("- Listed as missing Bajorin data:", "Yes", "\n")
+    cat("- Missing KPS:", ifelse(any(in_missing_q1$missing_kps), "Yes", "No"), "\n")
+    cat("- Missing Visceral Mets:", ifelse(any(in_missing_q1$missing_visceral_mets), "Yes", "No"), "\n")
+    
+    # Check if it's a therapy line mismatch
+    if (nrow(in_q1) > 0 && nrow(in_bajorin) > 0) {
+      q1_lines <- sort(unique(in_q1$therapy_line))
+      bajorin_lines <- sort(unique(in_bajorin$therapy_line))
+      if (!identical(q1_lines, bajorin_lines)) {
+        cat("- **WARNING: Therapy line mismatch!**\n")
+        cat("  - Analysis has lines:", paste(q1_lines, collapse=", "), "\n")
+        cat("  - Bajorin has lines:", paste(bajorin_lines, collapse=", "), "\n")
+      }
+    }
+  } else if (nrow(in_q1) > 0) {
+    cat("- Listed as missing Bajorin data:", "No (has complete Bajorin data)", "\n")
+  }
+  cat("\n")
+}
+```
+
+## Summary Statistics
+
+```{r summary_statistics}
+cat("### Question 1: Baseline ctDNA Prognosis Analysis\n\n")
+cat("**Total patient-line observations in final analysis:**", nrow(outcomes_q1), "\n")
+cat("**Unique patients in final analysis:**", length(unique(outcomes_q1$patient_id)), "\n\n")
+
+cat("**Patients missing Bajorin risk factors:**\n")
+cat("- Total patient-line observations missing KPS or visceral mets:", nrow(missing_bajorin_q1), "\n")
+cat("- Unique patients missing KPS or visceral mets:", length(unique(missing_bajorin_q1$patient_id)), "\n")
+cat("- Missing KPS only:", sum(missing_bajorin_q1$missing_kps & !missing_bajorin_q1$missing_visceral_mets), "\n")
+cat("- Missing visceral mets only:", sum(!missing_bajorin_q1$missing_kps & missing_bajorin_q1$missing_visceral_mets), "\n")
+cat("- Missing both:", sum(missing_bajorin_q1$missing_both), "\n\n")
+
+cat("### Question 2: On-Treatment ctDNA Response Analysis\n\n")
+cat("**Total patient-line observations in final landmark analysis:**", nrow(landmark_outcomes_q2), "\n")
+cat("**Unique patients in final landmark analysis:**", length(unique(landmark_outcomes_q2$patient_id)), "\n\n")
+
+cat("**Patients missing Bajorin risk factors:**\n")
+cat("- Total patient-line observations missing KPS or visceral mets:", nrow(missing_bajorin_q2), "\n")
+cat("- Unique patients missing KPS or visceral mets:", length(unique(missing_bajorin_q2$patient_id)), "\n")
+cat("- Missing KPS only:", sum(missing_bajorin_q2$missing_kps & !missing_bajorin_q2$missing_visceral_mets), "\n")
+cat("- Missing visceral mets only:", sum(!missing_bajorin_q2$missing_kps & missing_bajorin_q2$missing_visceral_mets), "\n")
+cat("- Missing both:", sum(missing_bajorin_q2$missing_both), "\n")
+```
+
+## Question 1: Patients Missing Bajorin Risk Factors
+
+```{r q1_missing_bajorin_table}
+missing_bajorin_q1_detailed <- missing_bajorin_q1 %>%
+  arrange(patient_id, therapy_line) %>%
+  mutate(
+    `Therapy Line` = case_when(
+      therapy_line == 1 ~ "1L",
+      therapy_line == 2 ~ "2L",
+      therapy_line == 3 ~ "3L",
+      therapy_line >= 4 ~ "4L+",
+      TRUE ~ as.character(therapy_line)
+    ),
+    `Missing KPS` = ifelse(missing_kps, "Yes", "No"),
+    `Missing Visceral Mets` = ifelse(missing_visceral_mets, "Yes", "No"),
+    `Missing Both` = ifelse(missing_both, "Yes", "No")
+  ) %>%
+  select(`Patient ID` = patient_id, `Therapy Line`, `Missing KPS`, `Missing Visceral Mets`, `Missing Both`)
+
+if (nrow(missing_bajorin_q1_detailed) > 0) {
+  missing_bajorin_q1_detailed %>%
+    kable(caption = paste0("Question 1: Patients Missing Bajorin Risk Factors (N = ", 
+                          length(unique(missing_bajorin_q1_detailed$`Patient ID`)), 
+                          " unique patients, ", nrow(missing_bajorin_q1_detailed), 
+                          " patient-line observations)")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+} else {
+  cat("**No patients missing Bajorin risk factors in Question 1 analysis.**\n")
+}
+```
+
+## Question 2: Patients Missing Bajorin Risk Factors
+
+```{r q2_missing_bajorin_table}
+missing_bajorin_q2_detailed <- missing_bajorin_q2 %>%
+  arrange(patient_id, therapy_line) %>%
+  mutate(
+    `Therapy Line` = case_when(
+      therapy_line == 1 ~ "1L",
+      therapy_line == 2 ~ "2L",
+      therapy_line == 3 ~ "3L",
+      therapy_line >= 4 ~ "4L+",
+      TRUE ~ as.character(therapy_line)
+    ),
+    `Missing KPS` = ifelse(missing_kps, "Yes", "No"),
+    `Missing Visceral Mets` = ifelse(missing_visceral_mets, "Yes", "No"),
+    `Missing Both` = ifelse(missing_both, "Yes", "No")
+  ) %>%
+  select(`Patient ID` = patient_id, `Therapy Line`, `Missing KPS`, `Missing Visceral Mets`, `Missing Both`)
+
+if (nrow(missing_bajorin_q2_detailed) > 0) {
+  missing_bajorin_q2_detailed %>%
+    kable(caption = paste0("Question 2: Patients Missing Bajorin Risk Factors (N = ", 
+                          length(unique(missing_bajorin_q2_detailed$`Patient ID`)), 
+                          " unique patients, ", nrow(missing_bajorin_q2_detailed), 
+                          " patient-line observations)")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+} else {
+  cat("**No patients missing Bajorin risk factors in Question 2 analysis.**\n")
+}
+```
+
+## Combined List
+
+```{r combined_missing_bajorin_table}
+# Combine both analyses
+missing_bajorin_combined <- bind_rows(
+  missing_bajorin_q1_detailed %>% mutate(Analysis = "Question 1: Baseline ctDNA Prognosis"),
+  missing_bajorin_q2_detailed %>% mutate(Analysis = "Question 2: On-Treatment ctDNA Response")
+) %>%
+  select(Analysis, `Patient ID`, `Therapy Line`, `Missing KPS`, `Missing Visceral Mets`, `Missing Both`) %>%
+  arrange(Analysis, `Patient ID`, `Therapy Line`)
+
+if (nrow(missing_bajorin_combined) > 0) {
+  missing_bajorin_combined %>%
+    kable(caption = "Combined List: Patients Missing Bajorin Risk Factors in Question 1 and/or Question 2") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+} else {
+  cat("**No patients missing Bajorin risk factors in either analysis.**\n")
+}
+```
+
+```{r export_csv, include=FALSE}
+# Export to CSV
+if (nrow(missing_bajorin_combined) > 0) {
+  write.csv(missing_bajorin_combined, "Patients_Missing_Bajorin_Risk_Factors.csv", row.names = FALSE)
+  cat("Results exported to: Patients_Missing_Bajorin_Risk_Factors.csv\n")
+} else {
+  cat("No patients missing Bajorin risk factors - no CSV file created.\n")
+}
+```
+

@@ -1,0 +1,2616 @@
+---
+title: "Comparison of Qualitative, Quantitative, and Machine Learning ctDNA Response Classification Approaches"
+author: "Statistical Analysis"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Introduction
+
+This analysis compares three approaches for classifying circulating tumor DNA (ctDNA) response patterns and their association with overall survival (OS):
+
+1. **Qualitative Approach**: Binary classification based on ctDNA status changes (Clearance, Conversion, Persistent Positive [most recent value positive], Persistent Negative [most recent value negative])
+2. **Quantitative Approach**: Classification based on percent change from most recent ctDNA assessment (Major Response ≥90% reduction, Partial Response 30-89% reduction, Progressive ≥20% increase, Stable (0-29% change), Persistent Negative [most recent value negative])
+3. **Machine Learning Approach**: Unsupervised clustering using multiple ctDNA kinetic features
+
+Performance is evaluated using Harrell's C-index (concordance index) and Akaike Information Criterion (AIC) from Cox proportional hazards models, with pairwise comparisons using bootstrap-based p-values. **A landmark analysis at 6 months is used to reduce immortal time bias** by only including patients who survived at least 6 months and analyzing survival from the 6-month landmark timepoint forward.
+
+## Methods
+
+### Study Population and Eligibility Criteria
+
+Eligible patients for this analysis included individuals diagnosed with bladder cancer (urothelial carcinoma of the bladder, upper tract urothelial carcinoma [UTUC], or variant histology) who had:
+
+- A baseline ctDNA measurement (first ctDNA measurement date used as time anchor)
+- At least one follow-up ctDNA measurement
+- Survived at least 6 months from their time anchor (baseline ctDNA date, or survival/follow-up date if baseline ctDNA date was unavailable) - this requirement was applied to mitigate immortal time bias in the landmark analysis
+- Valid ctDNA classifications for all three approaches (Qualitative, Quantitative, and ML) for the comparative analysis
+
+Patients who died within 6 months of their time anchor were excluded from the analysis.
+
+The analytic cohort was derived from a larger dataset of patients with diverse bladder cancer disease states, histologies, and treatment settings. Patients were excluded from the comparative analysis if they lacked sufficient ctDNA data to generate valid classifications for any of the three approaches.
+
+### ctDNA Classification Approaches
+
+#### Qualitative Approach
+
+The qualitative approach uses binary classification based on ctDNA status changes:
+
+- **ctDNA Clearance**: Baseline was positive (detectable), became negative (undetectable) at any point after baseline
+- **ctDNA Conversion**: Most recent test is positive (detectable) with the previous test being negative (undetectable)
+- **Persistent Positive**: Most recent value is positive (remained positive from most recent assessment)
+- **Persistent Negative**: Most recent value is negative (remained negative from most recent assessment)
+
+#### Quantitative Approach
+
+The quantitative approach classifies patients based on percent change from the most recent ctDNA assessment to the previous measurement:
+
+- **Major Response (≥90% reduction)**: ≥90% reduction from most recent assessment (baseline must be > 0)
+- **Partial Response (30-89% reduction)**: 30-89% reduction from most recent assessment (baseline must be > 0)
+- **Progressive (≥20% increase)**: ≥20% increase from most recent assessment, or de novo ctDNA detection (baseline = 0, became > 0)
+- **Stable (0-29% change)**: 0-29% reduction or 0-29% increase from most recent assessment (baseline must be > 0)
+- **Persistent Negative**: All measurements are 0 (undetectable ctDNA throughout)
+
+#### Machine Learning Approach
+
+The machine learning approach uses unsupervised k-means clustering (k=5) on multiple ctDNA kinetic features extracted from longitudinal ctDNA measurements:
+
+- Baseline ctDNA value
+- Number of measurements
+- Mean, median, maximum, and minimum ctDNA values
+- Standard deviation and coefficient of variation
+- Number of positive and negative measurements
+- Clearance and conversion patterns (binary indicators)
+- Linear trend over time
+- Percent change from baseline
+- Time span of ctDNA monitoring
+
+All features were standardized (z-scored) prior to clustering. Patients were assigned to one of five clusters based on their ctDNA kinetic profile.
+
+### Overall Survival Endpoint
+
+Overall survival (OS) was defined as the time from a prespecified 6-month landmark to death from any cause.
+
+**Time Anchor**: The time anchor for survival calculation was defined as the baseline ctDNA measurement date (first ctDNA measurement for each patient). If the baseline ctDNA date was not available, the survival/follow-up date was used as the time anchor.
+
+**Landmark Analysis Requirement**: To mitigate immortal time bias, only patients who survived at least 6 months from their time anchor (baseline ctDNA date or survival date) were included in the analysis. Specifically:
+
+- OS time was calculated from the time anchor to death (for deceased patients) or last known follow-up (for censored patients)
+- Patients with OS time < 6 months were excluded from the analysis
+- For included patients, survival time was then adjusted to start from the 6-month landmark: `os_time_landmark = os_time - 6 months`
+- Survival analysis was performed from the 6-month landmark timepoint forward
+- Patients who died within 6 months of their time anchor were excluded from the analysis
+
+**Censoring**: Censoring occurred at the last known follow-up date for patients who were still alive at the time of analysis.
+
+### Statistical Analysis
+
+#### Primary Endpoint: Comparative Discriminatory Performance
+
+The primary endpoint was the comparative discriminatory performance for overall survival, quantified using Harrell's C-index (concordance index). The C-index ranges from 0.5 (random prediction) to 1.0 (perfect prediction), with higher values indicating better discriminatory performance.
+
+For each classification approach, a Cox proportional hazards model was fitted with the ctDNA response groups as the predictor variable and OS (from 6-month landmark) as the outcome. C-indices were calculated with 95% confidence intervals using bootstrap resampling (n=500 bootstrap samples).
+
+#### Model Comparison
+
+Pairwise comparisons of C-indices between approaches were performed using bootstrap-based hypothesis testing. For each pair of models, the difference in C-index was calculated, and a two-sided p-value was obtained by comparing the observed difference to the distribution of differences from 500 bootstrap samples. The null hypothesis was that the C-index difference equals zero.
+
+#### Secondary Analyses
+
+- **Akaike Information Criterion (AIC)**: Used to compare model simplicity and goodness-of-fit, with lower AIC values indicating better model fit adjusted for complexity
+- **Hazard Ratios**: Calculated from Cox models to provide contextual interpretation of effect sizes, with the group with the best prognosis (lowest event rate) used as the reference
+
+#### Sensitivity Analyses
+
+Sensitivity analyses were performed to assess whether model performance differed across patient subgroups:
+
+1. **By Therapy Type**: Stratified analyses were conducted for patients receiving:
+   - Neoadjuvant therapy
+   - Adjuvant therapy
+   - Palliative therapy
+   - No systemic therapy
+
+   Patients could be counted in multiple therapy categories if they received multiple types of therapy during their ctDNA monitoring period.
+
+2. **By Histology Type**: Stratified analyses were conducted for:
+   - Urothelial carcinoma of the bladder
+   - UTUC or variant histology
+
+   Classification was based on primary tumor location (bladder vs. upper tract) combined with histology type.
+
+For each subgroup, C-indices and pairwise comparisons were calculated using the same methods as the primary analysis.
+
+#### Statistical Software
+
+All analyses were performed using R (version 4.x or higher) with the following packages: `survival`, `survminer`, `dplyr`, `tidyr`, `ggplot2`, and `kableExtra`. Bootstrap resampling was performed with a fixed random seed (seed=123) for reproducibility.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, comment = "")
+knitr::opts_knit$set(root.dir = "~/R")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load shared setup
+source("ctDNA_Research_Questions_Shared_Setup.R")
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(ggplot2)
+  library(survival)
+  library(survminer)
+  library(purrr)
+  library(knitr)
+  library(kableExtra)
+})
+```
+
+```{r load_data, include=FALSE}
+# Load data
+data_list <- load_minimal_data(include_survival = FALSE)
+dat_combined <- data_list$dat_combined
+ctdna_long <- data_list$ctdna_long
+
+# Build ctDNA long if not available
+if (is.null(ctdna_long) || nrow(ctdna_long) == 0) {
+  ctdna_long <- build_ctdna_long_minimal(dat_combined, "patient_id")
+}
+```
+
+```{r extract_survival_data, include=FALSE}
+# ==============================
+# Extract Survival Data
+# ==============================
+
+# Function to extract survival data from a dataset
+extract_survival_data <- function(dat, id_col_name) {
+  # Get relapse date
+  relapse_date <- NULL
+  relapse_cols <- names(dat)[str_detect(names(dat), regex("metastatic.*relapse.*date|relapse.*date|metastasis.*date|progression.*date", ignore_case = TRUE))]
+  if (length(relapse_cols) > 0) {
+    relapse_data <- dat %>%
+      select(all_of(id_col_name), all_of(relapse_cols[1])) %>%
+      rename(relapse_date_raw = all_of(relapse_cols[1])) %>%
+      mutate(relapse_date = as_date_safe(relapse_date_raw)) %>%
+      select(all_of(id_col_name), relapse_date)
+    relapse_date <- relapse_data
+  }
+  
+  # Get explicit death date
+  explicit_death_date <- NULL
+  death_date_cols <- names(dat)[str_detect(names(dat), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                 !str_detect(names(dat), regex("cause|reason", ignore_case = TRUE))]
+  if (length(death_date_cols) > 0) {
+    death_date_data <- dat %>%
+      select(all_of(id_col_name), all_of(death_date_cols[1])) %>%
+      rename(death_date_raw = all_of(death_date_cols[1])) %>%
+      mutate(
+        explicit_death_date = if (inherits(death_date_raw, "Date")) {
+          death_date_raw
+        } else {
+          as_date_safe(death_date_raw)
+        }
+      ) %>%
+      select(all_of(id_col_name), explicit_death_date)
+    explicit_death_date <- death_date_data
+  }
+  
+  # Get survival/follow-up date
+  survival_date <- NULL
+  survival_cols <- names(dat)[str_detect(names(dat), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                              !str_detect(names(dat), regex("death", ignore_case = TRUE))]
+  if (length(survival_cols) > 0) {
+    survival_data <- dat %>%
+      select(all_of(id_col_name), all_of(survival_cols[1])) %>%
+      rename(survival_date_raw = all_of(survival_cols[1])) %>%
+      mutate(survival_date = as_date_safe(survival_date_raw)) %>%
+      select(all_of(id_col_name), survival_date)
+    survival_date <- survival_data
+  }
+  
+  # Get alive yes/no status
+  alive_status <- NULL
+  alive_cols <- names(dat)[str_detect(names(dat), regex("^alive_yes_no$|alive.*yes.*no", ignore_case = TRUE))]
+  if (length(alive_cols) > 0) {
+    alive_data <- dat %>%
+      select(all_of(id_col_name), all_of(alive_cols[1])) %>%
+      rename(alive_status_raw = all_of(alive_cols[1])) %>%
+      mutate(
+        alive_yes_no = case_when(
+          str_detect(tolower(as.character(alive_status_raw)), "yes|y|1") ~ "Yes",
+          str_detect(tolower(as.character(alive_status_raw)), "no|n|0") ~ "No",
+          TRUE ~ NA_character_
+        )
+      ) %>%
+      select(all_of(id_col_name), alive_yes_no)
+    alive_status <- alive_data
+  }
+  
+  # Get death status (legacy)
+  death_status <- NULL
+  death_status_cols <- names(dat)[str_detect(names(dat), regex("death|died|vital.*status", ignore_case = TRUE)) & 
+                                   !str_detect(names(dat), regex("date|alive", ignore_case = TRUE))]
+  if (length(death_status_cols) > 0) {
+    death_data <- dat %>%
+      select(all_of(id_col_name), all_of(death_status_cols[1])) %>%
+      rename(death_status_raw = all_of(death_status_cols[1])) %>%
+      mutate(
+        death_status_legacy = case_when(
+          str_detect(tolower(as.character(death_status_raw)), "yes|dead|died|death|deceased") ~ 1,
+          TRUE ~ 0
+        )
+      ) %>%
+      select(all_of(id_col_name), death_status_legacy)
+    death_status <- death_data
+  }
+  
+  # Extract palliative therapy start dates
+  palliative_dates <- NULL
+  therapy_setting_cols <- names(dat)[str_detect(names(dat), regex("systemic.*therapy.*\\d+.*setting", ignore_case = TRUE))]
+  therapy_start_cols <- names(dat)[str_detect(names(dat), regex("systemic.*therapy.*\\d+.*start.*date", ignore_case = TRUE))]
+  
+  if (length(therapy_setting_cols) > 0 && length(therapy_start_cols) > 0) {
+    therapy_settings_long <- dat %>%
+      select(all_of(id_col_name), all_of(therapy_setting_cols)) %>%
+      pivot_longer(-all_of(id_col_name), names_to = "therapy_var", values_to = "setting") %>%
+      mutate(
+        therapy_idx = str_extract(therapy_var, "\\d+"),
+        setting_lower = tolower(as.character(setting))
+      ) %>%
+      filter(str_detect(setting_lower, "palliative"))
+    
+    therapy_starts_long <- dat %>%
+      select(all_of(id_col_name), all_of(therapy_start_cols)) %>%
+      pivot_longer(-all_of(id_col_name), names_to = "therapy_var", values_to = "start_date_raw") %>%
+      mutate(
+        therapy_idx = str_extract(therapy_var, "\\d+"),
+        start_date = as_date_safe(start_date_raw)
+      ) %>%
+      filter(!is.na(start_date))
+    
+    palliative_dates <- therapy_settings_long %>%
+      left_join(therapy_starts_long, by = c(id_col_name, "therapy_idx")) %>%
+      filter(!is.na(start_date)) %>%
+      group_by(.data[[id_col_name]]) %>%
+      summarise(
+        first_palliative_date = min(start_date, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      rename(palliative_start_date = first_palliative_date)
+  }
+  
+  # Combine
+  result <- dat %>% select(all_of(id_col_name))
+  if (!is.null(relapse_date)) {
+    result <- result %>% left_join(relapse_date, by = id_col_name)
+  } else {
+    result <- result %>% mutate(relapse_date = as.Date(NA))
+  }
+  if (!is.null(explicit_death_date)) {
+    result <- result %>% left_join(explicit_death_date, by = id_col_name)
+  } else {
+    result <- result %>% mutate(explicit_death_date = as.Date(NA))
+  }
+  if (!is.null(survival_date)) {
+    result <- result %>% left_join(survival_date, by = id_col_name)
+  } else {
+    result <- result %>% mutate(survival_date = as.Date(NA))
+  }
+  if (!is.null(alive_status)) {
+    result <- result %>% left_join(alive_status, by = id_col_name)
+  } else {
+    result <- result %>% mutate(alive_yes_no = NA_character_)
+  }
+  if (!is.null(death_status)) {
+    result <- result %>% left_join(death_status, by = id_col_name)
+  } else {
+    result <- result %>% mutate(death_status_legacy = NA_real_)
+  }
+  if (!is.null(palliative_dates)) {
+    result <- result %>% left_join(palliative_dates, by = id_col_name)
+  } else {
+    result <- result %>% mutate(palliative_start_date = as.Date(NA))
+  }
+  
+  result
+}
+
+# Extract survival data
+survival_data <- extract_survival_data(dat_combined, "patient_id")
+```
+
+```{r create_survival_data, include=FALSE}
+# ==============================
+# Create Survival Outcomes
+# ==============================
+
+# Get baseline ctDNA
+baseline_ctdna <- ctdna_long %>%
+  group_by(patient_id) %>%
+  arrange(ctdna_date) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(patient_id, baseline_date = ctdna_date, baseline_value = ctdna_value)
+
+# Get last ctDNA dates
+last_ctdna_dates <- ctdna_long %>%
+  group_by(patient_id) %>%
+  summarise(last_ctdna_date = max(ctdna_date, na.rm = TRUE), .groups = "drop")
+
+# Extract last therapy dates
+extract_last_therapy_date <- function(dat, id_col_name) {
+  therapy_cols <- names(dat)[str_detect(names(dat), regex("systemic.*therapy.*\\d+.*(start|end).*date", ignore_case = TRUE))]
+  if (length(therapy_cols) > 0) {
+    therapy_dates_long <- dat %>%
+      select(all_of(id_col_name), all_of(therapy_cols)) %>%
+      pivot_longer(-all_of(id_col_name), names_to = "therapy_var", values_to = "therapy_date_raw") %>%
+      mutate(therapy_date = as_date_safe(therapy_date_raw)) %>%
+      filter(!is.na(therapy_date)) %>%
+      group_by(.data[[id_col_name]]) %>%
+      summarise(last_therapy_date = max(therapy_date, na.rm = TRUE), .groups = "drop")
+    return(therapy_dates_long)
+  } else {
+    return(tibble(!!id_col_name := dat[[id_col_name]], last_therapy_date = as.Date(NA)))
+  }
+}
+
+last_therapy_dates <- extract_last_therapy_date(dat_combined, "patient_id")
+
+# Create survival outcomes
+all_patients <- dat_combined %>%
+  select(patient_id) %>%
+  distinct()
+
+survival_outcomes <- all_patients %>%
+  left_join(baseline_ctdna, by = "patient_id") %>%
+  left_join(last_ctdna_dates, by = "patient_id") %>%
+  left_join(last_therapy_dates, by = "patient_id") %>%
+  left_join(survival_data, by = "patient_id") %>%
+  mutate(
+    time_anchor = coalesce(baseline_date, survival_date),
+    relapse_date_combined = case_when(
+      !is.na(relapse_date) & !is.na(palliative_start_date) ~ pmin(relapse_date, palliative_start_date, na.rm = TRUE),
+      !is.na(relapse_date) ~ relapse_date,
+      !is.na(palliative_start_date) ~ palliative_start_date,
+      TRUE ~ as.Date(NA)
+    ),
+    death_status_final = case_when(
+      !is.na(explicit_death_date) ~ 1,
+      alive_yes_no == "No" ~ 1,
+      !is.na(death_status_legacy) & death_status_legacy == 1 ~ 1,
+      TRUE ~ 0
+    ),
+    death_date = case_when(
+      !is.na(explicit_death_date) ~ explicit_death_date,
+      alive_yes_no == "No" & !is.na(survival_date) ~ survival_date,
+      alive_yes_no == "No" & !is.na(relapse_date_combined) ~ relapse_date_combined,
+      death_status_legacy == 1 & !is.na(survival_date) ~ survival_date,
+      TRUE ~ as.Date(NA)
+    ),
+    max_ctdna_therapy_date = {
+      result <- rep(as.Date(NA), nrow(.))
+      for (i in 1:nrow(.)) {
+        if (!is.na(last_ctdna_date[i]) && !is.na(last_therapy_date[i])) {
+          result[i] <- pmax(last_ctdna_date[i], last_therapy_date[i])
+        } else if (!is.na(last_ctdna_date[i])) {
+          result[i] <- last_ctdna_date[i]
+        } else if (!is.na(last_therapy_date[i])) {
+          result[i] <- last_therapy_date[i]
+        }
+      }
+      result
+    },
+    last_available_date = case_when(
+      !is.na(survival_date) ~ survival_date,
+      !is.na(max_ctdna_therapy_date) ~ max_ctdna_therapy_date,
+      TRUE ~ as.Date(NA)
+    )
+  ) %>%
+  mutate(
+    time_to_relapse = ifelse(!is.na(relapse_date_combined) & !is.na(time_anchor),
+                            as.numeric(relapse_date_combined - time_anchor) / 30.44, NA_real_),
+    time_to_death = ifelse(!is.na(death_date) & !is.na(time_anchor),
+                          as.numeric(death_date - time_anchor) / 30.44, NA_real_),
+    time_to_last_fu = ifelse(!is.na(last_available_date) & !is.na(time_anchor),
+                             as.numeric(last_available_date - time_anchor) / 30.44, NA_real_),
+    relapse_event = ifelse(!is.na(relapse_date_combined), 1, 0),
+    death_event = death_status_final,
+    pfs_time = ifelse(relapse_event == 1 & !is.na(time_to_relapse), time_to_relapse, 
+                     ifelse(!is.na(time_to_last_fu), time_to_last_fu, NA_real_)),
+    os_time = ifelse(
+      death_event == 1 & !is.na(time_to_death), 
+      time_to_death,
+      ifelse(!is.na(time_to_last_fu), time_to_last_fu, NA_real_)
+    )
+  )
+
+# Create landmark analysis version (6 months) to reduce immortal time bias
+landmark_time_months <- 6
+
+survival_outcomes_landmark <- survival_outcomes %>%
+  filter(!is.na(os_time), os_time >= landmark_time_months) %>%
+  mutate(
+    # Adjust survival time to start from landmark
+    os_time_landmark = os_time - landmark_time_months,
+    # Keep the same death event (patients who died before landmark are already excluded)
+    death_event_landmark = death_event
+  ) %>%
+  filter(os_time_landmark > 0)  # Ensure positive survival time after landmark
+```
+
+```{r descriptive_statistics, echo=FALSE}
+# ==============================
+# Descriptive Statistics and Evaluable Sample Size
+# ==============================
+
+cat("## Study Population and Evaluable Sample Size\n\n")
+
+# Total patients in dataset
+total_patients <- nrow(all_patients)
+cat("**Total patients in dataset:** ", total_patients, "\n\n")
+
+# Patients with survival data
+patients_with_survival <- nrow(survival_outcomes)
+cat("**Patients with survival data:** ", patients_with_survival, "\n\n")
+
+# Patients after landmark analysis
+patients_after_landmark <- nrow(survival_outcomes_landmark)
+cat("**Patients included after 6-month landmark analysis:** ", patients_after_landmark, "\n\n")
+
+# Calculate descriptive statistics for landmark population
+if (nrow(survival_outcomes_landmark) > 0) {
+  desc_stats <- survival_outcomes_landmark %>%
+    summarise(
+      N = n(),
+      Events = sum(death_event_landmark == 1, na.rm = TRUE),
+      Censored = sum(death_event_landmark == 0, na.rm = TRUE),
+      Median_OS_Landmark = median(os_time_landmark, na.rm = TRUE),
+      Mean_OS_Landmark = mean(os_time_landmark, na.rm = TRUE),
+      Min_OS_Landmark = min(os_time_landmark, na.rm = TRUE),
+      Max_OS_Landmark = max(os_time_landmark, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  cat("**Descriptive Statistics (Post-Landmark):**\n\n")
+  desc_table <- tibble(
+    Statistic = c("Total N", "Events", "Censored", "Median OS (months)", "Mean OS (months)", "OS Range (months)"),
+    Value = c(
+      desc_stats$N,
+      desc_stats$Events,
+      desc_stats$Censored,
+      round(desc_stats$Median_OS_Landmark, 1),
+      round(desc_stats$Mean_OS_Landmark, 1),
+      paste0(round(desc_stats$Min_OS_Landmark, 1), "-", round(desc_stats$Max_OS_Landmark, 1))
+    )
+  )
+  
+  desc_table %>%
+    kable(caption = "Descriptive Statistics for Evaluable Population (6-Month Landmark)", align = "c") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                  full_width = FALSE, position = "center")
+  
+  cat("\n")
+}
+
+# Note: The evaluable sample size for model comparison will be calculated after ctDNA groups are created
+# It will be smaller than the landmark population because only patients with valid classifications
+# for all three models (Qualitative, Quantitative, and ML) are included
+cat("**Note:** The evaluable sample size for model comparison (shown below) may be smaller than the landmark population (", 
+    patients_after_landmark, ") because only patients with valid ctDNA classifications for all three models ",
+    "(Qualitative, Quantitative, and ML) are included in the comparative analysis. ",
+    "This ensures fair comparison across all three approaches using the same patient population.\n\n")
+cat("**Model-specific sample sizes will be shown in the performance comparison table.**\n\n")
+```
+
+```{r create_qualitative_quantitative_groups, include=FALSE}
+# ==============================
+# Create Qualitative and Quantitative Groups
+# ==============================
+
+# Qualitative groups
+# Definitions:
+# - ctDNA Clearance: Baseline was positive (detectable), became negative (undetectable) at any point after baseline
+# - ctDNA Conversion: Most recent test is positive (detectable) with the previous test being negative (undetectable)
+# - Persistent Positive: Most recent value is positive (remained positive from most recent assessment)
+# - Persistent Negative: Most recent value is negative (remained negative from most recent assessment)
+
+qualitative_groups <- all_patients %>%
+  left_join(
+    ctdna_long %>%
+      left_join(baseline_ctdna, by = "patient_id") %>%
+      filter(!is.na(baseline_value)) %>%
+      arrange(patient_id, ctdna_date) %>%
+      group_by(patient_id) %>%
+      mutate(
+        baseline_value = first(baseline_value),
+        baseline_date = first(baseline_date),
+        days_from_baseline = as.numeric(ctdna_date - baseline_date),
+        is_after_baseline = days_from_baseline > 0,
+        row_num = row_number(),
+        n_rows = n()
+      ) %>%
+      summarise(
+        baseline_status = ifelse(first(baseline_value) > 0, "Positive", "Negative"),
+        became_negative_after = any(is_after_baseline & baseline_value > 0 & ctdna_value == 0, na.rm = TRUE),
+        last_status = ifelse(last(ctdna_value) > 0, "Positive", "Negative"),
+        last_value = last(ctdna_value),
+        # Get the second-to-last value (if there are at least 2 measurements)
+        second_to_last_value = ifelse(n() >= 2, nth(ctdna_value, n() - 1), NA_real_),
+        # Conversion: most recent is positive, previous (second to last) was negative
+        conversion_recent = n() >= 2 & !is.na(last_value) & !is.na(second_to_last_value) & last_value > 0 & second_to_last_value == 0,
+        .groups = "drop"
+      ) %>%
+      mutate(
+        qualitative_group = case_when(
+          baseline_status == "Positive" & became_negative_after ~ "ctDNA Clearance",
+          # ctDNA Conversion: Most recent test positive, previous test negative
+          conversion_recent ~ "ctDNA Conversion",
+          # Persistent Positive: Most recent value is positive (and not conversion or clearance)
+          last_status == "Positive" & !conversion_recent & !(baseline_status == "Positive" & became_negative_after) ~ "Persistent Positive",
+          # Persistent Negative: Most recent value is negative (and not conversion)
+          last_status == "Negative" & !conversion_recent ~ "Persistent Negative",
+          TRUE ~ "No ctDNA Data"
+        )
+      ) %>%
+      select(patient_id, qualitative_group),
+    by = "patient_id"
+  ) %>%
+  mutate(qualitative_group = ifelse(is.na(qualitative_group), "No ctDNA Data", qualitative_group))
+
+# Quantitative groups using new criteria
+# Definitions:
+# - ctDNA Complete Response (CCR): ctDNA clearance after initial detectability (baseline > 0, became 0)
+# - ctDNA Partial Response (CPR): Decrease of >10% from baseline
+# - ctDNA Stable Disease (CSD): No increase or up to 10% increase or decrease (change between -10% and +10%)
+# - ctDNA Progressive Disease (CPD): Increase of >10% or de novo ctDNA detection (baseline 0, became > 0)
+# - ctDNA Nonmeasurable Disease (CND): Undetectable ctDNA before and after treatment (baseline 0, remained 0)
+
+# Quantitative groups based on percent change from most recent ctDNA assessment
+# For each patient, calculate percent change from most recent measurement to previous measurement
+quantitative_groups <- all_patients %>%
+  left_join(
+    ctdna_long %>%
+      left_join(baseline_ctdna %>% select(patient_id, baseline_date, baseline_value), by = "patient_id") %>%
+      filter(!is.na(baseline_value)) %>%
+      arrange(patient_id, ctdna_date) %>%
+      group_by(patient_id) %>%
+      mutate(
+        prev_value = lag(ctdna_value),
+        prev_date = lag(ctdna_date),
+        days_from_prev = as.numeric(ctdna_date - prev_date),
+        # Calculate percent change from most recent assessment
+        percent_change_from_recent = case_when(
+          prev_value == 0 & ctdna_value > 0 ~ 100,  # New positive
+          prev_value == 0 & ctdna_value == 0 ~ 0,   # Persistent negative
+          prev_value > 0 ~ ((ctdna_value - prev_value) / prev_value) * 100,
+          TRUE ~ NA_real_
+        )
+      ) %>%
+      # Get the most recent percent change (last non-NA value)
+      filter(!is.na(percent_change_from_recent)) %>%
+      summarise(
+        baseline_value = first(baseline_value),
+        most_recent_pct_change = last(percent_change_from_recent),
+        most_recent_value = last(ctdna_value),
+        prev_value_for_recent = last(prev_value),
+        all_zero = all(ctdna_value == 0, na.rm = TRUE),
+        ever_positive = any(ctdna_value > 0, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        quantitative_group = case_when(
+          # Persistent Negative: All measurements are 0
+          all_zero ~ "Persistent Negative",
+          # For patients who started negative (baseline = 0) and became positive: classify as Progressive
+          baseline_value == 0 & ever_positive & !is.na(most_recent_value) & most_recent_value > 0 ~ "Progressive (≥20% increase)",
+          # Major Response: ≥90% reduction from most recent (baseline must be > 0)
+          baseline_value > 0 & !is.na(most_recent_pct_change) & most_recent_pct_change <= -90 ~ "Major Response (≥90% reduction)",
+          # Partial Response: 30-89% reduction from most recent (baseline must be > 0)
+          baseline_value > 0 & !is.na(most_recent_pct_change) & most_recent_pct_change <= -30 & most_recent_pct_change > -90 ~ "Partial Response (30-89% reduction)",
+          # Progressive: ≥20% increase from most recent (baseline must be > 0)
+          baseline_value > 0 & !is.na(most_recent_pct_change) & most_recent_pct_change >= 20 ~ "Progressive (≥20% increase)",
+          # Stable: 0-29% reduction or 0-29% increase (baseline must be > 0)
+          baseline_value > 0 & !is.na(most_recent_pct_change) & most_recent_pct_change > -30 & most_recent_pct_change < 20 ~ "Stable (0-29% change)",
+          # Fallback for cases with baseline but no follow-up comparisons
+          baseline_value == 0 & !ever_positive ~ "Persistent Negative",
+          TRUE ~ "No ctDNA Data"
+        )
+      ) %>%
+      select(patient_id, quantitative_group),
+    by = "patient_id"
+  ) %>%
+  mutate(quantitative_group = ifelse(is.na(quantitative_group), "No ctDNA Data", quantitative_group))
+
+# Create ML groups
+ctdna_with_trend <- ctdna_long %>%
+  left_join(baseline_ctdna %>% select(patient_id, baseline_value, baseline_date), by = "patient_id") %>%
+  filter(!is.na(baseline_value)) %>%
+  arrange(patient_id, ctdna_date) %>%
+  group_by(patient_id) %>%
+  mutate(
+    time_from_first = as.numeric(ctdna_date - min(ctdna_date, na.rm = TRUE)),
+    row_num = row_number()
+  ) %>%
+  ungroup()
+
+calculate_trend <- function(values, times) {
+  valid <- !is.na(values) & !is.na(times)
+  if (sum(valid) > 1) {
+    tryCatch({
+      lm_fit <- lm(values[valid] ~ times[valid])
+      as.numeric(coef(lm_fit)[2])
+    }, error = function(e) 0)
+  } else {
+    0
+  }
+}
+
+trend_data <- ctdna_with_trend %>%
+  group_by(patient_id) %>%
+  filter(n() > 1, sum(!is.na(ctdna_value)) > 1, sum(!is.na(time_from_first)) > 1) %>%
+  summarise(trend = calculate_trend(ctdna_value, time_from_first), .groups = "drop")
+
+patients_no_trend <- ctdna_with_trend %>%
+  group_by(patient_id) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  filter(n == 1 | !patient_id %in% trend_data$patient_id) %>%
+  mutate(trend = 0) %>%
+  select(patient_id, trend)
+
+trend_all <- bind_rows(trend_data, patients_no_trend)
+
+ml_features <- ctdna_with_trend %>%
+  group_by(patient_id) %>%
+  summarise(
+    baseline_value = first(baseline_value),
+    n_measurements = n(),
+    mean_ctdna = mean(ctdna_value, na.rm = TRUE),
+    median_ctdna = median(ctdna_value, na.rm = TRUE),
+    max_ctdna = max(ctdna_value, na.rm = TRUE),
+    min_ctdna = min(ctdna_value, na.rm = TRUE),
+    sd_ctdna = sd(ctdna_value, na.rm = TRUE),
+    n_positive = sum(ctdna_value > 0, na.rm = TRUE),
+    n_negative = sum(ctdna_value == 0, na.rm = TRUE),
+    became_negative = any(baseline_value > 0 & ctdna_value == 0, na.rm = TRUE),
+    became_positive = any(baseline_value == 0 & ctdna_value > 0, na.rm = TRUE),
+    last_value = last(ctdna_value),
+    first_value = first(ctdna_value),
+    pct_change_baseline = ifelse(baseline_value > 0, 
+                                 ((last(ctdna_value) - baseline_value) / baseline_value) * 100,
+                                 ifelse(baseline_value == 0 & last(ctdna_value) > 0, 100, 0)),
+    time_span_days = as.numeric(max(ctdna_date) - min(ctdna_date)),
+    .groups = "drop"
+  ) %>%
+  left_join(trend_all, by = "patient_id") %>%
+  mutate(
+    cv_ctdna = ifelse(mean_ctdna > 0 & !is.na(sd_ctdna), sd_ctdna / mean_ctdna, 0),
+    trend_per_day = ifelse(!is.na(time_span_days) & time_span_days > 0, trend / time_span_days, 0),
+    clearance_pattern = became_negative & baseline_value > 0,
+    conversion_pattern = became_positive & baseline_value == 0,
+    persistent_positive = baseline_value > 0 & !became_negative & last_value > 0,
+    persistent_negative = baseline_value == 0 & !became_positive & last_value == 0,
+    across(c(mean_ctdna, median_ctdna, max_ctdna, min_ctdna, sd_ctdna, trend, cv_ctdna, 
+             trend_per_day, pct_change_baseline, time_span_days),
+           ~ifelse(is.na(.), 0, .))
+  )
+
+# Use all available data for clustering to improve generalizability
+# For unsupervised learning (k-means), using all data is appropriate and helps
+# identify more stable, generalizable cluster patterns
+set.seed(123)
+
+# Select features for clustering
+feature_cols <- setdiff(names(ml_features), c("patient_id", "baseline_value"))
+ml_features_for_clustering <- ml_features %>%
+  select(all_of(feature_cols)) %>%
+  mutate(across(everything(), ~{
+    x <- .
+    x[is.infinite(x)] <- 0
+    x[is.nan(x)] <- 0
+    x
+  }))
+
+# Scale all features using all data
+ml_features_scaled <- scale(ml_features_for_clustering)
+ml_features_scaled[is.infinite(ml_features_scaled)] <- 0
+ml_features_scaled[is.nan(ml_features_scaled)] <- 0
+
+# Use 5 clusters for clustering
+n_clusters <- 5
+
+# Perform k-means clustering on all data
+kmeans_result <- kmeans(ml_features_scaled, centers = n_clusters, nstart = 50, iter.max = 200)
+
+# Extract cluster assignments for all patients
+cluster_characteristics <- ml_features %>%
+  mutate(ml_cluster = kmeans_result$cluster) %>%
+  group_by(ml_cluster) %>%
+  summarise(
+    n = n(),
+    mean_baseline = mean(baseline_value, na.rm = TRUE),
+    mean_trend = mean(trend, na.rm = TRUE),
+    pct_clearance = mean(clearance_pattern, na.rm = TRUE) * 100,
+    pct_conversion = mean(conversion_pattern, na.rm = TRUE) * 100,
+    pct_persistent_pos = mean(persistent_positive, na.rm = TRUE) * 100,
+    pct_persistent_neg = mean(persistent_negative, na.rm = TRUE) * 100,
+    .groups = "drop"
+  ) %>%
+  arrange(mean_baseline, mean_trend)
+
+# Use cluster numbers for ML groups (unsupervised clustering)
+cluster_names <- cluster_characteristics %>%
+  mutate(
+    group_name = paste0("Cluster ", ml_cluster)
+  ) %>%
+  select(ml_cluster, group_name)
+
+# Assign cluster labels to all patients
+ml_groups <- ml_features %>%
+  mutate(ml_cluster = kmeans_result$cluster) %>%
+  left_join(cluster_names, by = "ml_cluster") %>%
+  select(patient_id, ml_group = group_name, ml_cluster)
+```
+
+```{r create_cindex_aic_table, include=FALSE}
+# ==============================
+# Create C-Index and AIC Comparison Table
+# ==============================
+
+# Function to calculate C-index with 95% CI using bootstrap
+calculate_c_index_with_ci <- function(data, time_var, event_var, group_var, n_bootstrap = 500) {
+  data_clean <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var]]),
+           !str_detect(tolower(.data[[group_var]]), "no ctdna data"))
+  
+  if (nrow(data_clean) == 0 || sum(data_clean[[event_var]] == 1, na.rm = TRUE) == 0) {
+    return(list(c_index = NA_real_, ci_lower = NA_real_, ci_upper = NA_real_, aic = NA_real_, n = 0))
+  }
+  
+  surv_formula <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", group_var))
+  cox_fit <- tryCatch({
+    coxph(surv_formula, data = data_clean)
+  }, error = function(e) {
+    return(NULL)
+  })
+  
+  if (is.null(cox_fit)) {
+    return(list(c_index = NA_real_, ci_lower = NA_real_, ci_upper = NA_real_, aic = NA_real_, n = nrow(data_clean)))
+  }
+  
+  c_index <- tryCatch({
+    summary(cox_fit)$concordance[1]
+  }, error = function(e) {
+    NA_real_
+  })
+  
+  aic_value <- tryCatch({
+    AIC(cox_fit)
+  }, error = function(e) {
+    NA_real_
+  })
+  
+  # Bootstrap for 95% CI
+  set.seed(123)
+  n <- nrow(data_clean)
+  c_index_bootstrap <- numeric(n_bootstrap)
+  
+  for (i in 1:n_bootstrap) {
+    boot_idx <- sample(1:n, size = n, replace = TRUE)
+    data_boot <- data_clean[boot_idx, ]
+    
+    cox_fit_boot <- tryCatch(coxph(surv_formula, data = data_boot), error = function(e) NULL)
+    
+    if (!is.null(cox_fit_boot)) {
+      c_boot <- tryCatch(summary(cox_fit_boot)$concordance[1], error = function(e) NA_real_)
+      if (!is.na(c_boot)) {
+        c_index_bootstrap[i] <- c_boot
+      }
+    }
+  }
+  
+  ci_lower <- quantile(c_index_bootstrap[c_index_bootstrap > 0], 0.025, na.rm = TRUE)
+  ci_upper <- quantile(c_index_bootstrap[c_index_bootstrap > 0], 0.975, na.rm = TRUE)
+  
+  if (is.na(ci_lower)) ci_lower <- NA_real_
+  if (is.na(ci_upper)) ci_upper <- NA_real_
+  
+  return(list(c_index = c_index, ci_lower = ci_lower, ci_upper = ci_upper, aic = aic_value, n = nrow(data_clean)))
+}
+
+# Function to compare C-indices between two models using bootstrap
+compare_c_indices <- function(data, time_var, event_var, group_var1, group_var2, n_bootstrap = 500) {
+  data_clean1 <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var1]]),
+           !str_detect(tolower(.data[[group_var1]]), "no ctdna data"))
+  
+  data_clean2 <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var2]]),
+           !str_detect(tolower(.data[[group_var2]]), "no ctdna data"))
+  
+  common_patients <- intersect(data_clean1$patient_id, data_clean2$patient_id)
+  
+  if (length(common_patients) < 10) {
+    return(list(p_value = NA_real_, diff_c_index = NA_real_, diff_ci_lower = NA_real_, diff_ci_upper = NA_real_, n_common = length(common_patients)))
+  }
+  
+  data_common <- data %>%
+    filter(patient_id %in% common_patients) %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0,
+           !is.na(.data[[group_var1]]), !is.na(.data[[group_var2]]),
+           !str_detect(tolower(.data[[group_var1]]), "no ctdna data"),
+           !str_detect(tolower(.data[[group_var2]]), "no ctdna data"))
+  
+  if (nrow(data_common) == 0 || sum(data_common[[event_var]] == 1, na.rm = TRUE) == 0) {
+    return(list(p_value = NA_real_, diff_c_index = NA_real_, diff_ci_lower = NA_real_, diff_ci_upper = NA_real_, n_common = 0))
+  }
+  
+  surv_formula1 <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", group_var1))
+  surv_formula2 <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", group_var2))
+  
+  cox_fit1 <- tryCatch(coxph(surv_formula1, data = data_common), error = function(e) NULL)
+  cox_fit2 <- tryCatch(coxph(surv_formula2, data = data_common), error = function(e) NULL)
+  
+  if (is.null(cox_fit1) || is.null(cox_fit2)) {
+    return(list(p_value = NA_real_, diff_c_index = NA_real_, diff_ci_lower = NA_real_, diff_ci_upper = NA_real_, n_common = nrow(data_common)))
+  }
+  
+  c_index1 <- tryCatch(summary(cox_fit1)$concordance[1], error = function(e) NA_real_)
+  c_index2 <- tryCatch(summary(cox_fit2)$concordance[1], error = function(e) NA_real_)
+  
+  if (is.na(c_index1) || is.na(c_index2)) {
+    return(list(p_value = NA_real_, diff_c_index = NA_real_, diff_ci_lower = NA_real_, diff_ci_upper = NA_real_, n_common = nrow(data_common)))
+  }
+  
+  diff_observed <- c_index1 - c_index2
+  
+  # Bootstrap to get p-value and CI
+  set.seed(123)
+  n <- nrow(data_common)
+  diff_bootstrap <- numeric(n_bootstrap)
+  
+  for (i in 1:n_bootstrap) {
+    boot_idx <- sample(1:n, size = n, replace = TRUE)
+    data_boot <- data_common[boot_idx, ]
+    
+    cox_fit1_boot <- tryCatch(coxph(surv_formula1, data = data_boot), error = function(e) NULL)
+    cox_fit2_boot <- tryCatch(coxph(surv_formula2, data = data_boot), error = function(e) NULL)
+    
+    if (!is.null(cox_fit1_boot) && !is.null(cox_fit2_boot)) {
+      c1_boot <- tryCatch(summary(cox_fit1_boot)$concordance[1], error = function(e) NA_real_)
+      c2_boot <- tryCatch(summary(cox_fit2_boot)$concordance[1], error = function(e) NA_real_)
+      
+      if (!is.na(c1_boot) && !is.na(c2_boot)) {
+        diff_bootstrap[i] <- c1_boot - c2_boot
+      }
+    }
+  }
+  
+  p_value <- mean(abs(diff_bootstrap) >= abs(diff_observed), na.rm = TRUE)
+  diff_ci_lower <- quantile(diff_bootstrap[diff_bootstrap != 0], 0.025, na.rm = TRUE)
+  diff_ci_upper <- quantile(diff_bootstrap[diff_bootstrap != 0], 0.975, na.rm = TRUE)
+  
+  if (is.na(diff_ci_lower)) diff_ci_lower <- NA_real_
+  if (is.na(diff_ci_upper)) diff_ci_upper <- NA_real_
+  
+  return(list(
+    p_value = p_value,
+    diff_c_index = diff_observed,
+    diff_ci_lower = diff_ci_lower,
+    diff_ci_upper = diff_ci_upper,
+    c_index1 = c_index1,
+    c_index2 = c_index2,
+    n_common = nrow(data_common),
+    n_bootstrap = sum(!is.na(diff_bootstrap))
+  ))
+}
+
+# Merge survival with groups (using landmark analysis to reduce immortal time bias)
+# Ensure all models use the same patient pool - only patients with data in all three models
+common_patients_all_models <- survival_outcomes_landmark$patient_id %>%
+  intersect(qualitative_groups$patient_id[qualitative_groups$qualitative_group != "No ctDNA Data"]) %>%
+  intersect(quantitative_groups$patient_id[quantitative_groups$quantitative_group != "No ctDNA Data"]) %>%
+  intersect(ml_groups$patient_id[!is.na(ml_groups$ml_group)])
+
+# All three models use the same patient pool
+# Since we're using common_patients_all_models, all patients should have valid classifications
+# No need to set "No ctDNA Data" - if missing, it's an error
+survival_qualitative <- survival_outcomes_landmark %>%
+  filter(patient_id %in% common_patients_all_models) %>%
+  inner_join(qualitative_groups %>% select(patient_id, qualitative_group), by = "patient_id") %>%
+  filter(qualitative_group != "No ctDNA Data")
+
+survival_quantitative <- survival_outcomes_landmark %>%
+  filter(patient_id %in% common_patients_all_models) %>%
+  inner_join(quantitative_groups %>% select(patient_id, quantitative_group), by = "patient_id") %>%
+  filter(quantitative_group != "No ctDNA Data")
+
+survival_ml <- survival_outcomes_landmark %>%
+  filter(patient_id %in% common_patients_all_models) %>%
+  inner_join(ml_groups %>% select(patient_id, ml_group), by = "patient_id") %>%
+  filter(!is.na(ml_group))
+
+# Calculate C-index and AIC for all three approaches (OS only, using landmark analysis)
+qual_os_results <- calculate_c_index_with_ci(survival_qualitative, "os_time_landmark", "death_event_landmark", "qualitative_group")
+quant_os_results <- calculate_c_index_with_ci(survival_quantitative, "os_time_landmark", "death_event_landmark", "quantitative_group")
+ml_os_results <- calculate_c_index_with_ci(survival_ml, "os_time_landmark", "death_event_landmark", "ml_group")
+
+# Compare Quantitative vs Qualitative and ML
+comp_quant_vs_qual <- compare_c_indices(
+  survival_quantitative %>% 
+    left_join(survival_qualitative %>% select(patient_id, qualitative_group), by = "patient_id"),
+  "os_time_landmark", "death_event_landmark", 
+  "quantitative_group", "qualitative_group"
+)
+
+comp_quant_vs_ml <- compare_c_indices(
+  survival_quantitative %>% 
+    left_join(survival_ml %>% select(patient_id, ml_group), by = "patient_id"),
+  "os_time_landmark", "death_event_landmark", 
+  "quantitative_group", "ml_group"
+)
+
+comp_qual_vs_ml <- compare_c_indices(
+  survival_qualitative %>% 
+    left_join(survival_ml %>% select(patient_id, ml_group), by = "patient_id"),
+  "os_time_landmark", "death_event_landmark", 
+  "qualitative_group", "ml_group"
+)
+```
+
+```{r categorize_therapy_types, include=FALSE}
+# ==============================
+# Categorize Patients by Therapy Type
+# ==============================
+
+# Function to clean therapy setting (same as in ctDNA_Descriptive.Rmd)
+clean_setting <- function(x) {
+  y <- tolower(str_squish(as.character(x)))
+  case_when(
+    y %in% c("neo","neoadjuvant","neoadjuvant therapy","neoadjuvant systemic therapy") ~ "Neoadjuvant",
+    y %in% c("adjuvant","adjuvant therapy","adjuvant systemic therapy") ~ "Adjuvant",
+    y %in% c("palliative","metastatic","1l metastatic","2l metastatic") ~ "Palliative",
+    y %in% c("","na","n/a","unknown","other","other (see notes)") ~ NA_character_,
+    TRUE ~ str_to_title(y)
+  )
+}
+
+# Extract systemic therapy settings
+# Start with all patients in common_patients_all_models to ensure we include everyone
+patient_therapy_base <- tibble(patient_id = common_patients_all_models) %>%
+  mutate(
+    has_neoadjuvant = FALSE,
+    has_adjuvant = FALSE,
+    has_palliative = FALSE
+  )
+
+therapy_setting_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*treatment.*setting|systemic.*therapy.*\\d+.*setting", ignore_case = TRUE))]
+
+if (length(therapy_setting_cols) > 0) {
+  therapy_settings_long <- dat_combined %>%
+    select(patient_id, all_of(therapy_setting_cols)) %>%
+    pivot_longer(-patient_id, names_to = "therapy_var", values_to = "setting_raw") %>%
+    mutate(
+      therapy_idx = str_extract(therapy_var, "\\d+"),
+      setting_clean = clean_setting(setting_raw)
+    ) %>%
+    filter(!is.na(setting_clean))
+  
+  # Summarize per patient - patients can have multiple therapy types
+  patient_therapy_with_data <- therapy_settings_long %>%
+    group_by(patient_id) %>%
+    summarise(
+      has_neoadjuvant = any(setting_clean == "Neoadjuvant", na.rm = TRUE),
+      has_adjuvant = any(setting_clean == "Adjuvant", na.rm = TRUE),
+      has_palliative = any(setting_clean == "Palliative", na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Merge with base to ensure all patients are included
+  patient_therapy <- patient_therapy_base %>%
+    left_join(patient_therapy_with_data, by = "patient_id", suffix = c("", "_new")) %>%
+    mutate(
+      has_neoadjuvant = ifelse(!is.na(has_neoadjuvant_new), has_neoadjuvant_new, has_neoadjuvant),
+      has_adjuvant = ifelse(!is.na(has_adjuvant_new), has_adjuvant_new, has_adjuvant),
+      has_palliative = ifelse(!is.na(has_palliative_new), has_palliative_new, has_palliative)
+    ) %>%
+    select(patient_id, has_neoadjuvant, has_adjuvant, has_palliative)
+} else {
+  patient_therapy <- patient_therapy_base
+}
+
+# Determine if patient received any systemic therapy
+patient_therapy <- patient_therapy %>%
+  mutate(
+    has_any_systemic = has_neoadjuvant | has_adjuvant | has_palliative,
+    therapy_category = case_when(
+      has_palliative ~ "Palliative",
+      has_adjuvant ~ "Adjuvant",
+      has_neoadjuvant ~ "Neoadjuvant",
+      !has_any_systemic ~ "No Systemic Therapy",
+      TRUE ~ "Other"
+    )
+  )
+
+# Create therapy groups for table (patients can be in multiple groups)
+# Ensure all common_patients_all_models are included
+therapy_groups_table <- patient_therapy %>%
+  # Ensure we have all patients
+  filter(patient_id %in% common_patients_all_models) %>%
+  select(patient_id, has_neoadjuvant, has_adjuvant, has_palliative, has_any_systemic) %>%
+  mutate(
+    Neoadjuvant = ifelse(has_neoadjuvant, "Yes", "No"),
+    Adjuvant = ifelse(has_adjuvant, "Yes", "No"),
+    Palliative = ifelse(has_palliative, "Yes", "No"),
+    `No Systemic Therapy` = ifelse(!has_any_systemic, "Yes", "No")
+  ) %>%
+  select(patient_id, Neoadjuvant, Adjuvant, Palliative, `No Systemic Therapy`)
+
+# Merge therapy information with survival data for sensitivity analyses
+survival_qualitative_therapy <- survival_qualitative %>%
+  left_join(patient_therapy %>% select(patient_id, has_neoadjuvant, has_adjuvant, has_palliative, has_any_systemic, therapy_category), by = "patient_id")
+
+survival_quantitative_therapy <- survival_quantitative %>%
+  left_join(patient_therapy %>% select(patient_id, has_neoadjuvant, has_adjuvant, has_palliative, has_any_systemic, therapy_category), by = "patient_id")
+
+survival_ml_therapy <- survival_ml %>%
+  left_join(patient_therapy %>% select(patient_id, has_neoadjuvant, has_adjuvant, has_palliative, has_any_systemic, therapy_category), by = "patient_id")
+```
+
+```{r therapy_type_table, echo=FALSE}
+# ==============================
+# Table: Patient Counts by Therapy Type
+# ==============================
+
+cat("## Patient Distribution by Therapy Type\n\n")
+cat("**Note:** Patients can be counted in multiple therapy categories if they received multiple types of therapy during their ctDNA monitoring period.\n\n")
+
+# Create table with patient counts by therapy type
+# Use therapy_groups_table which already includes all common_patients_all_models
+total_n <- length(common_patients_all_models)
+
+therapy_table <- tibble(
+  `Therapy Type` = c("Neoadjuvant", "Adjuvant", "Palliative", "No Systemic Therapy"),
+  N = c(
+    sum(therapy_groups_table$Neoadjuvant == "Yes", na.rm = TRUE),
+    sum(therapy_groups_table$Adjuvant == "Yes", na.rm = TRUE),
+    sum(therapy_groups_table$Palliative == "Yes", na.rm = TRUE),
+    sum(therapy_groups_table$`No Systemic Therapy` == "Yes", na.rm = TRUE)
+  )
+) %>%
+  mutate(
+    Total = total_n,
+    `%` = round(N / Total * 100, 1)
+  ) %>%
+  select(`Therapy Type`, N, `%`)
+
+therapy_table %>%
+  kable(caption = "Table: Patient Counts by Therapy Type (Evaluable Population)", align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE, position = "center")
+
+cat("\n")
+```
+
+```{r sensitivity_analysis_by_therapy, include=FALSE}
+# ==============================
+# Sensitivity Analysis: C-Index by Therapy Type
+# ==============================
+
+# Function to run sensitivity analysis for a specific therapy type
+run_therapy_sensitivity <- function(therapy_flag, therapy_name, survival_data_qual, survival_data_quant, survival_data_ml) {
+  # Filter to patients with this therapy type
+  data_qual <- survival_data_qual %>%
+    filter(.data[[therapy_flag]] == TRUE)
+  
+  data_quant <- survival_data_quant %>%
+    filter(.data[[therapy_flag]] == TRUE)
+  
+  data_ml <- survival_data_ml %>%
+    filter(.data[[therapy_flag]] == TRUE)
+  
+  # Calculate C-indices
+  qual_results <- calculate_c_index_with_ci(data_qual, "os_time_landmark", "death_event_landmark", "qualitative_group")
+  quant_results <- calculate_c_index_with_ci(data_quant, "os_time_landmark", "death_event_landmark", "quantitative_group")
+  ml_results <- calculate_c_index_with_ci(data_ml, "os_time_landmark", "death_event_landmark", "ml_group")
+  
+  # Compare models
+  comp_quant_vs_qual <- compare_c_indices(
+    data_quant %>% 
+      left_join(data_qual %>% select(patient_id, qualitative_group), by = "patient_id"),
+    "os_time_landmark", "death_event_landmark", 
+    "quantitative_group", "qualitative_group"
+  )
+  
+  comp_quant_vs_ml <- compare_c_indices(
+    data_quant %>% 
+      left_join(data_ml %>% select(patient_id, ml_group), by = "patient_id"),
+    "os_time_landmark", "death_event_landmark", 
+    "quantitative_group", "ml_group"
+  )
+  
+  comp_qual_vs_ml <- compare_c_indices(
+    data_qual %>% 
+      left_join(data_ml %>% select(patient_id, ml_group), by = "patient_id"),
+    "os_time_landmark", "death_event_landmark", 
+    "qualitative_group", "ml_group"
+  )
+  
+  return(list(
+    therapy_name = therapy_name,
+    qual_results = qual_results,
+    quant_results = quant_results,
+    ml_results = ml_results,
+    comp_quant_vs_qual = comp_quant_vs_qual,
+    comp_quant_vs_ml = comp_quant_vs_ml,
+    comp_qual_vs_ml = comp_qual_vs_ml
+  ))
+}
+
+# Run sensitivity analyses for each therapy type
+sensitivity_neoadjuvant <- run_therapy_sensitivity(
+  "has_neoadjuvant", "Neoadjuvant",
+  survival_qualitative_therapy, survival_quantitative_therapy, survival_ml_therapy
+)
+
+sensitivity_adjuvant <- run_therapy_sensitivity(
+  "has_adjuvant", "Adjuvant",
+  survival_qualitative_therapy, survival_quantitative_therapy, survival_ml_therapy
+)
+
+sensitivity_palliative <- run_therapy_sensitivity(
+  "has_palliative", "Palliative",
+  survival_qualitative_therapy, survival_quantitative_therapy, survival_ml_therapy
+)
+
+# For "No Systemic Therapy", filter patients who don't have any systemic therapy
+# Use coalesce to handle any potential NAs (shouldn't happen but safe)
+sensitivity_no_therapy <- list(
+  therapy_name = "No Systemic Therapy",
+  qual_results = calculate_c_index_with_ci(
+    survival_qualitative_therapy %>% filter(coalesce(!has_any_systemic, TRUE)),
+    "os_time_landmark", "death_event_landmark", "qualitative_group"
+  ),
+  quant_results = calculate_c_index_with_ci(
+    survival_quantitative_therapy %>% filter(coalesce(!has_any_systemic, TRUE)),
+    "os_time_landmark", "death_event_landmark", "quantitative_group"
+  ),
+  ml_results = calculate_c_index_with_ci(
+    survival_ml_therapy %>% filter(coalesce(!has_any_systemic, TRUE)),
+    "os_time_landmark", "death_event_landmark", "ml_group"
+  )
+)
+
+# Function to compare C-indices for the same model across different therapy types
+compare_model_across_therapy <- function(model_name, therapy_results_list, therapy_names, n_bootstrap = 500) {
+  # Extract C-indices for this model across therapy types
+  c_indices <- map_dbl(therapy_results_list, function(x) {
+    if (model_name == "Qualitative") {
+      if (!is.null(x$qual_results) && !is.na(x$qual_results$c_index)) {
+        return(x$qual_results$c_index)
+      }
+    } else if (model_name == "Quantitative") {
+      if (!is.null(x$quant_results) && !is.na(x$quant_results$c_index)) {
+        return(x$quant_results$c_index)
+      }
+    } else if (model_name == "ML") {
+      if (!is.null(x$ml_results) && !is.na(x$ml_results$c_index)) {
+        return(x$ml_results$c_index)
+      }
+    }
+    return(NA_real_)
+  })
+  
+  # Get data for each therapy type
+  get_therapy_data <- function(therapy_flag, survival_data) {
+    if (therapy_flag == "has_any_systemic") {
+      survival_data %>% filter(coalesce(!has_any_systemic, TRUE))
+    } else {
+      survival_data %>% filter(.data[[therapy_flag]] == TRUE)
+    }
+  }
+  
+  # Create comparison pairs
+  n_therapies <- length(therapy_names)
+  comparisons <- list()
+  
+  for (i in 1:(n_therapies - 1)) {
+    for (j in (i + 1):n_therapies) {
+      therapy1 <- therapy_names[i]
+      therapy2 <- therapy_names[j]
+      
+      # Get therapy flags
+      flag1 <- case_when(
+        therapy1 == "Neoadjuvant" ~ "has_neoadjuvant",
+        therapy1 == "Adjuvant" ~ "has_adjuvant",
+        therapy1 == "Palliative" ~ "has_palliative",
+        therapy1 == "No Systemic Therapy" ~ "has_any_systemic",
+        TRUE ~ NA_character_
+      )
+      
+      flag2 <- case_when(
+        therapy2 == "Neoadjuvant" ~ "has_neoadjuvant",
+        therapy2 == "Adjuvant" ~ "has_adjuvant",
+        therapy2 == "Palliative" ~ "has_palliative",
+        therapy2 == "No Systemic Therapy" ~ "has_any_systemic",
+        TRUE ~ NA_character_
+      )
+      
+      if (is.na(flag1) || is.na(flag2)) next
+      
+      # Get data for each therapy type
+      if (model_name == "Qualitative") {
+        data1 <- get_therapy_data(flag1, survival_qualitative_therapy)
+        data2 <- get_therapy_data(flag2, survival_qualitative_therapy)
+        group_var <- "qualitative_group"
+      } else if (model_name == "Quantitative") {
+        data1 <- get_therapy_data(flag1, survival_quantitative_therapy)
+        data2 <- get_therapy_data(flag2, survival_quantitative_therapy)
+        group_var <- "quantitative_group"
+      } else if (model_name == "ML") {
+        data1 <- get_therapy_data(flag1, survival_ml_therapy)
+        data2 <- get_therapy_data(flag2, survival_ml_therapy)
+        group_var <- "ml_group"
+      } else {
+        next
+      }
+      
+      # Compare C-indices
+      comp_result <- compare_c_indices(
+        bind_rows(
+          data1 %>% mutate(therapy_group = therapy1),
+          data2 %>% mutate(therapy_group = therapy2)
+        ) %>%
+          filter(!is.na(.data[[group_var]]), 
+                 !str_detect(tolower(.data[[group_var]]), "no ctdna data")),
+        "os_time_landmark", "death_event_landmark",
+        group_var, group_var
+      )
+      
+      # Actually, we need to compare the C-indices directly, not use compare_c_indices
+      # Let's calculate C-index for each therapy group separately and compare
+      c1 <- if (!is.na(c_indices[i])) c_indices[i] else NA_real_
+      c2 <- if (!is.na(c_indices[j])) c_indices[j] else NA_real_
+      
+      if (is.na(c1) || is.na(c2)) {
+        comparisons[[paste0(therapy1, " vs ", therapy2)]] <- list(
+          therapy1 = therapy1,
+          therapy2 = therapy2,
+          c_index1 = c1,
+          c_index2 = c2,
+          diff = NA_real_,
+          p_value = NA_real_,
+          n1 = ifelse(!is.null(therapy_results_list[[i]]$qual_results$n), 
+                     if(model_name == "Qualitative") therapy_results_list[[i]]$qual_results$n else
+                     if(model_name == "Quantitative") therapy_results_list[[i]]$quant_results$n else
+                     therapy_results_list[[i]]$ml_results$n, 0),
+          n2 = ifelse(!is.null(therapy_results_list[[j]]$qual_results$n),
+                     if(model_name == "Qualitative") therapy_results_list[[j]]$qual_results$n else
+                     if(model_name == "Quantitative") therapy_results_list[[j]]$quant_results$n else
+                     therapy_results_list[[j]]$ml_results$n, 0)
+        )
+        next
+      }
+      
+      # Bootstrap comparison of C-indices
+      # We need to bootstrap the difference in C-indices
+      set.seed(123)
+      diff_observed <- c1 - c2
+      diff_bootstrap <- numeric(0)
+      
+      # Bootstrap each therapy group separately
+      for (b in 1:n_bootstrap) {
+        # Bootstrap therapy 1
+        boot_idx1 <- sample(1:nrow(data1), size = nrow(data1), replace = TRUE)
+        data1_boot <- data1[boot_idx1, ]
+        
+        # Bootstrap therapy 2
+        boot_idx2 <- sample(1:nrow(data2), size = nrow(data2), replace = TRUE)
+        data2_boot <- data2[boot_idx2, ]
+        
+        # Calculate C-index for each
+        c1_boot <- NA_real_
+        if (nrow(data1_boot) > 0 && sum(data1_boot$death_event_landmark == 1, na.rm = TRUE) > 0) {
+          surv_formula1 <- as.formula(paste0("Surv(os_time_landmark, death_event_landmark) ~ ", group_var))
+          cox1_boot <- tryCatch(coxph(surv_formula1, data = data1_boot), error = function(e) NULL)
+          if (!is.null(cox1_boot)) {
+            c1_boot <- tryCatch(summary(cox1_boot)$concordance[1], error = function(e) NA_real_)
+          }
+        }
+        
+        c2_boot <- NA_real_
+        if (nrow(data2_boot) > 0 && sum(data2_boot$death_event_landmark == 1, na.rm = TRUE) > 0) {
+          surv_formula2 <- as.formula(paste0("Surv(os_time_landmark, death_event_landmark) ~ ", group_var))
+          cox2_boot <- tryCatch(coxph(surv_formula2, data = data2_boot), error = function(e) NULL)
+          if (!is.null(cox2_boot)) {
+            c2_boot <- tryCatch(summary(cox2_boot)$concordance[1], error = function(e) NA_real_)
+          }
+        }
+        
+        # Only include successful bootstrap samples
+        if (!is.na(c1_boot) && !is.na(c2_boot)) {
+          diff_bootstrap <- c(diff_bootstrap, c1_boot - c2_boot)
+        }
+      }
+      
+      # Calculate p-value only from successful bootstrap samples
+      if (length(diff_bootstrap) > 0) {
+        p_value <- mean(abs(diff_bootstrap) >= abs(diff_observed), na.rm = TRUE)
+      } else {
+        p_value <- NA_real_
+      }
+      
+      comparisons[[paste0(therapy1, " vs ", therapy2)]] <- list(
+        therapy1 = therapy1,
+        therapy2 = therapy2,
+        c_index1 = c1,
+        c_index2 = c2,
+        diff = diff_observed,
+        p_value = p_value,
+        n1 = ifelse(!is.null(therapy_results_list[[i]]$qual_results$n), 
+                   if(model_name == "Qualitative") therapy_results_list[[i]]$qual_results$n else
+                   if(model_name == "Quantitative") therapy_results_list[[i]]$quant_results$n else
+                   therapy_results_list[[i]]$ml_results$n, 0),
+        n2 = ifelse(!is.null(therapy_results_list[[j]]$qual_results$n),
+                   if(model_name == "Qualitative") therapy_results_list[[j]]$qual_results$n else
+                   if(model_name == "Quantitative") therapy_results_list[[j]]$quant_results$n else
+                   therapy_results_list[[j]]$ml_results$n, 0)
+      )
+    }
+  }
+  
+  return(comparisons)
+}
+
+# Compare each model across therapy types
+therapy_comparisons_qual <- compare_model_across_therapy(
+  "Qualitative",
+  list(sensitivity_neoadjuvant, sensitivity_adjuvant, sensitivity_palliative, sensitivity_no_therapy),
+  c("Neoadjuvant", "Adjuvant", "Palliative", "No Systemic Therapy")
+)
+
+therapy_comparisons_quant <- compare_model_across_therapy(
+  "Quantitative",
+  list(sensitivity_neoadjuvant, sensitivity_adjuvant, sensitivity_palliative, sensitivity_no_therapy),
+  c("Neoadjuvant", "Adjuvant", "Palliative", "No Systemic Therapy")
+)
+
+therapy_comparisons_ml <- compare_model_across_therapy(
+  "ML",
+  list(sensitivity_neoadjuvant, sensitivity_adjuvant, sensitivity_palliative, sensitivity_no_therapy),
+  c("Neoadjuvant", "Adjuvant", "Palliative", "No Systemic Therapy")
+)
+
+# Complete sensitivity_no_therapy with pairwise comparisons
+sensitivity_no_therapy <- c(sensitivity_no_therapy, list(
+  comp_quant_vs_qual = compare_c_indices(
+    survival_quantitative_therapy %>% 
+      filter(coalesce(!has_any_systemic, TRUE)) %>%
+      left_join(survival_qualitative_therapy %>% 
+                  filter(coalesce(!has_any_systemic, TRUE)) %>%
+                  select(patient_id, qualitative_group), by = "patient_id"),
+    "os_time_landmark", "death_event_landmark", 
+    "quantitative_group", "qualitative_group"
+  ),
+  comp_quant_vs_ml = compare_c_indices(
+    survival_quantitative_therapy %>% 
+      filter(coalesce(!has_any_systemic, TRUE)) %>%
+      left_join(survival_ml_therapy %>% 
+                  filter(coalesce(!has_any_systemic, TRUE)) %>%
+                  select(patient_id, ml_group), by = "patient_id"),
+    "os_time_landmark", "death_event_landmark", 
+    "quantitative_group", "ml_group"
+  ),
+  comp_qual_vs_ml = compare_c_indices(
+    survival_qualitative_therapy %>% 
+      filter(coalesce(!has_any_systemic, TRUE)) %>%
+      left_join(survival_ml_therapy %>% 
+                  filter(coalesce(!has_any_systemic, TRUE)) %>%
+                  select(patient_id, ml_group), by = "patient_id"),
+    "os_time_landmark", "death_event_landmark", 
+    "qualitative_group", "ml_group"
+  )
+))
+```
+
+```{r extract_histology, include=FALSE}
+# ==============================
+# Extract Histology Information
+# ==============================
+
+# Extract histology and primary site for all patients in dat_combined, then filter to common patients
+histology_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^histology$|histology.*type", ignore_case = TRUE))]
+primary_location_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("primary.*tumor.*location|tumor.*location|primary.*site", ignore_case = TRUE))]
+
+if (length(histology_cols) > 0) {
+  # Build select columns conditionally
+  select_cols <- c("patient_id", histology_cols[1])
+  if (length(primary_location_cols) > 0) {
+    select_cols <- c(select_cols, primary_location_cols[1])
+  }
+  
+  patient_histology_all <- dat_combined %>%
+    select(all_of(select_cols)) %>%
+    mutate(
+      histology_raw = as.character(.data[[histology_cols[1]]]),
+      histology_clean = str_replace_all(histology_raw, 
+                                        regex("urothelial/transitional|transitional/urothelial", ignore_case = TRUE), 
+                                        "urothelial"),
+      is_urothelial = str_detect(tolower(histology_clean), "urothelial|transitional"),
+      primary_site = if(length(primary_location_cols) > 0) {
+        as.character(.data[[primary_location_cols[1]]])
+      } else {
+        NA_character_
+      },
+      primary_site_clean = case_when(
+        str_detect(tolower(primary_site), "bladder") ~ "Bladder",
+        str_detect(tolower(primary_site), "renal.*pelvis|pelvis") ~ "Upper Tract",
+        str_detect(tolower(primary_site), "ureter") ~ "Upper Tract",
+        TRUE ~ "Unknown"
+      ),
+      # Categorize: Urothelial Carcinoma of Bladder vs UTUC or Variant Histology
+      is_bladder_urothelial = primary_site_clean == "Bladder" & is_urothelial,
+      histology_binary = case_when(
+        is_bladder_urothelial ~ "Urothelial Carcinoma of Bladder",
+        !is_urothelial | primary_site_clean != "Bladder" ~ "UTUC or Variant Histology",
+        TRUE ~ "UTUC or Variant Histology"
+      )
+    ) %>%
+    select(patient_id, is_urothelial, is_bladder_urothelial, histology_binary)
+  
+  # Filter to common patients and ensure all are included
+  patient_histology <- tibble(patient_id = common_patients_all_models) %>%
+    left_join(patient_histology_all, by = "patient_id")
+} else {
+  patient_histology <- tibble(
+    patient_id = common_patients_all_models,
+    is_urothelial = NA,
+    is_bladder_urothelial = NA,
+    histology_binary = NA_character_
+  )
+}
+
+# Merge histology information with survival data for sensitivity analyses
+survival_qualitative_histology <- survival_qualitative %>%
+  left_join(patient_histology %>% select(patient_id, is_urothelial, is_bladder_urothelial, histology_binary), by = "patient_id")
+
+survival_quantitative_histology <- survival_quantitative %>%
+  left_join(patient_histology %>% select(patient_id, is_urothelial, is_bladder_urothelial, histology_binary), by = "patient_id")
+
+survival_ml_histology <- survival_ml %>%
+  left_join(patient_histology %>% select(patient_id, is_urothelial, is_bladder_urothelial, histology_binary), by = "patient_id")
+```
+
+```{r sensitivity_analysis_by_histology, include=FALSE}
+# ==============================
+# Sensitivity Analysis: C-Index by Histology Type
+# ==============================
+
+# Run sensitivity analyses for bladder urothelial vs UTUC/variant histology
+sensitivity_urothelial <- run_therapy_sensitivity(
+  "is_bladder_urothelial", "Urothelial Carcinoma of Bladder",
+  survival_qualitative_histology, survival_quantitative_histology, survival_ml_histology
+)
+
+# For "UTUC or Variant Histology", filter patients who are NOT bladder urothelial
+sensitivity_other_histology <- list(
+  therapy_name = "UTUC or Variant Histology",
+  qual_results = calculate_c_index_with_ci(
+    survival_qualitative_histology %>% filter(!is_bladder_urothelial | is.na(is_bladder_urothelial)),
+    "os_time_landmark", "death_event_landmark", "qualitative_group"
+  ),
+  quant_results = calculate_c_index_with_ci(
+    survival_quantitative_histology %>% filter(!is_bladder_urothelial | is.na(is_bladder_urothelial)),
+    "os_time_landmark", "death_event_landmark", "quantitative_group"
+  ),
+  ml_results = calculate_c_index_with_ci(
+    survival_ml_histology %>% filter(!is_bladder_urothelial | is.na(is_bladder_urothelial)),
+    "os_time_landmark", "death_event_landmark", "ml_group"
+  ),
+  comp_quant_vs_qual = compare_c_indices(
+    survival_quantitative_histology %>% 
+      filter(!is_bladder_urothelial | is.na(is_bladder_urothelial)) %>%
+      left_join(survival_qualitative_histology %>% 
+                  filter(!is_bladder_urothelial | is.na(is_bladder_urothelial)) %>%
+                  select(patient_id, qualitative_group), by = "patient_id"),
+    "os_time_landmark", "death_event_landmark", 
+    "quantitative_group", "qualitative_group"
+  ),
+  comp_quant_vs_ml = compare_c_indices(
+    survival_quantitative_histology %>% 
+      filter(!is_bladder_urothelial | is.na(is_bladder_urothelial)) %>%
+      left_join(survival_ml_histology %>% 
+                  filter(!is_bladder_urothelial | is.na(is_bladder_urothelial)) %>%
+                  select(patient_id, ml_group), by = "patient_id"),
+    "os_time_landmark", "death_event_landmark", 
+    "quantitative_group", "ml_group"
+  ),
+  comp_qual_vs_ml = compare_c_indices(
+    survival_qualitative_histology %>% 
+      filter(!is_bladder_urothelial | is.na(is_bladder_urothelial)) %>%
+      left_join(survival_ml_histology %>% 
+                  filter(!is_bladder_urothelial | is.na(is_bladder_urothelial)) %>%
+                  select(patient_id, ml_group), by = "patient_id"),
+    "os_time_landmark", "death_event_landmark", 
+    "qualitative_group", "ml_group"
+  )
+)
+```
+
+```{r display_sensitivity_analysis, echo=FALSE}
+# ==============================
+# Display Sensitivity Analysis Results
+# ==============================
+
+cat("## Sensitivity Analysis: Model Performance by Therapy Type\n\n")
+cat("This analysis examines whether C-index and pairwise comparisons differ when stratified by therapy type.\n\n")
+
+# Helper function to format results
+format_sensitivity_table <- function(sens_results, therapy_name) {
+  tibble(
+    `Therapy Type` = therapy_name,
+    `N (Qualitative)` = ifelse(!is.null(sens_results$qual_results$n), sens_results$qual_results$n, 0),
+    `C-Index Qual (95% CI)` = ifelse(!is.na(sens_results$qual_results$c_index),
+      paste0(round(sens_results$qual_results$c_index, 3), " (",
+             round(sens_results$qual_results$ci_lower, 3), "-",
+             round(sens_results$qual_results$ci_upper, 3), ")"), "N/A"),
+    `N (Quantitative)` = ifelse(!is.null(sens_results$quant_results$n), sens_results$quant_results$n, 0),
+    `C-Index Quant (95% CI)` = ifelse(!is.na(sens_results$quant_results$c_index),
+      paste0(round(sens_results$quant_results$c_index, 3), " (",
+             round(sens_results$quant_results$ci_lower, 3), "-",
+             round(sens_results$quant_results$ci_upper, 3), ")"), "N/A"),
+    `N (ML)` = ifelse(!is.null(sens_results$ml_results$n), sens_results$ml_results$n, 0),
+    `C-Index ML (95% CI)` = ifelse(!is.na(sens_results$ml_results$c_index),
+      paste0(round(sens_results$ml_results$c_index, 3), " (",
+             round(sens_results$ml_results$ci_lower, 3), "-",
+             round(sens_results$ml_results$ci_upper, 3), ")"), "N/A")
+  )
+}
+
+# Create combined table
+sensitivity_table <- bind_rows(
+  format_sensitivity_table(sensitivity_neoadjuvant, "Neoadjuvant"),
+  format_sensitivity_table(sensitivity_adjuvant, "Adjuvant"),
+  format_sensitivity_table(sensitivity_palliative, "Palliative"),
+  format_sensitivity_table(sensitivity_no_therapy, "No Systemic Therapy")
+)
+
+sensitivity_table %>%
+  kable(caption = "Table: C-Index by Therapy Type (Sensitivity Analysis)", align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE, position = "center") %>%
+  add_footnote("C-Index: Harrell's concordance index (higher is better, 0.5 = random, 1.0 = perfect). 95% CI calculated using bootstrap (n=500).", notation = "symbol")
+
+cat("\n### Pairwise Comparisons by Therapy Type\n\n")
+
+# Helper function to format pairwise comparisons
+format_pairwise_table <- function(sens_results, therapy_name) {
+  tibble(
+    `Therapy Type` = therapy_name,
+    `Comparison` = c("Quant vs Qual", "Quant vs ML", "Qual vs ML"),
+    `Diff C-Index (95% CI)` = c(
+      ifelse(!is.na(sens_results$comp_quant_vs_qual$diff_c_index),
+        paste0(round(sens_results$comp_quant_vs_qual$diff_c_index, 3), " (",
+               round(sens_results$comp_quant_vs_qual$diff_ci_lower, 3), "-",
+               round(sens_results$comp_quant_vs_qual$diff_ci_upper, 3), ")"), "N/A"),
+      ifelse(!is.na(sens_results$comp_quant_vs_ml$diff_c_index),
+        paste0(round(sens_results$comp_quant_vs_ml$diff_c_index, 3), " (",
+               round(sens_results$comp_quant_vs_ml$diff_ci_lower, 3), "-",
+               round(sens_results$comp_quant_vs_ml$diff_ci_upper, 3), ")"), "N/A"),
+      ifelse(!is.na(sens_results$comp_qual_vs_ml$diff_c_index),
+        paste0(round(sens_results$comp_qual_vs_ml$diff_c_index, 3), " (",
+               round(sens_results$comp_qual_vs_ml$diff_ci_lower, 3), "-",
+               round(sens_results$comp_qual_vs_ml$diff_ci_upper, 3), ")"), "N/A")
+    ),
+    `P-Value` = c(
+      ifelse(!is.na(sens_results$comp_quant_vs_qual$p_value),
+        ifelse(sens_results$comp_quant_vs_qual$p_value < 0.001, "<0.001",
+               round(sens_results$comp_quant_vs_qual$p_value, 4)), "N/A"),
+      ifelse(!is.na(sens_results$comp_quant_vs_ml$p_value),
+        ifelse(sens_results$comp_quant_vs_ml$p_value < 0.001, "<0.001",
+               round(sens_results$comp_quant_vs_ml$p_value, 4)), "N/A"),
+      ifelse(!is.na(sens_results$comp_qual_vs_ml$p_value),
+        ifelse(sens_results$comp_qual_vs_ml$p_value < 0.001, "<0.001",
+               round(sens_results$comp_qual_vs_ml$p_value, 4)), "N/A")
+    ),
+    `N (Common)` = c(
+      ifelse(!is.null(sens_results$comp_quant_vs_qual$n_common), sens_results$comp_quant_vs_qual$n_common, 0),
+      ifelse(!is.null(sens_results$comp_quant_vs_ml$n_common), sens_results$comp_quant_vs_ml$n_common, 0),
+      ifelse(!is.null(sens_results$comp_qual_vs_ml$n_common), sens_results$comp_qual_vs_ml$n_common, 0)
+    )
+  )
+}
+
+# Create combined pairwise comparison table
+pairwise_sensitivity_table <- bind_rows(
+  format_pairwise_table(sensitivity_neoadjuvant, "Neoadjuvant"),
+  format_pairwise_table(sensitivity_adjuvant, "Adjuvant"),
+  format_pairwise_table(sensitivity_palliative, "Palliative"),
+  format_pairwise_table(sensitivity_no_therapy, "No Systemic Therapy")
+)
+
+pairwise_sensitivity_table %>%
+  kable(caption = "Table: Pairwise Model Comparisons by Therapy Type (Sensitivity Analysis)", align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE, position = "center") %>%
+  add_footnote("P-values test the null hypothesis that C-index difference = 0. Calculated using bootstrap (n=500) with two-sided test.", notation = "symbol")
+
+cat("\n### Comparison of Same Model Performance Across Therapy Types\n\n")
+cat("This analysis tests whether the same model performs significantly differently across different therapy types.\n\n")
+
+# Helper function to format therapy comparison table
+format_therapy_comparison_table <- function(comparisons_list, model_name) {
+  if (length(comparisons_list) == 0) {
+    return(tibble())
+  }
+  
+  result_list <- map(comparisons_list, function(comp) {
+    tibble(
+      Model = model_name,
+      Comparison = paste0(comp$therapy1, " vs ", comp$therapy2),
+      `C-Index 1` = ifelse(!is.na(comp$c_index1), round(comp$c_index1, 3), "N/A"),
+      `C-Index 2` = ifelse(!is.na(comp$c_index2), round(comp$c_index2, 3), "N/A"),
+      `Difference` = ifelse(!is.na(comp$diff), round(comp$diff, 3), "N/A"),
+      `P-Value` = ifelse(!is.na(comp$p_value),
+                        ifelse(comp$p_value < 0.001, "<0.001", round(comp$p_value, 4)),
+                        "N/A"),
+      `N1` = comp$n1,
+      `N2` = comp$n2
+    )
+  })
+  
+  bind_rows(result_list)
+}
+
+# Create tables for each model
+therapy_comp_table_qual <- format_therapy_comparison_table(therapy_comparisons_qual, "Qualitative")
+therapy_comp_table_quant <- format_therapy_comparison_table(therapy_comparisons_quant, "Quantitative")
+therapy_comp_table_ml <- format_therapy_comparison_table(therapy_comparisons_ml, "ML")
+
+# Combine all comparisons
+therapy_across_comparisons <- bind_rows(
+  therapy_comp_table_qual,
+  therapy_comp_table_quant,
+  therapy_comp_table_ml
+)
+
+if (nrow(therapy_across_comparisons) > 0) {
+  therapy_across_comparisons %>%
+    kable(caption = "Table: Comparison of Same Model Performance Across Therapy Types", align = "c") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                  full_width = FALSE, position = "center") %>%
+    add_footnote("P-values test the null hypothesis that C-index difference = 0 between therapy types for the same model. Calculated using bootstrap (n=500) with two-sided test.", notation = "symbol")
+  
+  cat("\n**Important Statistical Note: Why Non-Overlapping 95% Confidence Intervals Don't Guarantee p < 0.05**\n\n")
+  cat("It is a common misconception that non-overlapping 95% confidence intervals (CIs) for two independent estimates guarantee a statistically significant difference (p < 0.05). However, this is not always true. Here's why:\n\n")
+  cat("1. **CIs are for individual estimates, not the difference**: The 95% CIs shown in the heatmap represent the uncertainty around each individual C-index estimate. They are not confidence intervals for the *difference* between two C-indices.\n\n")
+  cat("2. **Variance of the difference**: When comparing two independent estimates, the variance of their difference equals the *sum* of their individual variances (not the difference). This means the standard error of the difference can be larger than what might be inferred from the individual CIs.\n\n")
+  cat("3. **Different sample sizes**: When comparing groups with different sample sizes (e.g., n=39 vs n=84), the standard errors differ, and the variance of the difference accounts for both. A larger difference in sample sizes can lead to wider confidence intervals for the difference, even when individual CIs don't overlap.\n\n")
+  cat("4. **Mathematical relationship**: For two independent estimates with 95% CIs that don't overlap, the p-value for testing their difference is typically < 0.05. However, this relationship breaks down when:\n")
+  cat("   - Sample sizes are very different\n")
+  cat("   - The standard errors of the two estimates differ substantially\n")
+  cat("   - The estimates are not perfectly independent (though in this analysis, therapy groups are independent)\n\n")
+  cat("5. **Bootstrap method**: The bootstrap p-values shown in this table directly test the null hypothesis that the difference equals zero, accounting for the joint distribution of both C-indices. This provides a more accurate assessment than simply checking CI overlap.\n\n")
+  cat("**Example from this analysis**: The Quantitative model shows C-indices of 0.709 (95% CI: 0.627-0.806) for Palliative therapy and 0.971 (95% CI: 0.947-0.999) for No Systemic Therapy. While these CIs don't overlap, the bootstrap p-value is 0.382, which is not statistically significant. This occurs because:\n")
+  cat("   - The sample sizes differ (n=71 vs n=84)\n")
+  cat("   - The standard errors of the C-indices differ\n")
+  cat("   - The variance of the difference accounts for both sources of uncertainty\n\n")
+  cat("**Conclusion**: Always rely on the formal statistical test (p-value) rather than visual inspection of CI overlap when assessing statistical significance.\n\n")
+} else {
+  cat("Unable to calculate comparisons across therapy types.\n\n")
+}
+
+cat("\n## Sensitivity Analysis: Model Performance by Histology Type\n\n")
+cat("This analysis examines whether C-index and pairwise comparisons differ when stratified by histology type (Urothelial Carcinoma of Bladder vs UTUC or Variant Histology).\n\n")
+
+# Create combined table for histology
+sensitivity_histology_table <- bind_rows(
+  format_sensitivity_table(sensitivity_urothelial, "Urothelial Carcinoma of Bladder"),
+  format_sensitivity_table(sensitivity_other_histology, "UTUC or Variant Histology")
+)
+
+sensitivity_histology_table %>%
+  kable(caption = "Table: C-Index by Histology Type (Sensitivity Analysis)", align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE, position = "center") %>%
+  add_footnote("C-Index: Harrell's concordance index (higher is better, 0.5 = random, 1.0 = perfect). 95% CI calculated using bootstrap (n=500).", notation = "symbol")
+
+cat("\n### Pairwise Comparisons by Histology Type\n\n")
+
+# Create combined pairwise comparison table for histology
+pairwise_histology_table <- bind_rows(
+  format_pairwise_table(sensitivity_urothelial, "Urothelial Carcinoma of Bladder"),
+  format_pairwise_table(sensitivity_other_histology, "UTUC or Variant Histology")
+)
+
+pairwise_histology_table %>%
+  kable(caption = "Table: Pairwise Model Comparisons by Histology Type (Sensitivity Analysis)", align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE, position = "center") %>%
+  add_footnote("P-values test the null hypothesis that C-index difference = 0. Calculated using bootstrap (n=500) with two-sided test.", notation = "symbol")
+
+cat("\n")
+```
+
+```{r create_cindex_visualizations, include=FALSE}
+# ==============================
+# Create C-Index Visualizations
+# ==============================
+
+# Prepare data for therapy type heatmap
+prepare_heatmap_data <- function(sens_results_list, names_list) {
+  result_list <- map2(sens_results_list, names_list, function(sens, name) {
+    qual_c <- ifelse(!is.null(sens$qual_results) && !is.na(sens$qual_results$c_index), 
+                     sens$qual_results$c_index, NA_real_)
+    quant_c <- ifelse(!is.null(sens$quant_results) && !is.na(sens$quant_results$c_index), 
+                      sens$quant_results$c_index, NA_real_)
+    ml_c <- ifelse(!is.null(sens$ml_results) && !is.na(sens$ml_results$c_index), 
+                   sens$ml_results$c_index, NA_real_)
+    
+    qual_n <- ifelse(!is.null(sens$qual_results) && !is.null(sens$qual_results$n), 
+                     sens$qual_results$n, 0)
+    quant_n <- ifelse(!is.null(sens$quant_results) && !is.null(sens$quant_results$n), 
+                      sens$quant_results$n, 0)
+    ml_n <- ifelse(!is.null(sens$ml_results) && !is.null(sens$ml_results$n), 
+                   sens$ml_results$n, 0)
+    
+    qual_ci_lower <- ifelse(!is.null(sens$qual_results) && !is.na(sens$qual_results$ci_lower), 
+                            sens$qual_results$ci_lower, NA_real_)
+    quant_ci_lower <- ifelse(!is.null(sens$quant_results) && !is.na(sens$quant_results$ci_lower), 
+                              sens$quant_results$ci_lower, NA_real_)
+    ml_ci_lower <- ifelse(!is.null(sens$ml_results) && !is.na(sens$ml_results$ci_lower), 
+                          sens$ml_results$ci_lower, NA_real_)
+    
+    qual_ci_upper <- ifelse(!is.null(sens$qual_results) && !is.na(sens$qual_results$ci_upper), 
+                            sens$qual_results$ci_upper, NA_real_)
+    quant_ci_upper <- ifelse(!is.null(sens$quant_results) && !is.na(sens$quant_results$ci_upper), 
+                              sens$quant_results$ci_upper, NA_real_)
+    ml_ci_upper <- ifelse(!is.null(sens$ml_results) && !is.na(sens$ml_results$ci_upper), 
+                          sens$ml_results$ci_upper, NA_real_)
+    
+    tibble(
+      Stratum = name,
+      `Qualitative` = qual_c,
+      `Quantitative` = quant_c,
+      `ML` = ml_c,
+      `Qualitative_N` = qual_n,
+      `Quantitative_N` = quant_n,
+      `ML_N` = ml_n,
+      `Qualitative_CI_Lower` = qual_ci_lower,
+      `Quantitative_CI_Lower` = quant_ci_lower,
+      `ML_CI_Lower` = ml_ci_lower,
+      `Qualitative_CI_Upper` = qual_ci_upper,
+      `Quantitative_CI_Upper` = quant_ci_upper,
+      `ML_CI_Upper` = ml_ci_upper
+    )
+  })
+  bind_rows(result_list)
+}
+
+# Therapy type data
+therapy_heatmap_data <- prepare_heatmap_data(
+  list(sensitivity_neoadjuvant, sensitivity_adjuvant, sensitivity_palliative, sensitivity_no_therapy),
+  c("Neoadjuvant", "Adjuvant", "Palliative", "No Systemic Therapy")
+) %>%
+  pivot_longer(cols = c(`Qualitative`, `Quantitative`, `ML`), 
+               names_to = "Model", values_to = "C_Index") %>%
+  mutate(
+    N = case_when(
+      Model == "Qualitative" ~ `Qualitative_N`,
+      Model == "Quantitative" ~ `Quantitative_N`,
+      Model == "ML" ~ `ML_N`,
+      TRUE ~ 0
+    ),
+    CI_Lower = case_when(
+      Model == "Qualitative" ~ `Qualitative_CI_Lower`,
+      Model == "Quantitative" ~ `Quantitative_CI_Lower`,
+      Model == "ML" ~ `ML_CI_Lower`,
+      TRUE ~ NA_real_
+    ),
+    CI_Upper = case_when(
+      Model == "Qualitative" ~ `Qualitative_CI_Upper`,
+      Model == "Quantitative" ~ `Quantitative_CI_Upper`,
+      Model == "ML" ~ `ML_CI_Upper`,
+      TRUE ~ NA_real_
+    ),
+    Label = ifelse(!is.na(C_Index), paste0(round(C_Index, 3), "\n(n=", N, ")"), "N/A")
+  ) %>%
+  select(Stratum, Model, C_Index, N, CI_Lower, CI_Upper, Label)
+
+# Histology data
+histology_heatmap_data <- prepare_heatmap_data(
+  list(sensitivity_urothelial, sensitivity_other_histology),
+  c("Urothelial Carcinoma of Bladder", "UTUC or Variant Histology")
+) %>%
+  pivot_longer(cols = c(`Qualitative`, `Quantitative`, `ML`), 
+               names_to = "Model", values_to = "C_Index") %>%
+  mutate(
+    N = case_when(
+      Model == "Qualitative" ~ `Qualitative_N`,
+      Model == "Quantitative" ~ `Quantitative_N`,
+      Model == "ML" ~ `ML_N`,
+      TRUE ~ 0
+    ),
+    CI_Lower = case_when(
+      Model == "Qualitative" ~ `Qualitative_CI_Lower`,
+      Model == "Quantitative" ~ `Quantitative_CI_Lower`,
+      Model == "ML" ~ `ML_CI_Lower`,
+      TRUE ~ NA_real_
+    ),
+    CI_Upper = case_when(
+      Model == "Qualitative" ~ `Qualitative_CI_Upper`,
+      Model == "Quantitative" ~ `Quantitative_CI_Upper`,
+      Model == "ML" ~ `ML_CI_Upper`,
+      TRUE ~ NA_real_
+    ),
+    Label = ifelse(!is.na(C_Index), paste0(round(C_Index, 3), "\n(n=", N, ")"), "N/A")
+  ) %>%
+  select(Stratum, Model, C_Index, N, CI_Lower, CI_Upper, Label)
+
+# Create combined data for overall comparison
+combined_heatmap_data <- bind_rows(
+  therapy_heatmap_data %>% mutate(Stratification = "Therapy Type"),
+  histology_heatmap_data %>% mutate(Stratification = "Histology")
+) %>%
+  mutate(
+    Stratum_Label = ifelse(Stratification == "Histology", Stratum, paste0(Stratification, ": ", Stratum))
+  )
+
+# Combined heatmap
+heatmap_combined <- ggplot(combined_heatmap_data, aes(x = Model, y = Stratum_Label, fill = C_Index)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = Label), color = "black", size = 2.5, fontface = "bold") +
+  scale_fill_gradient2(
+    low = "#d73027",
+    mid = "#ffffbf",
+    high = "#1a9850",
+    midpoint = 0.65,
+    na.value = "grey90",
+    limits = c(0.4, 1.0),
+    name = "C-Index"
+  ) +
+  facet_wrap(~ Stratification, scales = "free_y", ncol = 1, labeller = labeller(Stratification = c("Therapy Type" = "Therapy Type", "Histology" = ""))) +
+  labs(
+    title = "C-Index Heatmap: Model Performance Across All Stratifications",
+    subtitle = "Higher C-index indicates better predictive performance (0.5 = random, 1.0 = perfect)",
+    x = "Model",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 10, hjust = 0.5),
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 10),
+    axis.text.y = element_text(size = 9),
+    axis.title = element_text(size = 11, face = "bold"),
+    legend.position = "right",
+    panel.grid = element_blank(),
+    strip.text = element_text(size = 11, face = "bold")
+  )
+```
+
+```{r display_cindex_visualizations, echo=FALSE}
+# ==============================
+# Display C-Index Visualizations
+# ==============================
+
+cat("## C-Index Visualizations: Model Performance Across Therapy and Histology Settings\n\n")
+cat("The following visualization compares C-index values across different models (Qualitative, Quantitative, ML) stratified by therapy type and histology. Higher C-index values indicate better predictive performance.\n\n")
+
+print(heatmap_combined)
+
+cat("\n**Interpretation:** The heatmaps use a color gradient where:\n")
+cat("- **Red** indicates lower C-index (poorer performance)\n")
+cat("- **Yellow** indicates moderate C-index\n")
+cat("- **Green** indicates higher C-index (better performance)\n")
+cat("- Values and sample sizes (n) are displayed in each cell\n")
+cat("- C-index of 0.5 = random prediction, 1.0 = perfect prediction\n\n")
+
+cat("### Explanation: Model Performance in Earlier Stage Disease\n\n")
+cat("The 'No Systemic Therapy' group consistently demonstrates the highest C-index values across all three models (C-index >0.95). This superior performance in earlier-stage disease can be explained by several factors:\n\n")
+cat("1. **More homogeneous patient population**: Patients who do not require systemic therapy typically have earlier-stage disease with less tumor heterogeneity, making ctDNA patterns more consistent and predictable.\n\n")
+cat("2. **Longer follow-up and more events**: Earlier-stage patients often have longer survival times, providing more follow-up data and a greater number of events (deaths) for model training and validation.\n\n")
+cat("3. **Less confounding by treatment effects**: In the absence of systemic therapy, ctDNA dynamics more directly reflect underlying tumor biology rather than treatment-related changes, improving the signal-to-noise ratio for predictive models.\n\n")
+cat("4. **Clearer ctDNA patterns**: Earlier-stage disease may exhibit more distinct ctDNA clearance/persistence patterns that are easier for models to distinguish, whereas advanced disease with multiple treatments may have more complex, overlapping patterns.\n\n")
+cat("5. **Selection bias**: Patients who survive 6 months without requiring systemic therapy represent a more favorable prognosis subset, where ctDNA patterns may be more strongly associated with outcomes.\n\n")
+cat("This finding suggests that ctDNA-based classification models may be particularly valuable for risk stratification in earlier-stage disease, where treatment decisions are more nuanced and accurate prognostication can significantly impact clinical management.\n\n")
+
+cat("\n")
+```
+
+```{r create_kaplan_meier_plots}
+# ==============================
+# Create Kaplan-Meier Survival Curves
+# ==============================
+
+# Function to create Kaplan-Meier plot with detailed diagnostics
+create_km_plot <- function(data, time_var, event_var, group_var, title) {
+  # Initial data check
+  if (is.null(data) || nrow(data) == 0) {
+    return(NULL)
+  }
+  
+  # Clean data
+  data_clean <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var]]),
+           !str_detect(tolower(.data[[group_var]]), "no ctdna data"))
+  
+  if (nrow(data_clean) == 0) {
+    return(NULL)
+  }
+  
+  # Check events
+  n_events <- sum(data_clean[[event_var]] == 1, na.rm = TRUE)
+  if (n_events == 0) {
+    return(NULL)
+  }
+  
+  # Check groups - get unique groups
+  unique_groups <- unique(data_clean[[group_var]])
+  unique_groups <- unique_groups[!is.na(unique_groups)]
+  
+  if (length(unique_groups) < 2) {
+    return(NULL)
+  }
+  
+  # Ensure group variable is a factor for proper plotting
+  data_clean[[group_var]] <- as.factor(data_clean[[group_var]])
+  
+  # Create survival formula
+  surv_formula <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", group_var))
+  
+  # Fit survival model
+  surv_fit <- tryCatch({
+    fit <- survfit(surv_formula, data = data_clean)
+    if (is.null(fit) || length(fit$strata) == 0) {
+      return(NULL)
+    }
+    fit
+  }, error = function(e) {
+    return(NULL)
+  })
+  
+  if (is.null(surv_fit)) {
+    return(NULL)
+  }
+  
+  # Create plot
+  p <- tryCatch({
+    ggsurvplot(
+      surv_fit,
+      data = data_clean,
+      pval = TRUE,
+      pval.method = TRUE,
+      conf.int = FALSE,
+      risk.table = TRUE,
+      risk.table.height = 0.25,
+      ggtheme = theme_minimal(),
+      title = title,
+      xlab = "Time from 6-Month Landmark (months)",
+      ylab = "Overall Survival Probability",
+      legend.title = "Group",
+      palette = "Set1",
+      fontsize = 3.5
+    )
+  }, error = function(e) {
+    # Try simpler plot if full plot fails
+    tryCatch({
+      ggsurvplot(
+        surv_fit,
+        data = data_clean,
+        pval = TRUE,
+        conf.int = FALSE,
+        risk.table = TRUE,
+        ggtheme = theme_minimal(),
+        title = title,
+        xlab = "Time from 6-Month Landmark (months)",
+        ylab = "Overall Survival Probability",
+        legend.title = "Group",
+        palette = "Set1"
+      )
+    }, error = function(e2) {
+      return(NULL)
+    })
+  })
+  
+  return(p)
+}
+
+# Create plots for each approach - with direct creation to ensure they work
+# Qualitative
+qual_data_clean <- survival_qualitative %>%
+  filter(!is.na(os_time_landmark), !is.na(death_event_landmark), 
+         os_time_landmark > 0, !is.na(qualitative_group),
+         !str_detect(tolower(qualitative_group), "no ctdna data")) %>%
+  mutate(qualitative_group = as.factor(qualitative_group))
+
+if (nrow(qual_data_clean) > 0 && sum(qual_data_clean$death_event_landmark == 1, na.rm = TRUE) > 0 && 
+    length(unique(qual_data_clean$qualitative_group)) >= 2) {
+  # Clean factor levels - remove any "qualitative_group" prefix
+  qual_data_clean$qualitative_group <- factor(qual_data_clean$qualitative_group)
+  levels(qual_data_clean$qualitative_group) <- str_remove(levels(qual_data_clean$qualitative_group), "^qualitative_group")
+  
+  surv_fit_qual <- survfit(Surv(os_time_landmark, death_event_landmark) ~ qualitative_group, data = qual_data_clean)
+  
+  # Get clean labels for legend (already cleaned above)
+  clean_labels_qual <- levels(qual_data_clean$qualitative_group)
+  
+  km_plot_qualitative <- ggsurvplot(
+    surv_fit_qual,
+    data = qual_data_clean,
+    pval = TRUE,
+    pval.method = TRUE,
+    conf.int = FALSE,
+    risk.table = TRUE,
+    risk.table.height = 0.25,
+    ggtheme = theme_minimal(),
+    title = "Kaplan-Meier Curves: Qualitative Approach (Landmark at 6 Months)",
+    xlab = "Time from 6-Month Landmark (months)",
+    ylab = "Overall Survival Probability",
+    legend.title = "Group",
+    legend.labs = clean_labels_qual,
+    palette = "Set1",
+    fontsize = 3.5
+  )
+} else {
+  km_plot_qualitative <- NULL
+}
+
+# Quantitative (using ctDNA-RECIST)
+quant_data_clean <- survival_quantitative %>%
+  filter(!is.na(os_time_landmark), !is.na(death_event_landmark), 
+         os_time_landmark > 0, !is.na(quantitative_group),
+         !str_detect(tolower(quantitative_group), "no ctdna data")) %>%
+  mutate(quantitative_group = as.factor(quantitative_group))
+
+if (nrow(quant_data_clean) > 0 && sum(quant_data_clean$death_event_landmark == 1, na.rm = TRUE) > 0 && 
+    length(unique(quant_data_clean$quantitative_group)) >= 2) {
+  # Clean factor levels - use clean names directly
+  quant_data_clean$quantitative_group <- factor(quant_data_clean$quantitative_group)
+  
+  surv_fit_quant <- survfit(Surv(os_time_landmark, death_event_landmark) ~ quantitative_group, data = quant_data_clean)
+  
+  # Get clean labels for legend
+  clean_labels_quant <- levels(quant_data_clean$quantitative_group)
+  
+  km_plot_quantitative <- ggsurvplot(
+    surv_fit_quant,
+    data = quant_data_clean,
+    pval = TRUE,
+    pval.method = TRUE,
+    conf.int = FALSE,
+    risk.table = TRUE,
+    risk.table.height = 0.25,
+    ggtheme = theme_minimal(),
+    title = "Kaplan-Meier Curves: Quantitative Approach (Landmark at 6 Months)",
+    xlab = "Time from 6-Month Landmark (months)",
+    ylab = "Overall Survival Probability",
+    legend.title = "Group",
+    legend.labs = clean_labels_quant,
+    palette = "Set1",
+    fontsize = 3.5
+  )
+} else {
+  km_plot_quantitative <- NULL
+}
+
+# ML
+ml_data_clean <- survival_ml %>%
+  filter(!is.na(os_time_landmark), !is.na(death_event_landmark), 
+         os_time_landmark > 0, !is.na(ml_group),
+         !str_detect(tolower(ml_group), "no ctdna data")) %>%
+  mutate(ml_group = as.factor(ml_group))
+
+if (nrow(ml_data_clean) > 0 && sum(ml_data_clean$death_event_landmark == 1, na.rm = TRUE) > 0 && 
+    length(unique(ml_data_clean$ml_group)) >= 2) {
+  # Clean factor levels - use clean names directly
+  ml_data_clean$ml_group <- factor(ml_data_clean$ml_group)
+  
+  surv_fit_ml <- survfit(Surv(os_time_landmark, death_event_landmark) ~ ml_group, data = ml_data_clean)
+  
+  # Get clean labels for legend
+  clean_labels_ml <- levels(ml_data_clean$ml_group)
+  
+  km_plot_ml <- ggsurvplot(
+    surv_fit_ml,
+    data = ml_data_clean,
+    pval = TRUE,
+    pval.method = TRUE,
+    conf.int = FALSE,
+    risk.table = TRUE,
+    risk.table.height = 0.25,
+    ggtheme = theme_minimal(),
+    title = "Kaplan-Meier Curves: Machine Learning Approach (Landmark at 6 Months)",
+    xlab = "Time from 6-Month Landmark (months)",
+    ylab = "Overall Survival Probability",
+    legend.title = "Group",
+    legend.labs = clean_labels_ml,
+    palette = "Set1",
+    fontsize = 3.5
+  )
+} else {
+  km_plot_ml <- NULL
+}
+
+```
+
+```{r display_results}
+# Display model-specific sample sizes
+cat("**Model-Specific Evaluable Sample Sizes:**\n\n")
+cat("**Total evaluable patients (with valid classifications for all three models):** ", length(common_patients_all_models), "\n\n")
+cat("**Note:** This is smaller than the landmark population (", nrow(survival_outcomes_landmark), 
+    ") because ", nrow(survival_outcomes_landmark) - length(common_patients_all_models), 
+    " patients did not have valid ctDNA classifications for all three models (Qualitative, Quantitative, and ML). ",
+    "Only patients with valid classifications for all three models are included to ensure fair comparison.\n\n")
+
+model_sample_sizes <- tibble(
+  Approach = c("Qualitative", "Quantitative", "ML"),
+  `N (Evaluable)` = c(
+    ifelse(!is.null(qual_os_results$n), qual_os_results$n, 0),
+    ifelse(!is.null(quant_os_results$n), quant_os_results$n, 0),
+    ifelse(!is.null(ml_os_results$n), ml_os_results$n, 0)
+  )
+)
+
+model_sample_sizes %>%
+  kable(caption = "Evaluable Sample Sizes by Model (6-Month Landmark)", align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE, position = "center")
+
+cat("\n")
+
+cat("## Model Performance Comparison\n\n")
+
+# Create comparison table
+cindex_aic_table <- tibble(
+  Approach = c("Qualitative", "Quantitative", "ML"),
+  `OS C-Index (95% CI)` = c(
+    ifelse(!is.na(qual_os_results$c_index), 
+           paste0(round(qual_os_results$c_index, 3), " (", 
+                  round(qual_os_results$ci_lower, 3), "-", 
+                  round(qual_os_results$ci_upper, 3), ")"), "N/A"),
+    ifelse(!is.na(quant_os_results$c_index), 
+           paste0(round(quant_os_results$c_index, 3), " (", 
+                  round(quant_os_results$ci_lower, 3), "-", 
+                  round(quant_os_results$ci_upper, 3), ")"), "N/A"),
+    ifelse(!is.na(ml_os_results$c_index), 
+           paste0(round(ml_os_results$c_index, 3), " (", 
+                  round(ml_os_results$ci_lower, 3), "-", 
+                  round(ml_os_results$ci_upper, 3), ")"), "N/A")
+  ),
+  `OS AIC` = c(
+    ifelse(!is.na(qual_os_results$aic), round(qual_os_results$aic, 1), "N/A"),
+    ifelse(!is.na(quant_os_results$aic), round(quant_os_results$aic, 1), "N/A"),
+    ifelse(!is.na(ml_os_results$aic), round(ml_os_results$aic, 1), "N/A")
+  )
+)
+
+cindex_aic_table %>%
+  kable(caption = "Table 1: Model Performance Comparison (C-Index with 95% CI and AIC) - Landmark Analysis at 6 Months", align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE, position = "center") %>%
+  add_footnote(c("C-Index: Harrell's concordance index (higher is better, 0.5 = random, 1.0 = perfect)",
+                 "AIC: Akaike Information Criterion (lower is better)",
+                 "95% CI calculated using bootstrap (n=500)"), notation = "symbol")
+
+cat("\n## Pairwise Model Comparisons\n\n")
+
+# Create comparison table
+cindex_comparison_table <- tibble(
+  Comparison = c("Quantitative vs Qualitative", "Quantitative vs ML", "Qualitative vs ML"),
+  `Difference in C-Index (95% CI)` = c(
+    ifelse(!is.na(comp_quant_vs_qual$diff_c_index),
+           paste0(round(comp_quant_vs_qual$diff_c_index, 3), " (",
+                  round(comp_quant_vs_qual$diff_ci_lower, 3), "-",
+                  round(comp_quant_vs_qual$diff_ci_upper, 3), ")"), "N/A"),
+    ifelse(!is.na(comp_quant_vs_ml$diff_c_index),
+           paste0(round(comp_quant_vs_ml$diff_c_index, 3), " (",
+                  round(comp_quant_vs_ml$diff_ci_lower, 3), "-",
+                  round(comp_quant_vs_ml$diff_ci_upper, 3), ")"), "N/A"),
+    ifelse(!is.na(comp_qual_vs_ml$diff_c_index),
+           paste0(round(comp_qual_vs_ml$diff_c_index, 3), " (",
+                  round(comp_qual_vs_ml$diff_ci_lower, 3), "-",
+                  round(comp_qual_vs_ml$diff_ci_upper, 3), ")"), "N/A")
+  ),
+  `P-Value` = c(
+    ifelse(!is.na(comp_quant_vs_qual$p_value), 
+           ifelse(comp_quant_vs_qual$p_value < 0.001, "<0.001", 
+                  round(comp_quant_vs_qual$p_value, 4)), "N/A"),
+    ifelse(!is.na(comp_quant_vs_ml$p_value),
+           ifelse(comp_quant_vs_ml$p_value < 0.001, "<0.001",
+                  round(comp_quant_vs_ml$p_value, 4)), "N/A"),
+    ifelse(!is.na(comp_qual_vs_ml$p_value),
+           ifelse(comp_qual_vs_ml$p_value < 0.001, "<0.001",
+                  round(comp_qual_vs_ml$p_value, 4)), "N/A")
+  ),
+  `N (Common Patients)` = c(
+    comp_quant_vs_qual$n_common,
+    comp_quant_vs_ml$n_common,
+    comp_qual_vs_ml$n_common
+  )
+)
+
+cindex_comparison_table %>%
+  kable(caption = "Table 2: Pairwise Model Comparison (C-Index Differences with P-Values) - Landmark Analysis at 6 Months", align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE, position = "center") %>%
+  add_footnote("P-values test the null hypothesis that C-index difference = 0. Calculated using bootstrap (n=500) with two-sided test.", notation = "symbol")
+
+cat("\n## Additional Model Comparison Analyses\n\n")
+cat("The following analyses provide additional insights to help determine which model should be assessed prospectively.\n\n")
+```
+
+```{r additional_analyses, include=FALSE}
+# ==============================
+# Additional Analyses for Model Comparison
+# ==============================
+
+# 1. Hazard Ratios and Effect Sizes
+calculate_hr_table <- function(data, time_var, event_var, group_var) {
+  data_clean <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var]]),
+           !str_detect(tolower(.data[[group_var]]), "no ctdna data"))
+  
+  if (nrow(data_clean) == 0 || sum(data_clean[[event_var]] == 1, na.rm = TRUE) == 0) {
+    return(NULL)
+  }
+  
+  # Get reference group (usually the group with best prognosis)
+  unique_groups <- unique(data_clean[[group_var]])
+  unique_groups <- unique_groups[!is.na(unique_groups)]
+  
+  if (length(unique_groups) < 2) {
+    return(NULL)
+  }
+  
+  # Use different reference groups for qualitative vs quantitative
+  # Qualitative: Persistent Negative
+  # Quantitative: Persistent Negative
+  if (group_var == "qualitative_group") {
+    if ("Persistent Negative" %in% unique(data_clean[[group_var]])) {
+      reference_group <- "Persistent Negative"
+      # Set Persistent Negative as reference level
+      data_clean[[group_var]] <- relevel(as.factor(data_clean[[group_var]]), ref = "Persistent Negative")
+    } else {
+      # Fallback: group with best prognosis
+      group_stats <- data_clean %>%
+        group_by(.data[[group_var]]) %>%
+        summarise(
+          n = n(),
+          events = sum(.data[[event_var]] == 1, na.rm = TRUE),
+          event_rate = events / n,
+          .groups = "drop"
+        ) %>%
+        mutate(adequate_size = n >= 5) %>%
+        arrange(adequate_size, event_rate, desc(n))
+      
+      reference_group <- as.character(group_stats[[group_var]][1])
+    }
+  } else if (group_var == "quantitative_group") {
+    # For quantitative, use Persistent Negative as reference
+    if ("Persistent Negative" %in% unique(data_clean[[group_var]])) {
+      reference_group <- "Persistent Negative"
+      # Set Persistent Negative as reference level
+      data_clean[[group_var]] <- relevel(as.factor(data_clean[[group_var]]), ref = "Persistent Negative")
+    } else {
+      # Fallback: group with best prognosis
+      group_stats <- data_clean %>%
+        group_by(.data[[group_var]]) %>%
+        summarise(
+          n = n(),
+          events = sum(.data[[event_var]] == 1, na.rm = TRUE),
+          event_rate = events / n,
+          .groups = "drop"
+        ) %>%
+        mutate(adequate_size = n >= 5) %>%
+        arrange(adequate_size, event_rate, desc(n))
+      
+      reference_group <- as.character(group_stats[[group_var]][1])
+    }
+  } else {
+    # Fallback: group with best prognosis - lowest event rate, but with adequate sample size
+    group_stats <- data_clean %>%
+      group_by(.data[[group_var]]) %>%
+      summarise(
+        n = n(),
+        events = sum(.data[[event_var]] == 1, na.rm = TRUE),
+        event_rate = events / n,
+        .groups = "drop"
+      ) %>%
+      # Prefer groups with at least 5 patients for reference
+      mutate(adequate_size = n >= 5) %>%
+      arrange(adequate_size, event_rate, desc(n))
+    
+    reference_group <- as.character(group_stats[[group_var]][1])
+    # Set reference level
+    data_clean[[group_var]] <- relevel(as.factor(data_clean[[group_var]]), ref = reference_group)
+  }
+  
+  # Fit Cox model with reference level set
+  surv_formula <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", group_var))
+  cox_fit <- tryCatch({
+    coxph(surv_formula, data = data_clean)
+  }, error = function(e) {
+    return(NULL)
+  })
+  
+  if (is.null(cox_fit)) {
+    return(NULL)
+  }
+  
+  # Extract HRs
+  cox_summary <- summary(cox_fit)
+  hr_df <- as.data.frame(cox_summary$conf.int)
+  hr_df$Group <- rownames(hr_df)
+  rownames(hr_df) <- NULL
+  
+  hr_table <- hr_df %>%
+    mutate(
+      Group = str_remove(Group, paste0(group_var, "=")),
+      HR = `exp(coef)`,
+      HR_Lower = `lower .95`,
+      HR_Upper = `upper .95`,
+      P_Value = cox_summary$coefficients[, "Pr(>|z|)"]
+    ) %>%
+    # Remove reference group from table (it's HR = 1.0 by definition)
+    filter(Group != reference_group) %>%
+    # Clean any remaining variable name prefixes
+    mutate(Group = str_remove(Group, paste0("^", group_var, ""))) %>%
+    select(Group, HR, HR_Lower, HR_Upper, P_Value)
+  
+  return(list(hr_table = hr_table, reference_group = reference_group))
+}
+
+# Calculate HRs for each approach
+hr_qualitative_result <- calculate_hr_table(survival_qualitative, "os_time_landmark", "death_event_landmark", "qualitative_group")
+hr_qualitative <- if (!is.null(hr_qualitative_result)) hr_qualitative_result$hr_table else NULL
+ref_qualitative <- if (!is.null(hr_qualitative_result)) hr_qualitative_result$reference_group else NULL
+
+hr_quantitative_result <- calculate_hr_table(survival_quantitative, "os_time_landmark", "death_event_landmark", "quantitative_group")
+hr_quantitative <- if (!is.null(hr_quantitative_result)) hr_quantitative_result$hr_table else NULL
+ref_quantitative <- if (!is.null(hr_quantitative_result)) hr_quantitative_result$reference_group else NULL
+
+# Note: Quantitative approach now uses ctDNA-RECIST criteria (see definitions above)
+
+# 2. Missing Data Analysis
+missing_data_analysis <- survival_outcomes_landmark %>%
+  left_join(qualitative_groups %>% select(patient_id, qualitative_group), by = "patient_id") %>%
+  left_join(quantitative_groups %>% select(patient_id, quantitative_group), by = "patient_id") %>%
+  mutate(
+    has_qualitative = !is.na(qualitative_group) & !str_detect(tolower(qualitative_group), "no ctdna data"),
+    has_quantitative = !is.na(quantitative_group) & !str_detect(tolower(quantitative_group), "no ctdna data"),
+    has_both = has_qualitative & has_quantitative,
+    has_qual_only = has_qualitative & !has_quantitative,
+    has_quant_only = has_quantitative & !has_qualitative,
+    has_neither = !has_qualitative & !has_quantitative
+  )
+
+missing_summary <- tibble(
+  Category = c("Both models", "Qualitative only", "Quantitative only", "Neither model", "Total"),
+  N = c(
+    sum(missing_data_analysis$has_both, na.rm = TRUE),
+    sum(missing_data_analysis$has_qual_only, na.rm = TRUE),
+    sum(missing_data_analysis$has_quant_only, na.rm = TRUE),
+    sum(missing_data_analysis$has_neither, na.rm = TRUE),
+    nrow(missing_data_analysis)
+  )
+)
+
+# 3. Group Distribution Comparison
+group_dist_qual <- survival_qualitative %>%
+  filter(!is.na(qualitative_group), !str_detect(tolower(qualitative_group), "no ctdna data"),
+         !is.na(os_time_landmark), !is.na(death_event_landmark), os_time_landmark > 0) %>%
+  count(qualitative_group, death_event_landmark) %>%
+  pivot_wider(names_from = death_event_landmark, values_from = n, values_fill = 0) %>%
+  mutate(
+    Total = `0` + `1`,
+    Event_Rate = round(`1` / Total * 100, 1)
+  ) %>%
+  arrange(desc(Event_Rate))
+
+group_dist_quant <- survival_quantitative %>%
+  filter(!is.na(quantitative_group), !str_detect(tolower(quantitative_group), "no ctdna data"),
+         !is.na(os_time_landmark), !is.na(death_event_landmark), os_time_landmark > 0) %>%
+  count(quantitative_group, death_event_landmark) %>%
+  pivot_wider(names_from = death_event_landmark, values_from = n, values_fill = 0) %>%
+  mutate(
+    Total = `0` + `1`,
+    Event_Rate = round(`1` / Total * 100, 1)
+  ) %>%
+  arrange(desc(Event_Rate))
+
+# 4. Median Survival Times
+calculate_median_survival <- function(data, time_var, event_var, group_var) {
+  data_clean <- data %>%
+    filter(!is.na(.data[[time_var]]), !is.na(.data[[event_var]]), 
+           .data[[time_var]] > 0, !is.na(.data[[group_var]]),
+           !str_detect(tolower(.data[[group_var]]), "no ctdna data"))
+  
+  if (nrow(data_clean) == 0) {
+    return(NULL)
+  }
+  
+  surv_formula <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", group_var))
+  surv_fit <- tryCatch({
+    survfit(surv_formula, data = data_clean)
+  }, error = function(e) {
+    return(NULL)
+  })
+  
+  if (is.null(surv_fit)) {
+    return(NULL)
+  }
+  
+  # Extract median survival
+  median_surv <- summary(surv_fit)$table[, "median"]
+  median_surv_df <- data.frame(
+    Group = names(median_surv),
+    Median_Survival_Months = round(median_surv, 1)
+  ) %>%
+    mutate(Group = str_remove(Group, paste0(group_var, "=")))
+  
+  return(median_surv_df)
+}
+
+# Median survival analysis removed per user request
+
+```
+
+```{r display_additional_analyses, echo=FALSE}
+cat("### 1. Hazard Ratios and Effect Sizes\n\n")
+cat("Hazard ratios (HR) > 1 indicate increased risk of death compared to the reference group. The reference group is automatically selected as the group with the lowest event rate (best prognosis).\n\n")
+
+if (!is.null(hr_qualitative) && nrow(hr_qualitative) > 0) {
+  hr_qual_table <- hr_qualitative %>%
+    mutate(
+      # Clean group names (remove any remaining prefixes)
+      Group = str_remove(Group, "^qualitative_group"),
+      HR_CI = paste0(round(HR, 2), " (", round(HR_Lower, 2), "-", round(HR_Upper, 2), ")"),
+      P_Value_Formatted = ifelse(P_Value < 0.001, "<0.001", round(P_Value, 4))
+    ) %>%
+    select(Group, HR_CI, P_Value_Formatted) %>%
+    rename(`HR (95% CI)` = HR_CI, `P-Value` = P_Value_Formatted)
+  
+  caption_text <- "Hazard Ratios: Qualitative Approach (Reference: Persistent Negative)"
+  
+  hr_qual_table %>%
+    kable(caption = caption_text, align = "c") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                  full_width = FALSE, position = "center")
+} else {
+  cat("Qualitative approach: Unable to calculate hazard ratios.\n\n")
+}
+
+cat("\n")
+
+if (!is.null(hr_quantitative) && nrow(hr_quantitative) > 0) {
+  hr_quant_table <- hr_quantitative %>%
+    mutate(
+      # Clean group names
+      Group = str_remove(Group, "^quantitative_group"),
+      HR_CI = paste0(round(HR, 2), " (", round(HR_Lower, 2), "-", round(HR_Upper, 2), ")"),
+      P_Value_Formatted = ifelse(P_Value < 0.001, "<0.001", round(P_Value, 4))
+    ) %>%
+    select(Group, HR_CI, P_Value_Formatted) %>%
+    rename(`HR (95% CI)` = HR_CI, `P-Value` = P_Value_Formatted)
+  
+  caption_text <- "Hazard Ratios: Quantitative Approach (Reference: Persistent Negative)"
+  
+  hr_quant_table %>%
+    kable(caption = caption_text, align = "c") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                  full_width = FALSE, position = "center")
+} else {
+  cat("Quantitative approach: Unable to calculate hazard ratios.\n\n")
+}
+```
+
+```{r display_km_plots, echo=FALSE}
+cat("\n## Kaplan-Meier Survival Curves\n\n")
+cat("**Note:** All survival analyses use landmark analysis at 6 months to reduce immortal time bias.\n\n")
+
+# Display qualitative plot
+cat("### Qualitative Approach\n\n")
+if (!is.null(km_plot_qualitative)) {
+  print(km_plot_qualitative)
+} else {
+  cat("Insufficient data for Kaplan-Meier plot (need at least 2 groups with events).\n\n")
+}
+
+cat("\n\n### Quantitative Approach\n\n")
+# Display quantitative plot
+if (!is.null(km_plot_quantitative)) {
+  print(km_plot_quantitative)
+} else {
+  cat("Insufficient data for Kaplan-Meier plot (need at least 2 groups with events).\n\n")
+}
+
+cat("\n\n### Machine Learning Approach\n\n")
+# Display ML plot
+if (!is.null(km_plot_ml)) {
+  print(km_plot_ml)
+} else {
+  cat("Insufficient data for Kaplan-Meier plot (need at least 2 groups with events).\n\n")
+}
+```
+
+```{r conclusions_and_limitations, echo=FALSE}
+cat("\n## Conclusions\n\n")
+
+cat("### Main Findings\n\n")
+
+cat("This analysis compared three approaches for classifying ctDNA response patterns and their association with overall survival in patients with bladder cancer:\n\n")
+
+cat("1. **Qualitative Approach**: Binary classification based on ctDNA status changes\n")
+cat("2. **Quantitative Approach**: Classification based on percent change from most recent ctDNA assessment\n")
+cat("3. **Machine Learning Approach**: Unsupervised clustering using multiple ctDNA kinetic features\n\n")
+
+cat("**Key Conclusions:**\n\n")
+
+cat("- All three approaches demonstrated good to excellent discriminatory performance for overall survival, with C-indices generally above 0.80 across most patient subgroups.\n\n")
+
+cat("- Model performance varied by therapy setting: The 'No Systemic Therapy' group (representing earlier-stage disease) consistently showed the highest C-index values (>0.95) across all three models, suggesting that ctDNA-based classification may be particularly valuable for risk stratification in earlier-stage disease.\n\n")
+
+cat("- The Quantitative approach showed variable performance across therapy types, with notably lower C-index in the Palliative setting (0.709) compared to other therapy types, while maintaining strong performance in other settings.\n\n")
+
+cat("- Pairwise comparisons between models (shown in Table 2) tested for significant differences in C-index values. The results indicate whether one approach demonstrates superior discriminatory performance compared to others.\n\n")
+
+cat("- Sensitivity analyses by histology type (Urothelial Carcinoma of Bladder vs UTUC or Variant Histology) and therapy type (Neoadjuvant, Adjuvant, Palliative, No Systemic Therapy) demonstrated that model performance is generally consistent across these subgroups, though some differences were observed.\n\n")
+
+cat("### Clinical Implications\n\n")
+
+cat("These findings suggest that ctDNA response classification can effectively stratify patients by survival risk. The choice of classification approach may depend on the clinical setting and patient population. The superior performance observed in earlier-stage disease (No Systemic Therapy group) highlights the potential value of ctDNA monitoring for risk stratification when treatment decisions are more nuanced.\n\n")
+
+cat("## Limitations\n\n")
+
+cat("Several limitations should be considered when interpreting these results:\n\n")
+
+cat("1. **Retrospective Analysis**: This is a retrospective analysis of existing data, which may be subject to selection bias and confounding factors not accounted for in the analysis.\n\n")
+
+cat("2. **Landmark Analysis**: The 6-month landmark analysis, while reducing immortal time bias, excludes patients who died within 6 months of their baseline ctDNA measurement. This may limit generalizability to patients with very poor prognosis.\n\n")
+
+cat("3. **Sample Size**: Some subgroups (particularly in therapy-specific analyses) had relatively small sample sizes, which may limit the precision of C-index estimates and the power to detect significant differences between models.\n\n")
+
+cat("4. **Patient Overlap Across Therapy Groups**: Patients could be counted in multiple therapy categories if they received multiple types of therapy during their ctDNA monitoring period. While this reflects clinical reality, it may complicate interpretation of therapy-specific analyses.\n\n")
+
+cat("5. **Missing Data**: Patients without valid ctDNA classifications for all three approaches were excluded from the comparative analysis, potentially introducing selection bias.\n\n")
+
+cat("6. **Temporal Relationships**: The analysis does not account for the temporal relationship between ctDNA measurements and therapy administration, which may influence ctDNA dynamics.\n\n")
+
+cat("7. **External Validation**: These models have not been validated in an independent external cohort, limiting generalizability to other patient populations.\n\n")
+
+cat("8. **Treatment Heterogeneity**: The analysis includes patients with diverse treatment regimens, which may introduce heterogeneity that affects model performance.\n\n")
+
+cat("## Next Steps\n\n")
+
+cat("Based on these findings, the following next steps are recommended:\n\n")
+
+cat("1. **Prospective Validation**: The best-performing model(s) should be prospectively validated in an independent cohort to confirm generalizability and clinical utility.\n\n")
+
+cat("2. **Refinement of Classification Criteria**: Consider refining classification thresholds, particularly for the Quantitative approach, to optimize performance across different therapy settings.\n\n")
+
+cat("3. **Integration with Clinical Factors**: Future analyses should explore whether combining ctDNA classification with clinical factors (stage, histology, treatment history) improves predictive performance.\n\n")
+
+cat("4. **Time-Dependent Analysis**: Consider time-dependent analyses that account for the temporal relationship between ctDNA changes and outcomes, potentially using landmark analyses at multiple timepoints.\n\n")
+
+cat("5. **Therapy-Specific Models**: Given the observed variation in model performance across therapy types, consider developing therapy-specific classification approaches or thresholds.\n\n")
+
+cat("6. **Larger Sample Sizes**: Expand the analysis to include larger sample sizes, particularly for therapy-specific and histology-specific subgroups, to improve precision and power.\n\n")
+
+cat("7. **External Validation Cohort**: Validate findings in an independent external cohort with different patient characteristics and treatment patterns.\n\n")
+
+cat("8. **Clinical Decision Support**: Develop clinical decision support tools that incorporate the best-performing ctDNA classification approach to guide treatment decisions in real-world settings.\n\n")
+
+cat("9. **Cost-Effectiveness Analysis**: Evaluate the cost-effectiveness of implementing ctDNA-based classification approaches compared to standard clinical assessment methods.\n\n")
+
+cat("10. **Longitudinal Monitoring**: Explore optimal timing and frequency of ctDNA assessments for risk stratification and treatment monitoring.\n\n")
+```

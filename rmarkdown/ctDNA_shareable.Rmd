@@ -1,0 +1,178 @@
+---
+title: "ctDNA_Share"
+author: "Alex Karol"
+date: "2025-10-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# ==============================
+# Setup
+# ==============================
+knitr::opts_knit$set(root.dir = "~/R")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+# Core libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(knitr)
+  library(kableExtra)
+})
+
+# Cohort sizes
+TOTAL_N    <- 310
+SCREENED_N <- 108
+```
+
+```{r load_data, include=FALSE}
+# ==============================
+# Load and clean data
+# ==============================
+file_path <- "Natera_Sheet_cleaned.xlsx"
+dat <- read_excel(file_path, sheet = 1, col_names = TRUE) %>%
+  clean_names() %>%
+  mutate(patient_id = record_id_linking_key) %>%
+  filter(!is.na(patient_id)) %>%
+  mutate(across(everything(), ~ifelse(. == "", NA, .)))
+```
+
+```{r data_summary}
+# ==============================
+# Data Summary
+# ==============================
+cat("## ctDNA Analysis Summary\n\n")
+cat("**Cohort Information:**\n")
+cat("- Target cohort size:", TOTAL_N, "patients\n")
+cat("- Currently screened:", SCREENED_N, "patients\n")
+cat("- Screening completion:", round(SCREENED_N/TOTAL_N*100, 1), "%\n\n")
+
+cat("**Data Overview:**\n")
+cat("- Total patient records:", nrow(dat), "\n")
+cat("- Records with valid IDs:", sum(!is.na(dat$patient_id)), "\n\n")
+
+# Count ctDNA columns
+ctdna_cols <- names(dat)[str_detect(names(dat), "^ct_dna_level_\\d+$") & !str_detect(names(dat), "_date$")]
+ctdna_date_cols <- names(dat)[str_detect(names(dat), "^ct_dna_level_\\d+_date$")]
+
+cat("**ctDNA Data:**\n")
+cat("- ctDNA value columns:", length(ctdna_cols), "\n")
+cat("- ctDNA date columns:", length(ctdna_date_cols), "\n\n")
+```
+
+```{r ctDNA_analysis}
+# ==============================
+# ctDNA Analysis
+# ==============================
+cat("## ctDNA Test Results\n\n")
+
+# Count patients with ctDNA data
+patients_with_ctdna <- dat %>%
+  select(patient_id, all_of(ctdna_cols)) %>%
+  mutate(has_ctdna = rowSums(!is.na(select(., -patient_id))) > 0) %>%
+  filter(has_ctdna) %>%
+  nrow()
+
+cat("**Patients with ctDNA data:**", patients_with_ctdna, "\n\n")
+
+# Count total ctDNA tests
+total_ctdna_tests <- dat %>%
+  select(all_of(ctdna_cols)) %>%
+  summarise(total_tests = sum(!is.na(.))) %>%
+  pull(total_tests)
+
+cat("**Total ctDNA tests:**", total_ctdna_tests, "\n\n")
+
+# Summary by ctDNA level
+ctdna_summary <- dat %>%
+  select(all_of(ctdna_cols)) %>%
+  summarise_all(~sum(!is.na(.))) %>%
+  pivot_longer(everything(), names_to = "ctdna_level", values_to = "count") %>%
+  mutate(level_num = as.numeric(str_extract(ctdna_level, "\\d+"))) %>%
+  arrange(level_num) %>%
+  filter(count > 0)
+
+cat("**ctDNA Tests by Level:**\n")
+print(ctdna_summary)
+```
+
+```{r demographics}
+# ==============================
+# Demographics
+# ==============================
+cat("## Patient Demographics\n\n")
+
+# Race distribution
+if ("race" %in% names(dat)) {
+  race_table <- table(dat$race, useNA = "no")
+  cat("**Race Distribution:**\n")
+  print(race_table)
+  cat("\n")
+}
+
+# Ethnicity distribution
+if ("ethnicity" %in% names(dat)) {
+  ethnicity_table <- table(dat$ethnicity, useNA = "no")
+  cat("**Ethnicity Distribution:**\n")
+  print(ethnicity_table)
+  cat("\n")
+}
+
+# Cancer stage
+if ("cancer_stage_natera" %in% names(dat)) {
+  stage_table <- table(dat$cancer_stage_natera, useNA = "no")
+  cat("**Cancer Stage Distribution:**\n")
+  print(stage_table)
+  cat("\n")
+}
+```
+
+```{r systemic_therapy_summary}
+# ==============================
+# Systemic Therapy Summary
+# ==============================
+cat("## Systemic Therapy\n\n")
+
+# NAC summary
+if ("neoadjuvant_systemic_therapy_yes_no" %in% names(dat)) {
+  nac_table <- table(dat$neoadjuvant_systemic_therapy_yes_no, useNA = "no")
+  cat("**Neoadjuvant Chemotherapy:**\n")
+  print(nac_table)
+  cat("\n")
+}
+
+# Systemic therapy columns
+systemic_cols <- names(dat)[str_detect(names(dat), "^systemic_therapy_\\d+$")]
+if (length(systemic_cols) > 0) {
+  cat("**Systemic Therapy Regimens:**\n")
+  systemic_summary <- dat %>%
+    select(all_of(systemic_cols)) %>%
+    pivot_longer(everything(), names_to = "therapy", values_to = "regimen") %>%
+    filter(!is.na(regimen)) %>%
+    count(regimen, sort = TRUE)
+  
+  print(systemic_summary)
+}
+```
+
+```{r final_notes}
+# ==============================
+# Final Notes
+# ==============================
+cat("## Analysis Notes\n\n")
+cat("**Data Status:**\n")
+cat("- ✅ Data loaded successfully from", file_path, "\n")
+cat("- ✅ ctDNA columns identified and analyzed\n")
+cat("- ✅ Demographics and therapy data summarized\n\n")
+
+cat("**Next Steps:**\n")
+cat("- Review ctDNA test results by patient\n")
+cat("- Analyze ctDNA trends over time\n")
+cat("- Correlate ctDNA with clinical outcomes\n\n")
+
+cat("**File Generated:**", Sys.time(), "\n")
+```

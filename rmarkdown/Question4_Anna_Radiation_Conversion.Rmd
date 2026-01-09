@@ -1,0 +1,567 @@
+---
+title: "Question 4: ctDNA Conversion After Radiation to Oligometastatic Sites"
+author: "Anna's Question"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, comment = "")
+knitr::opts_knit$set(root.dir = "~/R")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load shared setup
+source("ctDNA_Research_Questions_Shared_Setup.R")
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(ggplot2)
+  library(survival)
+  library(survminer)
+  library(knitr)
+  library(kableExtra)
+})
+```
+
+```{r load_data, include=FALSE}
+# Load minimal data
+data_list <- load_minimal_data(include_survival = TRUE)
+dat_combined <- data_list$dat_combined
+ctdna_long <- data_list$ctdna_long
+survival_data <- data_list$survival_data
+```
+
+```{r define_universe, include=FALSE}
+# ==============================
+# Universe: Patients with radiation to metastasis (target in that row mentions metastasis)
+# AND ctDNA available within 12 weeks before and 12 weeks after radiation
+# ==============================
+
+# Find radiation date and target columns
+radiation_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("radiation.*date|radiotherapy.*date|rt.*date|sbrt.*date|stereotactic.*date", ignore_case = TRUE))]
+radiation_target_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("radiation.*(target|site|location)|rt.*(target|site|location)|radiotherapy.*(target|site|location)", ignore_case = TRUE))]
+
+# Build radiation records with dates and targets matched at row level
+# Strategy: Match columns by extracting numbers/indices from column names
+# (e.g., radiation_1_date with radiation_1_target)
+radiation_records <- tibble()
+
+if (length(radiation_date_cols) > 0 && length(radiation_target_cols) > 0) {
+  # Extract index numbers from column names for matching
+  # Try to match date and target columns by their index numbers
+  for (date_col in radiation_date_cols) {
+    # Extract index from date column name (e.g., "radiation_1_date" -> "1")
+    date_idx <- str_extract(date_col, "\\d+")
+    
+    # Find matching target column by index
+    matching_target_cols <- NULL
+    if (!is.na(date_idx)) {
+      # Look for target columns with same index
+      matching_target_cols <- radiation_target_cols[str_detect(radiation_target_cols, paste0("_", date_idx, "_|_", date_idx, "$|^", date_idx, "_"))]
+    }
+    
+    # If no match by index, try matching by position
+    if (length(matching_target_cols) == 0) {
+      date_pos <- which(radiation_date_cols == date_col)
+      if (date_pos <= length(radiation_target_cols)) {
+        matching_target_cols <- radiation_target_cols[date_pos]
+      }
+    }
+    
+    # Process each matching target column
+    for (target_col in matching_target_cols) {
+      temp_records <- dat_combined %>%
+        mutate(patient_id = as.character(patient_id)) %>%
+        select(patient_id, all_of(c(date_col, target_col))) %>%
+        rename(radiation_date_raw = all_of(date_col), rad_target_raw = all_of(target_col)) %>%
+        mutate(
+          radiation_date = as_date_safe(radiation_date_raw),
+          rad_target_lower = tolower(as.character(rad_target_raw)),
+          is_metastasis_target = str_detect(rad_target_lower, "metast")
+        ) %>%
+        filter(!is.na(radiation_date), !is.na(rad_target_lower), rad_target_lower != "")
+      
+      radiation_records <- bind_rows(radiation_records, temp_records)
+    }
+  }
+  
+  # Remove duplicates (same patient, same date, same target)
+  radiation_records <- radiation_records %>%
+    distinct(patient_id, radiation_date, rad_target_lower, .keep_all = TRUE)
+}
+
+# Filter for radiation records where target mentions metastasis
+universe_raw <- radiation_records %>%
+  filter(is_metastasis_target == TRUE) %>%
+  select(patient_id, radiation_date, rad_target_lower) %>%
+  distinct(patient_id, radiation_date, .keep_all = TRUE)
+
+cat("Radiation records with metastasis target (matched): n =", nrow(universe_raw), "\n")
+
+# Fallback: If no matched records, try finding patients with any radiation date AND any target mentioning metastasis
+if (nrow(universe_raw) == 0) {
+  cat("WARNING: No radiation records found with matched date-target pairs mentioning metastasis.\n")
+  cat("Trying fallback: patients with any radiation date AND any target mentioning metastasis...\n")
+  
+  # Get all radiation dates
+  all_rad_dates <- dat_combined %>%
+    mutate(patient_id = as.character(patient_id)) %>%
+    select(patient_id, all_of(radiation_date_cols)) %>%
+    pivot_longer(-patient_id, names_to = "rad_var", values_to = "radiation_date_raw") %>%
+    mutate(radiation_date = as_date_safe(radiation_date_raw)) %>%
+    filter(!is.na(radiation_date)) %>%
+    select(patient_id, radiation_date) %>%
+    distinct()
+  
+  # Get all targets mentioning metastasis
+  all_met_targets <- dat_combined %>%
+    mutate(patient_id = as.character(patient_id)) %>%
+    select(patient_id, all_of(radiation_target_cols)) %>%
+    pivot_longer(-patient_id, names_to = "rad_target_var", values_to = "rad_target_raw") %>%
+    filter(!is.na(rad_target_raw), as.character(rad_target_raw) != "") %>%
+    mutate(rad_target_lower = tolower(as.character(rad_target_raw))) %>%
+    filter(str_detect(rad_target_lower, "metast")) %>%
+    select(patient_id) %>%
+    distinct()
+  
+  # Combine: patients with both radiation date and metastasis target (not necessarily matched)
+  if (nrow(all_rad_dates) > 0 && nrow(all_met_targets) > 0) {
+    universe_raw <- all_rad_dates %>%
+      inner_join(all_met_targets, by = "patient_id") %>%
+      # For each patient, use their earliest radiation date
+      group_by(patient_id) %>%
+      summarise(radiation_date = min(radiation_date, na.rm = TRUE), .groups = "drop") %>%
+      mutate(rad_target_lower = "metastasis (from separate columns)")
+    
+    cat("Fallback: Found n =", nrow(universe_raw), "patients with radiation dates AND metastasis targets (not matched)\n")
+  } else {
+    cat("Total radiation records found: n =", nrow(radiation_records), "\n")
+    if (nrow(radiation_records) > 0) {
+      cat("Sample targets:", paste(head(unique(radiation_records$rad_target_lower[!is.na(radiation_records$rad_target_lower)]), 10), collapse = ", "), "\n")
+    }
+  }
+}
+
+# ctDNA inclusion criteria: 12 weeks before AND 12 weeks after radiation
+WEEKS_BEFORE <- 12
+WEEKS_AFTER <- 12
+DAYS_BEFORE <- WEEKS_BEFORE * 7
+DAYS_AFTER <- WEEKS_AFTER * 7
+
+# Check for ctDNA before radiation (within 12 weeks)
+ctdna_before <- ctdna_long %>%
+  inner_join(universe_raw, by = "patient_id") %>%
+  filter(
+    ctdna_date >= radiation_date - days(DAYS_BEFORE),
+    ctdna_date < radiation_date
+  ) %>%
+  group_by(patient_id, radiation_date) %>%
+  summarise(has_ctdna_before = n() > 0, .groups = "drop")
+
+# Check for ctDNA after radiation (within 12 weeks)
+ctdna_after <- ctdna_long %>%
+  inner_join(universe_raw, by = "patient_id") %>%
+  filter(
+    ctdna_date > radiation_date,
+    ctdna_date <= radiation_date + days(DAYS_AFTER)
+  ) %>%
+  group_by(patient_id, radiation_date) %>%
+  summarise(has_ctdna_after = n() > 0, .groups = "drop")
+
+cat("Patients with ctDNA within 12 weeks before: n =", nrow(ctdna_before %>% filter(has_ctdna_before)), "\n")
+cat("Patients with ctDNA within 12 weeks after: n =", nrow(ctdna_after %>% filter(has_ctdna_after)), "\n")
+
+# Final universe: patients with radiation to metastasis AND ctDNA within 12 weeks before AND after
+universe <- universe_raw %>%
+  left_join(ctdna_before, by = c("patient_id", "radiation_date")) %>%
+  left_join(ctdna_after, by = c("patient_id", "radiation_date")) %>%
+  filter(has_ctdna_before == TRUE, has_ctdna_after == TRUE) %>%
+  select(patient_id, radiation_date, rad_target_lower)
+
+cat("Final universe size (with ctDNA within 12 weeks before AND after): n =", nrow(universe), "\n")
+if (nrow(universe) > 0) {
+  cat("Population studied: Patients with radiation to metastasis (target mentions metastasis) AND ctDNA available within 12 weeks before and 12 weeks after radiation\n")
+} else {
+  cat("WARNING: No patients meet inclusion criteria.\n")
+}
+```
+
+```{r population_description}
+# Display population description at top
+cat("## Population Studied\n\n")
+cat("**Universe:** Patients with radiation to metastasis (target mentions metastasis) AND ctDNA available within 12 weeks before and 12 weeks after radiation\n\n")
+cat("**N =", nrow(universe), "\n\n")
+cat("**Inclusion Criteria:**\n")
+cat("- Radiation target/site explicitly mentions metastasis **and**\n")
+cat("- ctDNA available within 12 weeks before radiation **and**\n")
+cat("- ctDNA available within 12 weeks after radiation\n\n")
+```
+
+```{r patient_ids_table}
+# Display patient IDs in universe
+if (nrow(universe) > 0) {
+  patient_ids_table <- universe %>%
+    select(patient_id) %>%
+    arrange(patient_id) %>%
+    mutate(`Patient ID` = patient_id) %>%
+    select(`Patient ID`) %>%
+    kable(caption = "Patient IDs Included in Analysis") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE, font_size = 10)
+  
+  patient_ids_table
+} else {
+  cat("**No patients meet inclusion criteria.**\n\n")
+  cat("**Diagnostic Information:**\n")
+  cat("- Radiation records found: n =", nrow(radiation_records), "\n")
+  cat("- Radiation records with metastasis target: n =", nrow(universe_raw), "\n")
+  if (nrow(radiation_records) > 0 && nrow(universe_raw) == 0) {
+    cat("\n**Note:** Radiation records were found but none had targets mentioning 'metastasis'.\n")
+    cat("Sample targets found:", paste(head(unique(radiation_records$rad_target_lower[!is.na(radiation_records$rad_target_lower)]), 10), collapse = ", "), "\n")
+  }
+}
+```
+
+```{r descriptive_table_universe}
+# Brief descriptive table for universe
+if (nrow(universe) > 0) {
+  desc_table_universe <- universe %>%
+    summarise(
+      N = n(),
+      `Radiation Target` = "Metastasis (as specified in target field)"
+    ) %>%
+    kable(caption = "Descriptive Characteristics of Universe") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  
+  desc_table_universe
+} else {
+  cat("No patients meet inclusion criteria.\n")
+}
+```
+
+```{r identify_conversion, include=FALSE}
+# Identify ctDNA values before and after radiation (within 12 weeks)
+WEEKS_BEFORE <- 12
+WEEKS_AFTER <- 12
+DAYS_BEFORE <- WEEKS_BEFORE * 7
+DAYS_AFTER <- WEEKS_AFTER * 7
+
+# Get ctDNA before radiation (within 12 weeks, closest to radiation)
+ctdna_pre_radiation <- ctdna_long %>%
+  inner_join(universe, by = "patient_id") %>%
+  filter(
+    ctdna_date >= radiation_date - days(DAYS_BEFORE),
+    ctdna_date < radiation_date
+  ) %>%
+  arrange(patient_id, desc(ctdna_date)) %>%  # Closest to radiation date
+  group_by(patient_id, radiation_date) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(patient_id, radiation_date, pre_radiation_ctdna_date = ctdna_date, pre_radiation_ctdna_value = ctdna_value)
+
+# Get ctDNA after radiation (within 12 weeks, closest to radiation)
+ctdna_post_radiation <- ctdna_long %>%
+  inner_join(universe, by = "patient_id") %>%
+  filter(
+    ctdna_date > radiation_date,
+    ctdna_date <= radiation_date + days(DAYS_AFTER)
+  ) %>%
+  arrange(patient_id, ctdna_date) %>%  # Closest to radiation date
+  group_by(patient_id, radiation_date) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(patient_id, radiation_date, post_radiation_ctdna_date = ctdna_date, post_radiation_ctdna_value = ctdna_value)
+
+# Combine pre and post radiation ctDNA
+conversion_data <- universe %>%
+  left_join(ctdna_pre_radiation, by = c("patient_id", "radiation_date")) %>%
+  left_join(ctdna_post_radiation, by = c("patient_id", "radiation_date")) %>%
+  mutate(
+    # Conversion: detectable (>0) before to undetectable (0) after
+    converted = ifelse(!is.na(pre_radiation_ctdna_value) & !is.na(post_radiation_ctdna_value) & 
+                       pre_radiation_ctdna_value > 0 & post_radiation_ctdna_value == 0, 1, 0),
+    # Also track any change
+    ctdna_change = ifelse(!is.na(pre_radiation_ctdna_value) & !is.na(post_radiation_ctdna_value),
+                         post_radiation_ctdna_value - pre_radiation_ctdna_value, NA),
+    ctdna_percent_change = ifelse(!is.na(pre_radiation_ctdna_value) & !is.na(post_radiation_ctdna_value) & pre_radiation_ctdna_value > 0,
+                                100 * (post_radiation_ctdna_value - pre_radiation_ctdna_value) / pre_radiation_ctdna_value, NA)
+  )
+
+cat("Patients with pre-radiation ctDNA (within 12 weeks): n =", sum(!is.na(conversion_data$pre_radiation_ctdna_value)), "\n")
+cat("Patients with post-radiation ctDNA (within 12 weeks): n =", sum(!is.na(conversion_data$post_radiation_ctdna_value)), "\n")
+cat("Patients with conversion (detectable to undetectable): n =", sum(conversion_data$converted, na.rm = TRUE), "\n")
+```
+
+```{r extract_outcomes, include=FALSE}
+# Extract survival outcomes for metastasis-free survival (MFS)
+# MFS: time from radiation to next metastatic relapse or death
+death_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                       !str_detect(names(dat_combined), regex("cause|reason", ignore_case = TRUE))]
+survival_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                     !str_detect(names(dat_combined), regex("death", ignore_case = TRUE))]
+alive_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^alive_yes_no$|alive.*yes.*no", ignore_case = TRUE))]
+relapse_cols <- names(survival_data)[str_detect(names(survival_data), regex("metastatic.*relapse.*date|relapse.*date|metastasis.*date|progression.*date", ignore_case = TRUE))]
+
+outcomes <- conversion_data %>%
+  left_join(
+    dat_combined %>%
+      select(patient_id, all_of(c(death_date_cols, survival_cols, alive_cols))),
+    by = "patient_id"
+  ) %>%
+  left_join(
+    survival_data %>%
+      mutate(patient_id = as.character(patient_id)) %>%
+      select(patient_id, all_of(relapse_cols)),
+    by = "patient_id"
+  ) %>%
+  mutate(
+    death_date = if (length(death_date_cols) > 0) {
+      as_date_safe(.data[[death_date_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    last_fu_date = if (length(survival_cols) > 0) {
+      as_date_safe(.data[[survival_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    # Get next metastatic relapse after radiation
+    next_relapse_date = if (length(relapse_cols) > 0) {
+      relapse_dates_all <- as_date_safe(dplyr::coalesce(!!!syms(relapse_cols)))
+      ifelse(!is.na(relapse_dates_all) & relapse_dates_all > radiation_date, relapse_dates_all, as.Date(NA))
+    } else {
+      as.Date(NA)
+    },
+    alive_status = if (length(alive_cols) > 0) {
+      case_when(
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "yes|y|1") ~ "Yes",
+        str_detect(tolower(as.character(.data[[alive_cols[1]]])), "no|n|0") ~ "No",
+        TRUE ~ NA_character_
+      )
+    } else {
+      NA_character_
+    },
+    # MFS: event is next metastatic relapse or death (whichever comes first)
+    event_date = pmin(next_relapse_date, death_date, last_fu_date, na.rm = TRUE),
+    mfs_event = case_when(
+      !is.na(next_relapse_date) & !is.na(event_date) & next_relapse_date == event_date ~ 1,
+      !is.na(death_date) & !is.na(event_date) & death_date == event_date ~ 1,
+      TRUE ~ 0
+    ),
+    mfs_time = as.numeric(event_date - radiation_date)
+  ) %>%
+  filter(!is.na(mfs_time), mfs_time > 0)
+```
+
+```{r descriptive_table}
+# Descriptive table
+desc_table <- outcomes %>%
+  summarise(
+    N = n(),
+    `Pre-Radiation ctDNA (median, IQR)` = if (sum(!is.na(pre_radiation_ctdna_value)) > 0) paste0(
+      round(median(pre_radiation_ctdna_value, na.rm = TRUE), 2), 
+      " (", 
+      round(quantile(pre_radiation_ctdna_value, 0.25, na.rm = TRUE), 2), 
+      "-", 
+      round(quantile(pre_radiation_ctdna_value, 0.75, na.rm = TRUE), 2), 
+      ")"
+    ) else "N/A",
+    `Post-Radiation ctDNA (median, IQR)` = if (sum(!is.na(post_radiation_ctdna_value)) > 0) paste0(
+      round(median(post_radiation_ctdna_value, na.rm = TRUE), 2), 
+      " (", 
+      round(quantile(post_radiation_ctdna_value, 0.25, na.rm = TRUE), 2), 
+      "-", 
+      round(quantile(post_radiation_ctdna_value, 0.75, na.rm = TRUE), 2), 
+      ")"
+    ) else "N/A",
+    `Conversion Rate (detectable→undetectable)` = if (n() > 0) paste0(round(100 * sum(converted, na.rm = TRUE) / n(), 1), "%") else "N/A",
+    `MFS Events` = sum(mfs_event, na.rm = TRUE),
+    `Median MFS (months)` = if (sum(!is.na(mfs_time)) > 0) round(median(mfs_time, na.rm = TRUE) / 30.44, 1) else "N/A"
+  ) %>%
+  kable(caption = "Patient Characteristics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+
+desc_table
+```
+
+```{r ctDNA_trajectory_plot}
+# Plot ctDNA trajectories around radiation (extended window for visualization)
+if (nrow(universe) > 0 && exists("outcomes") && nrow(outcomes) > 0) {
+  ctdna_trajectories <- ctdna_long %>%
+    inner_join(universe %>% select(patient_id, radiation_date), by = "patient_id") %>%
+    filter(
+      ctdna_date >= radiation_date - days(84),  # 12 weeks before
+      ctdna_date <= radiation_date + days(84)   # 12 weeks after
+    ) %>%
+    arrange(patient_id, ctdna_date) %>%
+    mutate(
+      days_from_radiation = as.numeric(ctdna_date - radiation_date),
+      converted = if (exists("outcomes") && nrow(outcomes) > 0) {
+        patient_id %in% (outcomes %>% filter(converted == 1) %>% pull(patient_id))
+      } else {
+        FALSE
+      }
+    )
+} else {
+  ctdna_trajectories <- tibble()
+}
+
+if (nrow(ctdna_trajectories) > 0) {
+  p_trajectory <- ctdna_trajectories %>%
+    ggplot(aes(x = days_from_radiation, y = log(ctdna_value + 1), 
+               group = patient_id, color = converted)) +
+    geom_line(alpha = 0.6, linewidth = 0.8) +
+    geom_point(alpha = 0.8, size = 2) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+    geom_vline(xintercept = -84, linetype = "dotted", color = "gray", linewidth = 0.5) +
+    geom_vline(xintercept = 84, linetype = "dotted", color = "gray", linewidth = 0.5) +
+    annotate("text", x = 0, y = max(log(ctdna_trajectories$ctdna_value + 1), na.rm = TRUE) * 0.95,
+             label = "Radiation", hjust = -0.1, size = 3.5, color = "red", fontface = "bold") +
+    annotate("text", x = -84, y = max(log(ctdna_trajectories$ctdna_value + 1), na.rm = TRUE) * 0.9,
+             label = "-12 weeks", hjust = 1.1, size = 2.5, color = "gray") +
+    annotate("text", x = 84, y = max(log(ctdna_trajectories$ctdna_value + 1), na.rm = TRUE) * 0.9,
+             label = "+12 weeks", hjust = -0.1, size = 2.5, color = "gray") +
+    scale_color_manual(values = c("FALSE" = "#2E86AB", "TRUE" = "#A23B72"),
+                       labels = c("FALSE" = "No Conversion", "TRUE" = "Converted"),
+                       name = "Conversion") +
+    labs(
+      x = "Days from Radiation",
+      y = "log(ctDNA + 1)",
+      title = "ctDNA Trajectories Around Radiation to Metastasis",
+      subtitle = "Vertical lines: radiation (red), ±12 weeks window (gray)"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold", size = 14),
+          plot.subtitle = element_text(size = 10, color = "gray50"))
+  
+  p_trajectory
+  
+  # List patient IDs included in the ctDNA trajectory plot
+  ctdna_trajectories %>%
+    distinct(patient_id) %>%
+    arrange(patient_id) %>%
+    mutate(`Patient ID` = patient_id) %>%
+    select(`Patient ID`) %>%
+    kable(caption = "Patient IDs in ctDNA Trajectories Around Radiation") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+} else {
+  cat("No ctDNA trajectory data available for plotting.\n")
+}
+```
+
+```{r mfs_survival_analysis}
+# Metastasis-Free Survival Analysis
+# Compare patients by ctDNA conversion status
+
+if (nrow(outcomes) > 0 && sum(!is.na(outcomes$mfs_time)) > 0) {
+  # Check if we have both groups
+  has_converted <- sum(outcomes$converted == 1, na.rm = TRUE) > 0
+  has_no_conversion <- sum(outcomes$converted == 0, na.rm = TRUE) > 0
+  
+  if (has_converted && has_no_conversion) {
+    # Create survival object
+    surv_obj <- Surv(time = outcomes$mfs_time / 30.44, event = outcomes$mfs_event)  # Convert to months
+    
+    # Fit survival by conversion status
+    fit_by_conversion <- survfit(surv_obj ~ converted, data = outcomes)
+    
+    # Plot Kaplan-Meier curves
+    p_km <- ggsurvplot(
+      fit_by_conversion,
+      data = outcomes,
+      pval = TRUE,
+      conf.int = TRUE,
+      risk.table = TRUE,
+      legend.labs = c("No Conversion", "Converted"),
+      title = "Metastasis-Free Survival by ctDNA Conversion Status",
+      xlab = "Time (months) from Radiation",
+      ylab = "Metastasis-Free Survival Probability",
+      palette = c("#2E86AB", "#A23B72"),
+      ggtheme = theme_minimal()
+    )
+    
+    print(p_km)
+    
+    # Cox proportional hazards model
+    cox_model <- coxph(surv_obj ~ converted, data = outcomes)
+    cox_summary <- summary(cox_model)
+    
+    # Store cox_summary for use in summary section
+    assign("cox_summary", cox_summary, envir = .GlobalEnv)
+    
+    # Display Cox model results
+    cox_results <- tibble(
+      `Variable` = "ctDNA Conversion (detectable→undetectable)",
+      `HR` = round(exp(cox_summary$coefficients[1, "coef"]), 3),
+      `95% CI Lower` = round(exp(cox_summary$conf.int[1, "lower .95"]), 3),
+      `95% CI Upper` = round(exp(cox_summary$conf.int[1, "upper .95"]), 3),
+      `P-value` = ifelse(cox_summary$coefficients[1, "Pr(>|z|)"] < 0.001, 
+                         "<0.001", 
+                         round(cox_summary$coefficients[1, "Pr(>|z|)"], 3))
+    ) %>%
+      kable(caption = "Cox Proportional Hazards Model for Metastasis-Free Survival") %>%
+      kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+    
+    cox_results
+  } else {
+    cat("Cannot perform survival comparison: need both converted and non-converted groups.\n")
+    cat("Converted: n =", sum(outcomes$converted == 1, na.rm = TRUE), "\n")
+    cat("No conversion: n =", sum(outcomes$converted == 0, na.rm = TRUE), "\n")
+  }
+  
+  # Summary statistics by conversion status
+  mfs_summary <- outcomes %>%
+    group_by(converted) %>%
+    summarise(
+      N = n(),
+      Events = sum(mfs_event, na.rm = TRUE),
+      `Median MFS (months)` = if (sum(!is.na(mfs_time)) > 0) round(median(mfs_time, na.rm = TRUE) / 30.44, 1) else NA,
+      `Mean MFS (months)` = if (sum(!is.na(mfs_time)) > 0) round(mean(mfs_time, na.rm = TRUE) / 30.44, 1) else NA,
+      .groups = "drop"
+    ) %>%
+    mutate(Group = ifelse(converted == 1, "Converted", "No Conversion")) %>%
+    select(Group, N, Events, `Median MFS (months)`, `Mean MFS (months)`) %>%
+    kable(caption = "Metastasis-Free Survival by Conversion Status") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  
+  mfs_summary
+} else {
+  cat("Insufficient data for metastasis-free survival analysis.\n")
+}
+```
+
+```{r summary}
+cat("## Summary\n\n")
+cat("**Universe:** Patients with radiation to metastasis (target mentions metastasis) AND ctDNA available within 12 weeks before and 12 weeks after radiation\n\n")
+cat("**N =", nrow(universe), "\n\n")
+if (nrow(outcomes) > 0) {
+  cat("**Key Findings:**\n")
+  cat("- Patients with pre-radiation ctDNA (within 12 weeks): n =", sum(!is.na(outcomes$pre_radiation_ctdna_value)), "\n")
+  cat("- Patients with post-radiation ctDNA (within 12 weeks): n =", sum(!is.na(outcomes$post_radiation_ctdna_value)), "\n")
+  cat("- Conversion rate (detectable→undetectable):", round(100 * sum(outcomes$converted, na.rm = TRUE) / nrow(outcomes), 1), "%\n")
+  if (sum(!is.na(outcomes$pre_radiation_ctdna_value)) > 0) {
+    cat("- Median pre-radiation ctDNA:", round(median(outcomes$pre_radiation_ctdna_value, na.rm = TRUE), 2), "\n")
+  }
+  if (sum(!is.na(outcomes$post_radiation_ctdna_value)) > 0) {
+    cat("- Median post-radiation ctDNA:", round(median(outcomes$post_radiation_ctdna_value, na.rm = TRUE), 2), "\n")
+  }
+  if (sum(!is.na(outcomes$mfs_time)) > 0) {
+    cat("- Median MFS:", round(median(outcomes$mfs_time, na.rm = TRUE) / 30.44, 1), "months\n")
+    cat("- MFS events:", sum(outcomes$mfs_event, na.rm = TRUE), "\n")
+  }
+  if (exists("cox_summary")) {
+    cat("- HR for conversion (MFS):", round(exp(cox_summary$coefficients[1, "coef"]), 2), 
+        " (95% CI: ", round(exp(cox_summary$conf.int[1, "lower .95"]), 2), 
+        "-", round(exp(cox_summary$conf.int[1, "upper .95"]), 2), ")\n")
+    cat("- P-value:", ifelse(cox_summary$coefficients[1, "Pr(>|z|)"] < 0.001, 
+                              "<0.001", 
+                              round(cox_summary$coefficients[1, "Pr(>|z|)"], 3)), "\n")
+  }
+}
+```
+

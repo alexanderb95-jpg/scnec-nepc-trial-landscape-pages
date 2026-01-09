@@ -1,0 +1,1290 @@
+---
+title: "ctDNA_Share"
+author: "Alex Karol"
+date: "2025-10-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# ==============================
+# Setup
+# ==============================
+# Keep paths stable without setwd()
+knitr::opts_knit$set(root.dir = "~/R")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Core libraries (loaded once)
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(knitr)
+  library(kableExtra)
+  library(ggplot2)
+})
+
+# Cohort sizes (for ≈expected scaling)
+TOTAL_N    <- 310  # Full target cohort
+SCREENED_N <- 108  # Subset with current data
+
+# ---- Helpers ----
+# Print tibble/data.frame safely with n control
+safe_print_tbl <- function(x, n = 50, ...) {
+  if (inherits(x, "tbl_df")) print(x, n = n, ...) else print(tibble::as_tibble(x), n = n, ...)
+}
+
+# Robust date parser: handles Excel serials & common strings
+as_date_safe <- function(x) {
+  v <- as.character(x)
+  num <- suppressWarnings(as.numeric(v))
+  out <- rep(as.Date(NA), length(v))
+  # Excel serials (roughly 1955–2064)
+  is_serial <- !is.na(num) & num > 20000 & num < 60000
+  out[is_serial] <- as.Date(num[is_serial], origin = "1899-12-30")
+  # Strings
+  left <- !is_serial
+  if (any(left)) {
+    parsed <- suppressWarnings(parse_date_time(v[left], orders = c("Y-m-d","m/d/Y","d/m/Y","m/d/y","d/m/y","Ymd"), tz = "UTC"))
+    out[left] <- as.Date(parsed)
+  }
+  # Clamp to reasonable range
+  bad <- is.na(out) | year(out) < 2000 | year(out) > 2100
+  out[bad] <- as.Date(NA)
+  out
+}
+
+safe_min_date <- function(x) { dx <- as_date_safe(x); if (all(is.na(dx))) as.Date(NA) else suppressWarnings(min(dx, na.rm = TRUE)) }
+safe_max_date <- function(x) { dx <- as_date_safe(x); if (all(is.na(dx))) as.Date(NA) else suppressWarnings(max(dx, na.rm = TRUE)) }
+
+# Frequency table (optionally with ≈expected counts)
+freq_table <- function(x, labels_map = NULL, sort_desc = TRUE, with_expected = TRUE,
+                       screened_n = SCREENED_N, total_n = TOTAL_N) {
+  stopifnot(!is.null(screened_n), screened_n > 0)
+  x <- as.vector(x)
+  if (!is.null(labels_map)) {
+    stopifnot(!is.null(names(labels_map)))
+    x <- ifelse(is.na(x), NA, labels_map[as.character(x)])
+  }
+  tab <- as.data.frame(table(x[!is.na(x)], useNA = "no"), stringsAsFactors = FALSE)
+  if (!nrow(tab)) return(tibble::tibble(value = character(), N = integer()))
+  names(tab)[1] <- "value"; tab$N <- as.integer(tab$Freq)
+  if (with_expected) {
+    tab$Expected <- round(tab$N / screened_n * total_n)
+    tab$`N (≈expected)` <- paste0(tab$N, " (≈", tab$Expected, ")")
+    tab <- tab[, c("value", "N (≈expected)")]
+  } else tab <- tab[, c("value", "N")]
+  if (sort_desc) tab <- dplyr::arrange(tab, dplyr::desc(tab[[2]]), value)
+  dplyr::filter(tab, !is.na(value))
+}
+
+# Parse T/N (cystectomy) to numeric categories for risk rules
+parse_t_num <- function(x) {
+  x <- toupper(str_trim(as.character(x)))
+  case_when(
+    str_detect(x, "^TIS|^TA|^T0") ~ 0,
+    str_detect(x, "^T1") ~ 1,
+    str_detect(x, "^T2") ~ 2,
+    str_detect(x, "^T3") ~ 3,
+    str_detect(x, "^T4") ~ 4,
+    TRUE ~ NA_real_
+  )
+}
+parse_n_num <- function(x) {
+  x <- toupper(str_trim(as.character(x)))
+  case_when(
+    str_detect(x, "^N0") ~ 0,
+    str_detect(x, "^N[1-9]") ~ suppressWarnings(as.numeric(str_extract(x, "(?<=N)\\d+"))),
+    TRUE ~ NA_real_
+  )
+}
+
+# Build long ctDNA (values + dates) from wide columns
+build_ctdna_long <- function(dat, id_col) {
+  val <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+$")) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp", values_to = "ctdna_value_raw") %>%
+    mutate(ctdna_value = suppressWarnings(as.numeric(gsub("^<\\s*", "", gsub(",", "", as.character(ctdna_value_raw))))) )
+  dt  <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+_date$")) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp_date", values_to = "ctdna_date_raw")
+  out <- val %>%
+    mutate(tp_idx = as.integer(str_extract(tp, "\\d+"))) %>%
+    left_join(dt %>% mutate(tp_idx = as.integer(str_extract(tp_date, "\\d+"))) %>% select(all_of(id_col), tp_idx, ctdna_date_raw),
+              by = c(id_col, "tp_idx")) %>%
+    mutate(ctdna_date = as_date_safe(ctdna_date_raw)) %>%
+    filter(!is.na(ctdna_date)) %>%
+    select(all_of(id_col), ctdna_date, ctdna_value)
+  out
+}
+
+# Clean/harmonize regimen names and settings
+clean_regimen <- function(x) {
+  y <- tolower(str_squish(x))
+  case_when(
+    str_detect(y, "enfortumab.*pembrolizumab|\\bev\\b.*\\bpemb|\\bev/pembro") ~ "Enfortumab Vedotin + Pembrolizumab",
+    str_detect(y, "gem.*cis.*nivo")                                              ~ "Gemcitabine + Cisplatin + Nivolumab",
+    str_detect(y, "gem.*cis")                                                    ~ "Gemcitabine + Cisplatin",
+    str_detect(y, "gem.*carb")                                                   ~ "Gemcitabine + Carboplatin",
+    str_detect(y, "^nivolumab|\\bnivo\\b")                                     ~ "Nivolumab",
+    str_detect(y, "pembrolizumab|\\bpembro\\b")                               ~ "Pembrolizumab",
+    str_detect(y, "atezolizumab|\\batezo\\b")                                 ~ "Atezolizumab",
+    str_detect(y, "durvalumab|\\bdurva\\b")                                   ~ "Durvalumab",
+    str_detect(y, "clinical trial")                                             ~ "Clinical trial (other)",
+    str_detect(y, "other \\(see notes\\)|^other$")                              ~ "Other (see notes)",
+    TRUE                                                                          ~ str_to_title(y)
+  )
+}
+
+# Categorize therapy type: ICI, ADC, Chemo, or combinations
+categorize_therapy_type <- function(x) {
+  y <- tolower(str_squish(x))
+  has_ici <- str_detect(y, "nivolumab|pembrolizumab|atezolizumab|durvalumab|avelumab|ipi|ipilimumab|tremelimumab|pd-1|pd-l1|ctla-4|checkpoint|immunotherapy")
+  has_adc <- str_detect(y, "enfortumab|vedotin|sacituzumab|govitecan|t-dxd|trastuzumab.*deruxtecan|adc|antibody.*drug.*conjugate")
+  has_chemo <- str_detect(y, "gemcitabine|cisplatin|carboplatin|paclitaxel|docetaxel|vinflunine|methotrexate|doxorubicin|cyclophosphamide|ifosfamide|mvac|ddmvac|chemotherapy|chemo")
+  
+  # Determine category (use & instead of && for vectorized operations)
+  case_when(
+    has_ici & has_adc & has_chemo ~ "ICI+ADC+Chemo",
+    has_ici & has_adc ~ "ICI+ADC",
+    has_ici & has_chemo ~ "ICI+Chemo",
+    has_adc & has_chemo ~ "ADC+Chemo",
+    has_ici ~ "ICI",
+    has_adc ~ "ADC",
+    has_chemo ~ "Chemo",
+    TRUE ~ "Other"
+  )
+}
+clean_setting <- function(x) {
+  y <- tolower(str_squish(as.character(x)))
+  case_when(
+    y %in% c("neo","neoadjuvant","neoadjuvant therapy","neoadjuvant systemic therapy") ~ "Neoadjuvant",
+    y %in% c("adjuvant","adjuvant therapy","adjuvant systemic therapy")                   ~ "Adjuvant",
+    y %in% c("palliative","metastatic","1l metastatic","2l metastatic")                  ~ "Palliative",
+    y %in% c("","na","n/a","unknown","other","other (see notes)")                    ~ NA_character_,
+    TRUE ~ str_to_title(y)
+  )
+}
+```
+
+
+
+
+```{r load_and_clean, include=FALSE}
+# ==============================
+# Load and tidy the raw sheet
+# ==============================
+file_path <- "Natera_Sheet_Master1.xlsx"
+raw <- read_excel(file_path, sheet = "Master_Sheet", col_names = FALSE)
+
+# Transpose: first column = variable names; columns = patients
+var_names <- raw[[1]]
+dat <- as.data.frame(t(raw[, -1]), stringsAsFactors = FALSE)
+colnames(dat) <- var_names
+
+# Clean column names to snake_case
+dat <- clean_names(dat)
+
+# Patient ID (create if missing)
+id_col <- if ("record_id_linking_key" %in% names(dat)) "record_id_linking_key" else {
+  dat$record_id_linking_key <- seq_len(nrow(dat)); "record_id_linking_key"
+}
+
+# Convert any *date* columns
+date_cols <- names(dat)[str_detect(names(dat), regex("date", ignore_case = TRUE))]
+dat <- dat %>% mutate(across(all_of(date_cols), as_date_safe))
+
+# Known date-like fields lacking the word "date"
+dat <- dat %>% mutate(
+  time_of_first_diagnosis_of_muscle_invasive_bladder_cancer_if_different_from_above_any_location =
+    as_date_safe(time_of_first_diagnosis_of_muscle_invasive_bladder_cancer_if_different_from_above_any_location),
+  time_of_first_pathologic_diagnosis_of_bladder_cancer_if_different_from_above_requires_surgical_resection_beyond_turbt =
+    as_date_safe(time_of_first_pathologic_diagnosis_of_bladder_cancer_if_different_from_above_requires_surgical_resection_beyond_turbt)
+)
+
+# Normalize ctDNA value column names (e.g., ct_dna_level13 -> ct_dna_level_13)
+names(dat) <- str_replace_all(names(dat), regex("^ct[_ ]?dna[_ ]?level(\\d+)$", ignore_case = TRUE), "ct_dna_level_\\1")
+
+# Ensure ctDNA numeric columns are numeric
+ctdna_value_cols <- names(dat)[str_detect(names(dat), regex("^ct_dna_level_\\d+$", ignore_case = TRUE))]
+if (length(ctdna_value_cols)) {
+  dat[ctdna_value_cols] <- lapply(dat[ctdna_value_cols], function(x) {
+    y <- gsub(",", "", as.character(x))
+    y <- gsub("^<\\s*", "", y)
+    y[y %in% c("", "NA", "N/A", "na", "n/a", "Not detected", "Undetected", "NEGATIVE", "Negative", "neg", "ND")] <- NA
+    suppressWarnings(as.numeric(y))
+  })
+}
+
+# Build long ctDNA table
+ctdna_long <- build_ctdna_long(dat, id_col)
+```
+
+```{r derived_vars, include=FALSE}
+# ==============================
+# Derived variables (NAC, cystectomy stages, yp stage, ctDNA)
+# ==============================
+
+# Primary ctDNA definition: FIRST POST-OP sample (>= surgery_1_date)
+val_long <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+$")) %>%
+  pivot_longer(cols = matches("^ct_dna_level_\\d+$"), names_to = "tp", values_to = "ctdna_value") %>%
+  mutate(tp_idx = as.integer(str_extract(tp, "\\d+")))
+
+date_long <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+_date$")) %>%
+  pivot_longer(cols = matches("^ct_dna_level_\\d+_date$"), names_to = "tp_date", values_to = "ctdna_date") %>%
+  mutate(tp_idx = as.integer(str_extract(tp_date, "\\d+")))
+
+first_postop <- val_long %>%
+  left_join(date_long %>% select(all_of(id_col), tp_idx, ctdna_date), by = c(id_col, "tp_idx")) %>%
+  left_join(dat %>% select(all_of(id_col), surgery_1_date), by = id_col) %>%
+  filter(!is.na(surgery_1_date), !is.na(ctdna_date), as_date_safe(ctdna_date) >= as_date_safe(surgery_1_date)) %>%
+  mutate(ctdna_date = as_date_safe(ctdna_date)) %>%
+  arrange(.data[[id_col]], ctdna_date) %>%
+  group_by(.data[[id_col]]) %>%
+  slice_min(ctdna_date, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(!!id_col := .data[[id_col]],
+            ctdna_pos = as.integer(suppressWarnings(as.numeric(ctdna_value)) > 0),
+            ctdna_value_first_postop = suppressWarnings(as.numeric(ctdna_value)),
+            ctdna_date_first_postop = ctdna_date)
+
+dat <- dat %>% left_join(first_postop, by = id_col) %>%
+  mutate(
+    nac_flag    = tolower(neoadjuvant_systemic_therapy_yes_no) == "yes",
+    t_stage_cyst = { x <- toupper(str_trim(as.character(pathology_t_stage_3))); x[x %in% c("", "N/A OR OTHER", "N/A OR OTHER (SEE NOTES)", "NA", "N/A")] <- NA; x },
+    n_stage_cyst = toupper(str_trim(as.character(pathology_n_stage_3))),
+    yp_stage     = ifelse(nac_flag & !is.na(t_stage_cyst), sub("^T", "ypT", t_stage_cyst), NA_character_),
+    ctdna_pos_any = if (length(ctdna_value_cols)) as.integer(rowSums(select(., all_of(ctdna_value_cols)) > 0, na.rm = TRUE) > 0) else NA_integer_,
+    systemic_any  = as.integer(if_any(starts_with("systemic_therapy_"), ~ !is.na(.)))
+  ) %>%
+  mutate(
+    t_num = parse_t_num(t_stage_cyst),
+    n_num = parse_n_num(n_stage_cyst),
+    node_pos = !is.na(n_num) & n_num > 0,
+    high_risk = case_when(
+      !nac_flag & ((!is.na(t_num) & t_num >= 3) | node_pos) ~ 1,  # No NAC: pT3–T4a or N+
+      nac_flag  & ((!is.na(t_num) & t_num >= 2) | node_pos) ~ 1,  # NAC: pT2–T4a or N+
+      (!is.na(t_num) | !is.na(n_num)) ~ 0,
+      TRUE ~ NA_real_
+    ),
+    risk_group = case_when(high_risk == 1 ~ "High-risk", high_risk == 0 ~ "Intermediate–Low", TRUE ~ NA_character_)
+  )
+```
+
+```{r descriptives_labeled}
+# ==============================
+# Descriptives (clean & labeled)
+# ==============================
+cat("108 out of 310 charts screened\n")
+cat("Ignore ≈expected for the first two tables; those are complete.\n")
+
+bin_labels <- c("0" = "No", "1" = "Yes")
+
+labels <- c(
+  tumor_location      = "Primary tumor location",
+  path_t_stage_2      = "Pathologic T stage (initial MIBC diagnosis)",
+  path_n_stage_2      = "Pathologic N stage (initial MIBC diagnosis)",
+  path_m_stage_2      = "Pathologic M stage (initial MIBC diagnosis)",
+  path_t_stage_3      = "Cystectomy T stage (surgical specimen)",
+  path_n_stage_3      = "Cystectomy N stage (surgical specimen)",
+  grade               = "Tumor grade",
+  histology           = "Histology subtype",
+  clinical_state      = "Clinical disease state at first ctDNA draw",
+  yp_stage            = "yp Stage (cystectomy T stage in NAC patients)",
+  ctdna_pos           = "ctDNA positivity (first post-op sample)",
+  surgery_therapeutic = "Cancer-directed surgery with therapeutic intent",
+  radiation           = "Received radiation therapy",
+  systemic_therapy    = "Any systemic therapy (yes/no)",
+  neoadj              = "Neoadjuvant systemic therapy",
+  adjuvant            = "Adjuvant systemic therapy",
+  palliative          = "Palliative systemic therapy",
+  systemic_any        = "Systemic therapy after surgery (any)",
+  risk_group          = "Risk group (CheckMate 274 criteria)"
+)
+
+# Show cancer type/stage without expected scaling
+safe_print_tbl(freq_table(dat$cancer_type_natera, with_expected = FALSE))
+safe_print_tbl(freq_table(dat$cancer_stage_natera, with_expected = FALSE))
+
+# Labeled block
+freqs <- list(
+  tumor_location      = freq_table(dat$primary_tumor_location),
+  path_t_stage_2      = freq_table(dat$pathology_t_stage_2),
+  path_n_stage_2      = freq_table(dat$pathology_n_stage_2),
+  path_m_stage_2      = freq_table(dat$pathology_m_stage_2),
+  path_t_stage_3      = freq_table(dat$t_stage_cyst),
+  path_n_stage_3      = freq_table(dat$n_stage_cyst),
+  grade               = freq_table(dat$grade),
+  histology           = freq_table(dat$histology),
+  clinical_state      = freq_table(dat$clinical_disease_state_at_time_of_first_ct_dna_nmibc_mibc_advanced_metastatic),
+  yp_stage            = freq_table(dat$yp_stage),
+  ctdna_pos           = freq_table(dat$ctdna_pos, labels_map = bin_labels),
+  surgery_therapeutic = freq_table(dat$cancer_directed_surgery_with_therapeutic_intent_yes_no),
+  radiation           = freq_table(dat$radiation_yes_no),
+  systemic_therapy    = freq_table(dat$systemic_therapy_yes_no),
+  neoadj              = freq_table(dat$neoadjuvant_systemic_therapy_yes_no),
+  adjuvant            = freq_table(dat$adjuvant_systemic_therapy_yes_no),
+  palliative          = freq_table(dat$palliative_systemic_therapy_yes_no),
+  systemic_any        = freq_table(dat$systemic_any, labels_map = bin_labels),
+  risk_group          = freq_table(dat$risk_group)
+)
+
+for (nm in names(labels)) {
+  cat("\n=============================\n")
+  cat("Variable:", labels[[nm]], "\n")
+  safe_print_tbl(freqs[[nm]], row.names = FALSE)
+}
+```
+
+```{r systemic_therapy}
+# ==============================
+# Systemic therapies — tidy, clean, summarize
+# ==============================
+# Build long table for systemic therapies + settings
+reg_long <- dat %>%
+  select(all_of(id_col), matches("^systemic_therapy_\\d+$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "regimen_raw") %>%
+  mutate(idx = as.integer(str_extract(var, "\\d+"))) %>% select(-var)
+
+set_long <- dat %>%
+  select(all_of(id_col), matches("^systemic_therapy_\\d+_treatment_setting$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "setting_raw") %>%
+  mutate(idx = as.integer(str_extract(var, "\\d+"))) %>% select(-var)
+
+sys_long <- reg_long %>%
+  left_join(set_long, by = c(id_col, "idx")) %>%
+  filter(!is.na(regimen_raw) & str_squish(regimen_raw) != "") %>%
+  mutate(regimen_clean = clean_regimen(regimen_raw), setting_clean = clean_setting(setting_raw))
+
+# Unique patients per regimen by setting (with ≈expected)
+sys_patients_by_setting <- sys_long %>%
+  distinct(.data[[id_col]], regimen_clean, setting_clean) %>%
+  count(setting_clean, regimen_clean, name = "Patients") %>%
+  mutate(Expected = round(Patients / SCREENED_N * TOTAL_N)) %>%
+  arrange(setting_clean, desc(Patients)) %>%
+  select(setting_clean, regimen_clean, Patients, Expected)
+
+cat("Systemic therapy — unique patients per regimen by setting\n")
+safe_print_tbl(sys_patients_by_setting, n = 40)
+```
+
+```{r risk_x_ctdna}
+# ==============================
+# Post-op ctDNA × Risk group table
+# ==============================
+ctdna_risk_wide <- dat %>%
+  mutate(
+    ctdna_postop = case_when(ctdna_pos == 1 ~ "ctDNA positive", ctdna_pos == 0 ~ "ctDNA negative", TRUE ~ "ctDNA missing"),
+    risk2 = case_when(risk_group == "High-risk" ~ "High-risk", risk_group == "Intermediate–Low" ~ "Intermediate–Low", TRUE ~ "Risk missing")
+  ) %>%
+  filter(risk2 %in% c("High-risk","Intermediate–Low"), ctdna_postop %in% c("ctDNA positive","ctDNA negative")) %>%
+  count(risk2, ctdna_postop, name = "N") %>%
+  mutate(`N (≈expected)` = paste0(N, " (≈", round(N / SCREENED_N * TOTAL_N), ")")) %>%
+  select(-N) %>%
+  pivot_wider(names_from = ctdna_postop, values_from = `N (≈expected)`) %>%
+  arrange(match(risk2, c("High-risk","Intermediate–Low"))) %>%
+  rename(`Risk group` = risk2)
+
+kable(ctdna_risk_wide,
+      col.names = c("Risk group", "ctDNA positive", "ctDNA negative"),
+      align = c("l","c","c"),
+      caption = sprintf("Post-op ctDNA × Risk group (N = %d). Values show observed N (≈expected if all %d screened).", TOTAL_N, TOTAL_N)
+) %>% kable_styling(full_width = FALSE)
+```
+
+```{r nac_rt_windows}
+# ==============================
+# NAC patients + RT + ctDNA during/≤90d after NAC or RT
+# ==============================
+# Neoadjuvant start/end per patient (from systemic therapy dates)
+reg_long_dates <- dat %>%
+  select(all_of(id_col), matches("(?i)^systemic_therapy_\\d+$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "regimen_raw") %>%
+  mutate(idx = as.integer(str_extract(var, "\\d+"))) %>% select(-var)
+
+set_long_dates <- dat %>%
+  select(all_of(id_col), matches("(?i)^systemic_therapy_\\d+_treatment_setting$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "setting_raw") %>%
+  mutate(idx = as.integer(str_extract(var, "\\d+"))) %>% select(-var)
+
+dt_start <- dat %>%
+  select(all_of(id_col), matches("(?i)^systemic_therapy_\\d+.*(start|date_start|start_date)$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "start_raw") %>%
+  mutate(idx = as.integer(str_extract(var, "\\d+"))) %>% select(-var)
+
+dt_end <- dat %>%
+  select(all_of(id_col), matches("(?i)^systemic_therapy_\\d+.*(end|date_end|end_date)$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "end_raw") %>%
+  mutate(idx = as.integer(str_extract(var, "\\d+"))) %>% select(-var)
+
+sys_long_dates <- reg_long_dates %>%
+  left_join(set_long_dates, by = c(id_col, "idx")) %>%
+  left_join(dt_start, by = c(id_col, "idx")) %>%
+  left_join(dt_end,   by = c(id_col, "idx")) %>%
+  filter(!is.na(regimen_raw) & str_squish(regimen_raw) != "") %>%
+  mutate(setting_clean = clean_setting(setting_raw), start_date = as_date_safe(start_raw), end_date = as_date_safe(end_raw)) %>%
+  select(!!id_col, idx, setting_clean, start_date, end_date)
+
+neoadj_end <- sys_long_dates %>%
+  filter(setting_clean == "Neoadjuvant") %>%
+  group_by(.data[[id_col]]) %>%
+  summarise(neo_start_date = safe_min_date(start_date), neo_end_date = safe_max_date(end_date), .groups = "drop")
+
+# Radiation windows (start/end columns guessed robustly)
+rad_start_cols <- names(dat)[str_detect(names(dat), regex("^(radiation|rt).*?(start|date_start|start_date)$", ignore_case = TRUE))]
+rad_end_cols   <- names(dat)[str_detect(names(dat), regex("^(radiation|rt).*?(end|date_end|end_date)$",   ignore_case = TRUE))]
+
+rad_starts <- if (length(rad_start_cols)) dat %>% select(all_of(id_col), all_of(rad_start_cols)) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "start_raw") %>%
+  mutate(rt_start_date = as_date_safe(start_raw)) %>% filter(!is.na(rt_start_date)) %>%
+  group_by(.data[[id_col]]) %>% summarise(rt_start_min = min(rt_start_date, na.rm = TRUE), .groups = "drop") else NULL
+
+rad_ends <- if (length(rad_end_cols)) dat %>% select(all_of(id_col), all_of(rad_end_cols)) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "end_raw") %>%
+  mutate(rt_end_date = as_date_safe(end_raw)) %>% filter(!is.na(rt_end_date)) %>%
+  group_by(.data[[id_col]]) %>% summarise(rt_end_max = max(rt_end_date, na.rm = TRUE), .groups = "drop") else NULL
+
+rt_windows <- full_join(rad_starts, rad_ends, by = id_col) %>%
+  mutate(has_rt = !is.na(rt_start_min) | !is.na(rt_end_max), rt_start_use = coalesce(rt_start_min, rt_end_max), rt_end_use = coalesce(rt_end_max, rt_start_min))
+
+# ctDNA during/≤90d after NAC OR during/≤90d after RT
+neo_rt_ctdna <- neoadj_end %>%
+  filter(!is.na(neo_end_date)) %>%
+  inner_join(rt_windows %>% filter(has_rt), by = id_col) %>%
+  left_join(ctdna_long, by = id_col) %>%
+  filter(!is.na(ctdna_date)) %>%
+  mutate(
+    in_nac          = !is.na(neo_start_date) & ctdna_date >= neo_start_date & ctdna_date <= neo_end_date,
+    in_90_after_nac = ctdna_date > neo_end_date & ctdna_date <= (neo_end_date + days(90)),
+    in_rt           = !is.na(rt_start_use) & !is.na(rt_end_use) & ctdna_date >= rt_start_use & ctdna_date <= rt_end_use,
+    in_90_after_rt  = !is.na(rt_end_use) & ctdna_date > rt_end_use & ctdna_date <= (rt_end_use + days(90)),
+    any_window      = in_nac | in_90_after_nac | in_rt | in_90_after_rt
+  ) %>%
+  filter(any_window)
+
+neo_rt_ids <- neo_rt_ctdna %>% distinct(.data[[id_col]]) %>% arrange(.data[[id_col]])
+
+cat("…who also received radiation (any start/end present):",
+    neoadj_end %>% inner_join(rt_windows %>% filter(has_rt), by = id_col) %>% nrow(), "\n")
+cat("…and had ctDNA during/≤90d after NAC OR during/≤90d after RT:", nrow(neo_rt_ids), "\n\n")
+```
+
+```{r ctdna_tests_summary}
+# ==============================
+# Number of ctDNA tests per patient (median, IQR)
+# ==============================
+ctdna_value_cols <- names(dat)[str_detect(names(dat), "^ct_dna_level_\\d+$") & !str_detect(names(dat), "_date$")]
+
+if (length(ctdna_value_cols)) {
+  dat[ctdna_value_cols] <- lapply(dat[ctdna_value_cols], function(x) {
+    y <- gsub(",", "", as.character(x)); y <- gsub("^<\\s*", "", y)
+    y[y %in% c("", "NA", "N/A", "na", "n/a", "Not detected", "Undetected", "NEGATIVE", "Negative", "neg", "ND")] <- NA
+    suppressWarnings(as.numeric(y))
+  })
+}
+
+tests_per_pt <- dat %>% mutate(ctdna_tests = if (length(ctdna_value_cols)) rowSums(!is.na(dat[ctdna_value_cols])) else NA_integer_) %>% select(all_of(id_col), ctdna_tests)
+
+summ <- tests_per_pt %>%
+  summarise(Patients = n(), Q1 = as.numeric(quantile(ctdna_tests, 0.25, na.rm = TRUE)), Median = as.numeric(median(ctdna_tests, na.rm = TRUE)), Q3 = as.numeric(quantile(ctdna_tests, 0.75, na.rm = TRUE)), IQR = Q3 - Q1) %>%
+  mutate(`Median (IQR)` = sprintf("%g (%g–%g)", Median, Q1, Q3)) %>% select(Patients, `Median (IQR)`, Q1, Median, Q3, IQR)
+
+kable(summ, caption = "Number of ctDNA tests obtained per patient (overall): median with IQR") %>% kable_styling(full_width = FALSE)
+```
+
+```{r conversion_analysis}
+# ==============================
+# Molecular conversion (non-advanced at dx): first post-op neg → later pos
+# ==============================
+
+diag_col <- "clinical_disease_state_at_time_of_first_ct_dna_nmibc_mibc_advanced_metastatic"
+stopifnot(diag_col %in% names(dat))
+
+# (Re)build ctdna_long if needed
+if (!exists("ctdna_long")) ctdna_long <- build_ctdna_long(dat, id_col)
+
+# Classify diagnosis state
+ad <- dat %>% mutate(dx_state = tolower(str_trim(as.character(.data[[diag_col]]))), non_advanced_dx = case_when(dx_state %in% c("nmibc", "mibc") ~ TRUE, dx_state %in% c("advanced", "metastatic", "advanced/metastatic") ~ FALSE, TRUE ~ NA))
+
+# Ensure first_postop exists
+if (!exists("first_postop")) {
+  first_postop <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+$")) %>%
+    pivot_longer(cols = matches("^ct_dna_level_\\d+$"), names_to = "tp", values_to = "ctdna_value") %>%
+    mutate(tp_idx = as.integer(str_extract(tp, "\\d+"))) %>%
+    left_join(dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+_date$")) %>% pivot_longer(cols = matches("^ct_dna_level_\\d+_date$"), names_to = "tp_date", values_to = "ctdna_date") %>% mutate(tp_idx = as.integer(str_extract(tp_date, "\\d+"))) %>% select(all_of(id_col), tp_idx, ctdna_date),
+              by = c(id_col, "tp_idx")) %>%
+    left_join(dat %>% select(all_of(id_col), surgery_1_date), by = id_col) %>%
+    filter(!is.na(surgery_1_date), !is.na(ctdna_date), as_date_safe(ctdna_date) >= as_date_safe(surgery_1_date)) %>%
+    mutate(ctdna_date = as_date_safe(ctdna_date)) %>%
+    arrange(.data[[id_col]], ctdna_date) %>% group_by(.data[[id_col]]) %>% slice_min(ctdna_date, with_ties = FALSE) %>% ungroup() %>%
+    transmute(!!id_col := .data[[id_col]], ctdna_pos = as.integer(suppressWarnings(as.numeric(ctdna_value)) > 0), ctdna_date_first_postop = ctdna_date)
+}
+
+conv_df <- ad %>% select(all_of(id_col), non_advanced_dx) %>%
+  left_join(first_postop %>% select(all_of(id_col), ctdna_pos, ctdna_date_first_postop), by = id_col) %>%
+  left_join(ctdna_long, by = id_col) %>%
+  filter(!is.na(ctdna_date_first_postop)) %>%
+  mutate(post_first = ctdna_date > ctdna_date_first_postop, later_pos = post_first & !is.na(ctdna_value) & ctdna_value > 0) %>%
+  group_by(.data[[id_col]]) %>% summarise(non_advanced_dx = first(non_advanced_dx), first_neg = (first(ctdna_pos) == 0), later_any_pos = any(later_pos, na.rm = TRUE), .groups = "drop") %>%
+  mutate(conversion = first_neg & later_any_pos)
+
+eligible <- conv_df %>% filter(non_advanced_dx %in% c(TRUE, FALSE))
+obs_non_adv <- eligible %>% filter(non_advanced_dx == TRUE)
+
+n_screened_non_adv <- nrow(obs_non_adv)
+n_conv <- sum(obs_non_adv$conversion, na.rm = TRUE)
+expected_conv <- round(n_conv / SCREENED_N * TOTAL_N)
+expected_non_adv <- round(n_screened_non_adv / SCREENED_N * TOTAL_N)
+
+summary_tbl <- tibble::tibble(
+  Cohort = c("Non-advanced at diagnosis"),
+  `Observed patients` = n_screened_non_adv,
+  `Expected patients (≈)` = expected_non_adv,
+  `Observed conversions (first neg → later pos)` = n_conv,
+  `Expected conversions (≈)` = expected_conv
+)
+
+kable(summary_tbl, caption = sprintf("ctDNA conversion among non-advanced diagnosis. Expected counts scaled from SCREENED_N=%d to TOTAL_N=%d.", SCREENED_N, TOTAL_N), align = "lcccc") %>%
+  kable_styling(full_width = FALSE)
+```
+
+```{r on_treatment_swimmer_plots, fig.width=18, fig.height=14, out.width="100%"}
+# ==============================
+# Research Q 2: On-Treatment Events & Pre-Treatment Factors vs ctDNA
+# Title: ctDNA dynamics of lower tract urothelial carcinoma patients receiving systemic therapy
+# Patient Cohort: Patients receiving systemic therapy
+# Time Anchor (X-axis): First known event/follow-up start
+# Per-Patient Bar: Time since first known event to last follow-up
+# ctDNA Data: All ctDNA draws
+# Additional Data: Metastatic relapse date, radiation date, surgery date,
+#                  systemic therapy start/stop dates, ctDNA +/- status
+# Separate plots by therapy line (1st, 2nd, 3rd, etc.)
+# ==============================
+
+# Load patchwork for grid arrangement
+if (!requireNamespace("patchwork", quietly = TRUE)) {
+  install.packages("patchwork", quiet = TRUE)
+}
+library(patchwork)
+
+# Filter to patients receiving systemic therapy (on-treatment)
+therapy_long <- dat %>%
+  select(all_of(id_col), matches("^systemic_therapy_\\d+$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "regimen_raw") %>%
+  mutate(therapy_idx = as.integer(str_extract(var, "\\d+"))) %>%
+  select(-var) %>%
+  filter(!is.na(regimen_raw) & str_squish(regimen_raw) != "")
+
+on_treatment_patients <- therapy_long %>%
+  distinct(.data[[id_col]])
+
+cat("Patients receiving systemic therapy (on-treatment):", nrow(on_treatment_patients), "\n")
+
+# Get first and last ctDNA dates per patient
+ctdna_timeline <- ctdna_long %>%
+  inner_join(on_treatment_patients, by = id_col) %>%
+  group_by(.data[[id_col]]) %>%
+  summarise(
+    first_ctdna_date = min(ctdna_date, na.rm = TRUE),
+    last_ctdna_date = max(ctdna_date, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Get last follow-up date (time anchor for x-axis)
+follow_up_cols <- names(dat)[str_detect(names(dat), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE))]
+if (length(follow_up_cols) == 0) {
+  # Try alternative patterns
+  follow_up_cols <- names(dat)[str_detect(names(dat), regex("follow.*up", ignore_case = TRUE)) & 
+                                str_detect(names(dat), regex("date", ignore_case = TRUE))]
+}
+
+if (length(follow_up_cols) > 0) {
+  follow_up_dates <- dat %>%
+    select(all_of(id_col), all_of(follow_up_cols[1])) %>%
+    rename(follow_up_date = all_of(follow_up_cols[1])) %>%
+    mutate(follow_up_date = as_date_safe(follow_up_date))
+} else {
+  # Use last ctDNA date as proxy if no follow-up date column
+  follow_up_dates <- ctdna_timeline %>%
+    rename(follow_up_date = last_ctdna_date)
+  cat("Note: Using last ctDNA date as follow-up date proxy\n")
+}
+
+# Build therapy start/end data (needed before calculating first_therapy_start)
+therapy_start_dates <- dat %>%
+  select(all_of(id_col), matches("^systemic_therapy_\\d+_start_date$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "start_date_raw") %>%
+  mutate(therapy_idx = as.integer(str_extract(var, "\\d+"))) %>%
+  select(-var) %>%
+  mutate(start_date = as_date_safe(start_date_raw))
+
+# Get first therapy start date per patient
+first_therapy_start <- therapy_start_dates %>%
+  filter(!is.na(start_date)) %>%
+  group_by(.data[[id_col]]) %>%
+  summarise(first_therapy_start = min(start_date, na.rm = TRUE), .groups = "drop")
+
+# Get first cystectomy date per patient (to include in anchor calculation)
+# Only include cystectomies, exclude TURBT/endoscopic
+first_surgery_date <- NULL
+surgery_date_cols_temp <- names(dat)[str_detect(names(dat), regex("surgery.*date|surgery_\\d+_date", ignore_case = TRUE))]
+surgery_type_cols_temp <- names(dat)[str_detect(names(dat), regex("surgery.*type|surgery.*procedure|surgery_\\d+_type|surgery_\\d+_procedure", ignore_case = TRUE))]
+
+if (length(surgery_date_cols_temp) > 0) {
+  surgery_data_temp <- dat %>%
+    select(all_of(id_col), all_of(surgery_date_cols_temp)) %>%
+    pivot_longer(-all_of(id_col), names_to = "surgery_var", values_to = "surgery_date_raw") %>%
+    mutate(
+      surgery_date = as_date_safe(surgery_date_raw),
+      surgery_idx = str_extract(surgery_var, "\\d+")
+    ) %>%
+    filter(!is.na(surgery_date))
+  
+  # If surgery type columns exist, join them to filter cystectomies
+  if (length(surgery_type_cols_temp) > 0) {
+    surgery_types_temp <- dat %>%
+      select(all_of(id_col), all_of(surgery_type_cols_temp)) %>%
+      pivot_longer(-all_of(id_col), names_to = "surgery_type_var", values_to = "surgery_type_raw") %>%
+      mutate(
+        surgery_type = as.character(surgery_type_raw),
+        surgery_idx = str_extract(surgery_type_var, "\\d+")
+      ) %>%
+      filter(!is.na(surgery_type))
+    
+    surgery_data_temp <- surgery_data_temp %>%
+      left_join(surgery_types_temp %>% select(all_of(id_col), surgery_idx, surgery_type), 
+                by = c(id_col, "surgery_idx"))
+  } else {
+    surgery_data_temp <- surgery_data_temp %>%
+      mutate(surgery_type = NA_character_)
+  }
+  
+  # Filter to only cystectomies
+  first_surgery_date <- surgery_data_temp %>%
+    mutate(
+      is_cystectomy = case_when(
+        !is.na(surgery_type) ~ str_detect(tolower(surgery_type), "cystectomy|robotic.*cystectomy|open.*cystectomy"),
+        surgery_var == "surgery_1_date" ~ TRUE,  # Assume surgery_1_date is cystectomy if no type column
+        TRUE ~ FALSE
+      )
+    ) %>%
+    filter(is_cystectomy) %>%
+    group_by(.data[[id_col]]) %>%
+    summarise(first_surgery_date = min(surgery_date, na.rm = TRUE), .groups = "drop")
+}
+
+# Combine patient timeline info and calculate first known event
+patient_timeline <- ctdna_timeline %>%
+  left_join(follow_up_dates, by = id_col) %>%
+  left_join(first_therapy_start, by = id_col) %>%
+  {if (!is.null(first_surgery_date)) {
+    left_join(., first_surgery_date, by = id_col)
+  } else {
+    mutate(., first_surgery_date = as.Date(NA))
+  }} %>%
+  mutate(
+    # First known event = minimum of: first ctDNA, first therapy start, first surgery, follow-up start
+    first_known_event = pmin(
+      first_ctdna_date,
+      first_therapy_start,
+      first_surgery_date,
+      follow_up_date,
+      na.rm = TRUE
+    ),
+    # Use follow-up date or last ctDNA date as end anchor
+    time_anchor = coalesce(follow_up_date, last_ctdna_date),
+    # Per-patient bar: time from first known event to last follow-up
+    follow_up_interval_days = as.numeric(time_anchor - first_known_event),
+    follow_up_interval_months = follow_up_interval_days / 30.44
+  ) %>%
+  filter(!is.na(first_known_event), !is.na(time_anchor))
+
+# Get all ctDNA data for on-treatment patients (anchored to first known event)
+on_treatment_ctdna <- ctdna_long %>%
+  inner_join(patient_timeline %>% select(all_of(id_col), time_anchor, first_known_event), by = id_col) %>%
+  mutate(
+    # Time from first known event (anchor = 0)
+    months_from_anchor = as.numeric(ctdna_date - first_known_event) / 30.44,
+    ctdna_status = case_when(
+      ctdna_value == 0 ~ "Negative",
+      ctdna_value > 0 ~ "Positive",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# Build therapy end data (start dates already defined above)
+therapy_end_dates <- dat %>%
+  select(all_of(id_col), matches("^systemic_therapy_\\d+_end_date$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "end_date_raw") %>%
+  mutate(therapy_idx = as.integer(str_extract(var, "\\d+"))) %>%
+  select(-var) %>%
+  mutate(end_date = as_date_safe(end_date_raw))
+
+therapy_settings <- dat %>%
+  select(all_of(id_col), matches("^systemic_therapy_\\d+_treatment_setting$")) %>%
+  pivot_longer(-all_of(id_col), names_to = "var", values_to = "setting_raw") %>%
+  mutate(therapy_idx = as.integer(str_extract(var, "\\d+"))) %>%
+  select(-var)
+
+# Combine therapy information
+therapy_complete <- therapy_long %>%
+  left_join(therapy_start_dates %>% select(all_of(id_col), therapy_idx, start_date), 
+            by = c(id_col, "therapy_idx")) %>%
+  left_join(therapy_end_dates %>% select(all_of(id_col), therapy_idx, end_date), 
+            by = c(id_col, "therapy_idx")) %>%
+  left_join(therapy_settings %>% select(all_of(id_col), therapy_idx, setting_raw), 
+            by = c(id_col, "therapy_idx")) %>%
+  filter(!is.na(start_date)) %>%
+  mutate(
+    regimen_clean = clean_regimen(regimen_raw),
+    setting_clean = clean_setting(setting_raw),
+    therapy_type = categorize_therapy_type(regimen_raw)
+  )
+
+# Get therapy periods relative to first known event
+# Also identify therapy line (1st, 2nd, 3rd, etc.) based on therapy_idx
+therapy_periods <- therapy_complete %>%
+  inner_join(patient_timeline %>% select(all_of(id_col), first_known_event, time_anchor), by = id_col) %>%
+  mutate(
+    start_months = as.numeric(start_date - first_known_event) / 30.44,
+    end_months = case_when(
+      !is.na(end_date) ~ as.numeric(end_date - first_known_event) / 30.44,
+      TRUE ~ NA_real_
+    ),
+    # Clean setting for labeling
+    setting_label = case_when(
+      setting_clean == "Neoadjuvant" ~ "Neoadjuvant",
+      setting_clean == "Adjuvant" ~ "Adjuvant",
+      setting_clean == "Palliative" ~ "Palliative",
+      is.na(setting_clean) | setting_clean == "" ~ "Clinical trial",
+      TRUE ~ "Clinical trial"
+    ),
+    # Therapy line (1st, 2nd, 3rd, etc.) based on therapy_idx
+    therapy_line = therapy_idx
+  ) %>%
+  # Keep therapy_type for coloring and setting for labeling
+  select(all_of(id_col), start_months, end_months, therapy_type, regimen_clean, setting_clean, setting_label, therapy_line)
+
+# Get cystectomy dates (relative to first known event)
+# Only include cystectomies (robotic, open), exclude TURBT/endoscopic resection
+surgery_date_cols <- names(dat)[str_detect(names(dat), regex("surgery.*date|surgery_\\d+_date", ignore_case = TRUE))]
+surgery_type_cols <- names(dat)[str_detect(names(dat), regex("surgery.*type|surgery.*procedure|surgery_\\d+_type|surgery_\\d+_procedure", ignore_case = TRUE))]
+
+surgery_dates <- NULL
+if (length(surgery_date_cols) > 0) {
+  # Get surgery dates and types
+  surgery_data <- dat %>%
+    select(all_of(id_col), all_of(surgery_date_cols)) %>%
+    pivot_longer(-all_of(id_col), names_to = "surgery_var", values_to = "surgery_date_raw") %>%
+    mutate(
+      surgery_date = as_date_safe(surgery_date_raw),
+      surgery_idx = str_extract(surgery_var, "\\d+")
+    ) %>%
+    filter(!is.na(surgery_date))
+  
+  # If surgery type columns exist, join them
+  if (length(surgery_type_cols) > 0) {
+    surgery_types <- dat %>%
+      select(all_of(id_col), all_of(surgery_type_cols)) %>%
+      pivot_longer(-all_of(id_col), names_to = "surgery_type_var", values_to = "surgery_type_raw") %>%
+      mutate(
+        surgery_type = as.character(surgery_type_raw),
+        surgery_idx = str_extract(surgery_type_var, "\\d+")
+      ) %>%
+      filter(!is.na(surgery_type))
+    
+    surgery_data <- surgery_data %>%
+      left_join(surgery_types %>% select(all_of(id_col), surgery_idx, surgery_type), 
+                by = c(id_col, "surgery_idx"))
+  } else {
+    surgery_data <- surgery_data %>%
+      mutate(surgery_type = NA_character_)
+  }
+  
+  # Filter to only cystectomies (robotic or open), exclude TURBT/endoscopic
+  surgery_data <- surgery_data %>%
+    mutate(
+      is_cystectomy = case_when(
+        !is.na(surgery_type) ~ str_detect(tolower(surgery_type), "cystectomy|robotic.*cystectomy|open.*cystectomy"),
+        # If no type column, assume surgery_1_date is cystectomy (common pattern)
+        surgery_var == "surgery_1_date" ~ TRUE,
+        TRUE ~ FALSE
+      )
+    ) %>%
+    filter(is_cystectomy)
+  
+  # Join with pathology T stage to determine MIBC vs NMIBC
+  # Use pathology_t_stage_3 and calculate t_num inline if needed
+  pathology_cols <- intersect(c("pathology_t_stage_3", "t_stage_cyst", "t_num"), names(dat))
+  pathology_data <- dat %>%
+    select(all_of(id_col), all_of(pathology_cols))
+  
+  # Calculate t_num if not already present
+  if (!"t_num" %in% names(pathology_data)) {
+    if ("t_stage_cyst" %in% names(pathology_data)) {
+      pathology_data <- pathology_data %>%
+        mutate(t_num = parse_t_num(t_stage_cyst))
+    } else if ("pathology_t_stage_3" %in% names(pathology_data)) {
+      pathology_data <- pathology_data %>%
+        mutate(
+          t_stage_clean = {
+            x <- toupper(str_trim(as.character(pathology_t_stage_3)))
+            x[x %in% c("", "N/A OR OTHER", "N/A OR OTHER (SEE NOTES)", "NA", "N/A")] <- NA
+            x
+          },
+          t_num = parse_t_num(t_stage_clean)
+        )
+    } else {
+      pathology_data <- pathology_data %>%
+        mutate(t_num = NA_real_)
+    }
+  }
+  
+  pathology_data <- pathology_data %>%
+    select(all_of(id_col), t_num)
+  
+  surgery_dates <- surgery_data %>%
+    left_join(pathology_data, by = id_col) %>%
+    inner_join(patient_timeline %>% select(all_of(id_col), first_known_event), by = id_col) %>%
+    mutate(
+      surgery_months = as.numeric(surgery_date - first_known_event) / 30.44,
+      # Label as MIBC (T2-T4) or NMIBC (T1 or lower)
+      disease_stage = case_when(
+        !is.na(t_num) & t_num >= 2 ~ "MIBC",
+        !is.na(t_num) & t_num <= 1 ~ "NMIBC",
+        TRUE ~ NA_character_
+      ),
+      # Create label: "Cystectomy (MIBC)" or "Cystectomy (NMIBC)"
+      surgery_label = ifelse(
+        !is.na(disease_stage),
+        paste0("Cystectomy (", disease_stage, ")"),
+        "Cystectomy"
+      )
+    ) %>%
+    select(all_of(id_col), surgery_date, surgery_months, disease_stage, surgery_label)
+  
+  cat("Cystectomy dates found:", nrow(surgery_dates), "events\n")
+  if (nrow(surgery_dates) > 0) {
+    cat("  MIBC:", sum(surgery_dates$disease_stage == "MIBC", na.rm = TRUE), "\n")
+    cat("  NMIBC:", sum(surgery_dates$disease_stage == "NMIBC", na.rm = TRUE), "\n")
+  }
+}
+
+# Get radiation dates (relative to first known event)
+rad_start_cols <- names(dat)[str_detect(names(dat), regex("^(radiation|rt).*?(start|date_start|start_date)$", ignore_case = TRUE))]
+radiation_dates <- NULL
+if (length(rad_start_cols) > 0) {
+  radiation_dates <- dat %>%
+    select(all_of(id_col), all_of(rad_start_cols)) %>%
+    pivot_longer(-all_of(id_col), names_to = "rad_var", values_to = "rad_date_raw") %>%
+    mutate(rad_date = as_date_safe(rad_date_raw)) %>%
+    filter(!is.na(rad_date)) %>%
+    inner_join(patient_timeline %>% select(all_of(id_col), first_known_event), by = id_col) %>%
+    mutate(rad_months = as.numeric(rad_date - first_known_event) / 30.44) %>%
+    select(all_of(id_col), rad_date, rad_months)
+  cat("Radiation dates found:", nrow(radiation_dates), "events\n")
+}
+
+# Get metastatic relapse dates (relative to first known event)
+metastatic_relapse_cols <- names(dat)[str_detect(names(dat), regex("metastatic.*relapse.*date|relapse.*date|metastasis.*date", ignore_case = TRUE))]
+metastatic_relapse_dates <- NULL
+if (length(metastatic_relapse_cols) > 0) {
+  metastatic_relapse_dates <- dat %>%
+    select(all_of(id_col), all_of(metastatic_relapse_cols)) %>%
+    pivot_longer(-all_of(id_col), names_to = "relapse_var", values_to = "relapse_date_raw") %>%
+    mutate(relapse_date = as_date_safe(relapse_date_raw)) %>%
+    filter(!is.na(relapse_date)) %>%
+    inner_join(patient_timeline %>% select(all_of(id_col), first_known_event), by = id_col) %>%
+    mutate(relapse_months = as.numeric(relapse_date - first_known_event) / 30.44) %>%
+    select(all_of(id_col), relapse_date, relapse_months)
+  cat("Metastatic relapse dates found:", nrow(metastatic_relapse_dates), "events\n")
+} else {
+  cat("Note: Metastatic relapse date columns not found\n")
+}
+
+# Get stratification variables - combine with therapy type and setting
+# Get primary therapy type and setting per patient (most common or first)
+patient_therapy_info <- therapy_complete %>%
+  group_by(.data[[id_col]]) %>%
+  summarise(
+    primary_therapy_type = {
+      tt_table <- table(therapy_type[!is.na(therapy_type)])
+      if (length(tt_table) > 0) {
+        names(sort(tt_table, decreasing = TRUE))[1]
+      } else {
+        NA_character_
+      }
+    },
+    primary_setting = {
+      st_table <- table(setting_clean[!is.na(setting_clean)])
+      if (length(st_table) > 0) {
+        names(sort(st_table, decreasing = TRUE))[1]
+      } else {
+        NA_character_
+      }
+    },
+    .groups = "drop"
+  )
+
+stratification_data <- dat %>%
+  select(all_of(id_col),
+         tumor_location = primary_tumor_location,
+         histology = histology) %>%
+  inner_join(patient_timeline, by = id_col) %>%
+  left_join(patient_therapy_info, by = id_col) %>%
+  mutate(
+    # Create combined stratification label
+    stratification_label = paste0(
+      "Therapy: ", ifelse(is.na(primary_therapy_type), "Unknown", primary_therapy_type),
+      " | Setting: ", ifelse(is.na(primary_setting), "Unknown", primary_setting),
+      " | Location: ", ifelse(is.na(tumor_location), "Unknown", tumor_location),
+      " | Histology: ", ifelse(is.na(histology), "Unknown", histology)
+    )
+  )
+
+# ==============================
+# Prepare data for swimmer plots by therapy setting
+# ==============================
+
+# Categorize patients into new groups:
+# 1. Neoadjuvant only (no adjuvant, no palliative)
+# 2. Adjuvant only (with or without neoadjuvant, but no palliative)
+# 3. Any palliative therapy (regardless of what else)
+# 4. Any clinical trial (and no other settings)
+
+patient_setting_labels <- therapy_periods %>%
+  group_by(.data[[id_col]]) %>%
+  summarise(
+    has_neoadjuvant = any(setting_label == "Neoadjuvant", na.rm = TRUE),
+    has_adjuvant = any(setting_label == "Adjuvant", na.rm = TRUE),
+    has_palliative = any(setting_label == "Palliative", na.rm = TRUE),
+    has_clinical_trial = any(setting_label == "Clinical trial", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    plot_category = case_when(
+      has_palliative ~ "Any Palliative Therapy",
+      has_adjuvant ~ "Adjuvant (with or without Neoadjuvant)",
+      has_neoadjuvant ~ "Neoadjuvant Only",
+      has_clinical_trial ~ "Clinical Trial Only",
+      TRUE ~ "Other"
+    )
+  )
+
+# Identify available categories
+available_categories <- c(
+  "Neoadjuvant Only",
+  "Adjuvant (with or without Neoadjuvant)",
+  "Any Palliative Therapy",
+  "Clinical Trial Only"
+)
+
+available_categories <- available_categories[available_categories %in% unique(patient_setting_labels$plot_category)]
+cat("Available plot categories:", paste(available_categories, collapse = ", "), "\n")
+
+# Function to create swimmer plot for a specific category
+create_setting_plot <- function(category_name) {
+  # Get patients in this category
+  patients_this_category <- patient_setting_labels %>%
+    filter(plot_category == category_name) %>%
+    pull(.data[[id_col]])
+  
+  if (length(patients_this_category) == 0) return(NULL)
+  
+  # Sample if too many patients
+  n_show <- min(30, length(patients_this_category))
+  if (length(patients_this_category) > n_show) {
+    set.seed(123)
+    patients_this_category <- sample(patients_this_category, size = n_show, replace = FALSE)
+  }
+  
+  # Order patients by first known event
+  patient_order <- patient_timeline %>%
+    filter(.data[[id_col]] %in% patients_this_category) %>%
+    arrange(first_known_event, .data[[id_col]]) %>%
+    pull(.data[[id_col]])
+  
+  # Prepare plot data
+  plot_timeline_setting <- patient_timeline %>%
+    filter(.data[[id_col]] %in% patients_this_category) %>%
+    mutate(
+      patient_id_ordered = factor(.data[[id_col]], levels = patient_order),
+      follow_up_months = as.numeric(time_anchor - first_known_event) / 30.44
+    )
+  
+  plot_ctdna_setting <- on_treatment_ctdna %>%
+    filter(.data[[id_col]] %in% patients_this_category) %>%
+    mutate(
+      patient_id_ordered = factor(.data[[id_col]], levels = patient_order),
+      ctdna_detectable = ctdna_value > 0
+    )
+  
+  # Get all therapy periods for these patients
+  plot_therapy_setting <- therapy_periods %>%
+    filter(.data[[id_col]] %in% patients_this_category) %>%
+    left_join(plot_timeline_setting %>% select(all_of(id_col), follow_up_months), by = id_col) %>%
+    mutate(
+      patient_id_ordered = factor(.data[[id_col]], levels = patient_order),
+      end_months_final = ifelse(is.na(end_months), follow_up_months, end_months),
+      # Ensure setting_label is properly formatted
+      setting_label = case_when(
+        setting_label == "Neoadjuvant" ~ "Neoadjuvant",
+        setting_label == "Adjuvant" ~ "Adjuvant",
+        setting_label == "Palliative" ~ "Palliative",
+        is.na(setting_label) | setting_label == "" ~ "Clinical trial",
+        TRUE ~ "Clinical trial"
+      )
+    )
+  
+  # Get surgery dates - already calculated relative to first_known_event
+  plot_surgery_setting <- if (!is.null(surgery_dates) && nrow(surgery_dates) > 0) {
+    surgery_dates %>%
+      filter(.data[[id_col]] %in% patients_this_category) %>%
+      mutate(patient_id_ordered = factor(.data[[id_col]], levels = patient_order))
+  } else NULL
+  
+  plot_radiation_setting <- if (!is.null(radiation_dates) && nrow(radiation_dates) > 0) {
+    radiation_dates %>%
+      filter(.data[[id_col]] %in% patients_this_category) %>%
+      mutate(patient_id_ordered = factor(.data[[id_col]], levels = patient_order))
+  } else NULL
+  
+  plot_relapse_setting <- if (!is.null(metastatic_relapse_dates) && nrow(metastatic_relapse_dates) > 0) {
+    metastatic_relapse_dates %>%
+      filter(.data[[id_col]] %in% patients_this_category) %>%
+      mutate(patient_id_ordered = factor(.data[[id_col]], levels = patient_order))
+  } else NULL
+  
+  # Calculate x-axis limits - include all events to ensure they're visible
+  x_min_data <- c(
+    plot_therapy_setting$start_months,
+    if (!is.null(plot_surgery_setting) && nrow(plot_surgery_setting) > 0) plot_surgery_setting$surgery_months else NULL,
+    if (!is.null(plot_radiation_setting) && nrow(plot_radiation_setting) > 0) plot_radiation_setting$rad_months else NULL,
+    plot_ctdna_setting$months_from_anchor
+  )
+  x_max_data <- c(
+    plot_timeline_setting$follow_up_months,
+    if (!is.null(plot_relapse_setting) && nrow(plot_relapse_setting) > 0) plot_relapse_setting$relapse_months else NULL,
+    plot_therapy_setting$end_months_final
+  )
+  x_min <- floor(min(x_min_data, na.rm = TRUE)) - 3
+  x_max <- ceiling(max(x_max_data, na.rm = TRUE)) + 3
+  # Ensure x_min is at most 0 (don't extend too far into negative)
+  x_min <- max(x_min, -12)
+  x_breaks <- seq(floor(x_min / 6) * 6, ceiling(x_max / 6) * 6, by = 6)
+  
+  # Create plot
+  p <- ggplot() +
+    # Per-patient follow-up interval bars
+    geom_segment(
+      data = plot_timeline_setting,
+      aes(x = 0, xend = follow_up_months,
+          y = patient_id_ordered, yend = patient_id_ordered),
+      linewidth = 3, color = "gray85", alpha = 0.6
+    ) +
+    # Therapy period bars (all therapy periods for these patients)
+    # Color by setting to show transitions clearly
+    geom_segment(
+      data = plot_therapy_setting,
+      aes(x = start_months, 
+          xend = end_months_final,
+          y = patient_id_ordered, yend = patient_id_ordered,
+          color = setting_label),
+      linewidth = 3.5, alpha = 0.8, lineend = "round"
+    ) +
+    # ctDNA positive markers
+    geom_point(
+      data = plot_ctdna_setting %>% filter(ctdna_detectable),
+      aes(x = months_from_anchor, y = patient_id_ordered),
+      size = 2, shape = 21, fill = "red", color = "white", stroke = 0.3
+    ) +
+    # ctDNA negative markers
+    geom_point(
+      data = plot_ctdna_setting %>% filter(!ctdna_detectable),
+      aes(x = months_from_anchor, y = patient_id_ordered),
+      size = 2, shape = 21, fill = "green3", color = "white", stroke = 0.3
+    ) +
+    # Cystectomy events
+    {if (!is.null(plot_surgery_setting) && nrow(plot_surgery_setting) > 0) {
+      geom_point(
+        data = plot_surgery_setting,
+        aes(x = surgery_months, y = patient_id_ordered),
+        size = 3.5, shape = 15, fill = "darkblue", color = "darkblue"
+      )
+    }} +
+    # Radiation events
+    {if (!is.null(plot_radiation_setting) && nrow(plot_radiation_setting) > 0) {
+      geom_point(
+        data = plot_radiation_setting,
+        aes(x = rad_months, y = patient_id_ordered),
+        size = 3.5, shape = 17, fill = "darkorange", color = "darkorange"
+      )
+    }} +
+    # Metastatic relapse events - make more distinct
+    {if (!is.null(plot_relapse_setting) && nrow(plot_relapse_setting) > 0) {
+      geom_point(
+        data = plot_relapse_setting,
+        aes(x = relapse_months, y = patient_id_ordered),
+        size = 5, shape = 23, fill = "red3", color = "darkred", stroke = 1.2
+      )
+    }} +
+    # Vertical line at anchor (time anchor = 0)
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.7, alpha = 0.7) +
+    # Color scales for therapy setting
+    scale_color_manual(
+      values = c(
+        "Neoadjuvant" = "#4E79A7",      # Blue
+        "Adjuvant" = "#59A14F",          # Green
+        "Palliative" = "#9C755F",        # Brown/Tan (changed from red for better distinction)
+        "Clinical trial" = "#F28E2B"      # Orange
+      ),
+      guide = "none"
+    ) +
+    labs(
+      title = paste0(category_name, " (n = ", length(patient_order), ")"),
+      x = "Time from First Known Event (months)",
+      y = "Patient ID"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5, margin = margin(b = 5)),
+      axis.text.y = element_text(size = 6, color = "black"),
+      axis.text.x = element_text(size = 9, color = "black"),
+      axis.title = element_text(size = 10, face = "bold"),
+      axis.title.y = element_text(margin = margin(r = 8)),
+      axis.title.x = element_text(margin = margin(t = 8)),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.major.x = element_line(color = "gray92", linewidth = 0.5),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      plot.margin = margin(l = 10, r = 8, t = 8, b = 8)
+    ) +
+    scale_x_continuous(breaks = x_breaks, limits = c(x_min, x_max), expand = c(0.02, 0))
+  
+  return(p)
+}
+
+# Create plots for each category
+plots_list <- list()
+for (category in available_categories) {
+  p_category <- create_setting_plot(category)
+  if (!is.null(p_category)) {
+    plots_list[[category]] <- p_category
+  }
+}
+
+# Arrange plots in grid
+if (length(plots_list) > 0) {
+  # Order categories as specified
+  category_order <- c(
+    "Neoadjuvant Only",
+    "Adjuvant (with or without Neoadjuvant)",
+    "Any Palliative Therapy",
+    "Clinical Trial Only"
+  )
+  plots_ordered <- plots_list[intersect(category_order, names(plots_list))]
+  if (length(plots_ordered) < length(plots_list)) {
+    plots_ordered <- c(plots_ordered, plots_list[setdiff(names(plots_list), names(plots_ordered))])
+  }
+  
+  if (length(plots_ordered) == 1) {
+    combined_plot <- plots_ordered[[1]]
+  } else if (length(plots_ordered) == 2) {
+    combined_plot <- plots_ordered[[1]] | plots_ordered[[2]]
+  } else if (length(plots_ordered) == 3) {
+    combined_plot <- (plots_ordered[[1]] | plots_ordered[[2]]) / plots_ordered[[3]]
+  } else {
+    combined_plot <- (plots_ordered[[1]] | plots_ordered[[2]]) / (plots_ordered[[3]] | plots_ordered[[4]])
+  }
+  
+  # Create legend plot with visual elements
+  legend_plot <- ggplot() +
+    # ctDNA positive
+    annotate("point", x = 0.1, y = 0.9, size = 3.5, shape = 21, fill = "red", color = "white", stroke = 0.3) +
+    annotate("text", x = 0.25, y = 0.9, label = "ctDNA+", hjust = 0, size = 3.5, vjust = 0.5) +
+    # ctDNA negative
+    annotate("point", x = 0.1, y = 0.8, size = 3.5, shape = 21, fill = "green3", color = "white", stroke = 0.3) +
+    annotate("text", x = 0.25, y = 0.8, label = "ctDNA-", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Cystectomy
+    annotate("point", x = 0.1, y = 0.7, size = 4, shape = 15, fill = "darkblue", color = "darkblue") +
+    annotate("text", x = 0.25, y = 0.7, label = "Cystectomy", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Radiation
+    annotate("point", x = 0.1, y = 0.6, size = 4, shape = 17, fill = "darkorange", color = "darkorange") +
+    annotate("text", x = 0.25, y = 0.6, label = "Radiation", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Relapse - make more distinct
+    annotate("point", x = 0.1, y = 0.5, size = 5, shape = 23, fill = "red3", color = "darkred", stroke = 1.2) +
+    annotate("text", x = 0.25, y = 0.5, label = "Metastatic relapse", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Therapy settings - Neoadjuvant
+    annotate("segment", x = 0.05, xend = 0.2, y = 0.4, yend = 0.4, linewidth = 4, color = "#4E79A7", alpha = 0.8) +
+    annotate("text", x = 0.25, y = 0.4, label = "Neoadjuvant", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Therapy settings - Adjuvant
+    annotate("segment", x = 0.05, xend = 0.2, y = 0.3, yend = 0.3, linewidth = 4, color = "#59A14F", alpha = 0.8) +
+    annotate("text", x = 0.25, y = 0.3, label = "Adjuvant", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Therapy settings - Palliative
+    annotate("segment", x = 0.05, xend = 0.2, y = 0.2, yend = 0.2, linewidth = 4, color = "#9C755F", alpha = 0.8) +
+    annotate("text", x = 0.25, y = 0.2, label = "Palliative", hjust = 0, size = 3.5, vjust = 0.5) +
+    # Therapy settings - Clinical trial
+    annotate("segment", x = 0.05, xend = 0.2, y = 0.1, yend = 0.1, linewidth = 4, color = "#F28E2B", alpha = 0.8) +
+    annotate("text", x = 0.25, y = 0.1, label = "Clinical trial", hjust = 0, size = 3.5, vjust = 0.5) +
+    xlim(0, 1) +
+    ylim(0, 1) +
+    theme_void() +
+    theme(
+      plot.margin = margin(20, 20, 20, 20),
+      plot.background = element_rect(fill = "white", color = NA)
+    )
+  
+  # Add overall title and combine with legend
+  combined_plot <- combined_plot +
+    plot_annotation(
+      title = "ctDNA dynamics of lower tract urothelial carcinoma patients receiving systemic therapy",
+      subtitle = "Time anchored at first known event (first ctDNA, first therapy start, or follow-up start). Separate plots by therapy category. Bars colored by setting (Neoadjuvant=blue, Adjuvant=green, Palliative=brown, Clinical trial=orange).",
+      theme = theme(
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 10, hjust = 0.5)
+      )
+    )
+  
+  # Combine plot with legend on the right (adjust widths: plots get more space)
+  final_plot <- combined_plot | legend_plot
+  final_plot <- final_plot + plot_layout(widths = c(4, 1))
+  
+  print(final_plot)
+  
+  cat("\nSwimmer plots created for", length(plots_ordered), "category/categories:", paste(names(plots_ordered), collapse = ", "), "\n")
+} else {
+  cat("\nNo patients found for the specified therapy categories.\n")
+}
+```
+
+```{r final_summary}
+# ---- Export to HTML (run manually if desired) -----------------------------
+# Writes a dated HTML file (e.g., ctDNA_2025-10-13.html) in your working directory.
+
+if (requireNamespace("rmarkdown", quietly = TRUE)) {
+  # Try to detect the current Rmd file; fallback to a default name if unknown
+  input_file <- tryCatch(
+    knitr::current_input(),
+    error = function(e) NULL
+  )
+  if (is.null(input_file) || is.na(input_file) || !nzchar(input_file)) {
+    input_file <- "ctDNA_shareable.Rmd"
+  }
+
+  out_file <- sprintf("ctDNA_%s.html", Sys.Date())
+
+  message("Rendering ", input_file, " → ", out_file)
+  rmarkdown::render(
+    input       = input_file,
+    output_format = "html_document",
+    output_file = out_file,
+    clean       = TRUE
+  )
+  message("✅ Export complete: ", normalizePath(out_file, mustWork = FALSE))
+} else {
+  message("Please install the 'rmarkdown' package: install.packages('rmarkdown')")
+}
+```
+

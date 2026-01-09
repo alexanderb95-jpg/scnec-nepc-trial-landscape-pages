@@ -1,0 +1,301 @@
+{
+  "slides": [
+    {
+      "slide_number": 1,
+      "title": "",
+      "text": "Understanding ctDNA testing in bladder cancer\nAlexander B. Karol, MD\nHematology/Oncology Fellow\u2019s Conference\n",
+      "urls": []
+    },
+    {
+      "slide_number": 2,
+      "title": "Disclosure",
+      "text": "Disclosure\nReceive financial support from Natera\n2\n",
+      "urls": []
+    },
+    {
+      "slide_number": 3,
+      "title": "Learning Objective",
+      "text": "Learning Objective\nUnderstand the evidence base and ongoing areas of investigation for ctDNA-guided treatment decisions across clinical settings in bladder cancer\n3\n",
+      "urls": []
+    },
+    {
+      "slide_number": 4,
+      "title": "What is ctDNA?",
+      "text": "What is ctDNA?\nhttps://en.wikipedia.org/wiki/Circulating_tumor_DNA\n4\n",
+      "urls": [
+        "https://en.wikipedia.org/wiki/Circulating_tumor_DNA"
+      ]
+    },
+    {
+      "slide_number": 5,
+      "title": "Two Platforms",
+      "text": "Two Platforms\nhttps://www.mdpi.com/2073-4409/14/3/161\n5\n",
+      "urls": [
+        "https://www.mdpi.com/2073-4409/14/3/161"
+      ]
+    },
+    {
+      "slide_number": 6,
+      "title": "Clinical applications of ctDNA testing",
+      "text": "Clinical applications of ctDNA testing\nhttps://www.natera.com/oncology/signatera-advanced-cancer-detection/?utm_campaign=2025_ONC_Clinician_Signatera_Indication-Skin&utm_source=google&utm_medium=cpc&utm_term=ctdna%20melanoma&matchtype=b&device=c&utm_adgroup=&gad_source=1&gad_campaignid=22056580994&gbraid=0AAAAAD1MwgwHRvHODSRf7CEB_DkIsTRyU&gclid=Cj0KCQiA6sjKBhCSARIsAJvYcpORyUs5w3wu9cPAFk1dYLX5pal19wHkA16VbE3XhYpJh4Q-OGvu1ZsaApUYEALw_wcB\n6\n",
+      "urls": [
+        "https://www.natera.com/oncology/signatera-advanced-cancer-detection/?utm_campaign=2025_ONC_Clinician_Signatera_Indication-Skin&utm_source=google&utm_medium=cpc&utm_term=ctdna%20melanoma&matchtype=b&device=c&utm_adgroup=&gad_source=1&gad_campaignid=22056580994&gbraid=0AAAAAD1MwgwHRvHODSRf7CEB_DkIsTRyU&gclid=Cj0KCQiA6sjKBhCSARIsAJvYcpORyUs5w3wu9cPAFk1dYLX5pal19wHkA16VbE3XhYpJh4Q-OGvu1ZsaApUYEALw_wcB"
+      ]
+    },
+    {
+      "slide_number": 7,
+      "title": "Neo-Adjuvant",
+      "text": "Neo-Adjuvant\n7\n",
+      "urls": []
+    },
+    {
+      "slide_number": 8,
+      "title": "What We Know From NIAGRA",
+      "text": "What We Know From NIAGRA\nPowles et al, ASCO, 2025\n8\nClinical Implications\nBaseline ctDNA is prognostic but not yet predictive for treatment selection\nDynamic changes during therapy may be informative\nCannot use baseline ctDNA to omit neoadjuvant therapy\n",
+      "urls": []
+    },
+    {
+      "slide_number": 9,
+      "title": "What we do not know",
+      "text": "What we do not know\nCan ctDNA combined with bladder MRI and TURBT accurately identify MIBC patients with cCR to NAT? \nIf so, is active surveillance non-inferior to SOC definitive therapy\nhttps://www.urotoday.com/conference-highlights/aua-2025/aua-2025-bladder-cancer/160106-aua-2025-neo-blast-neoadjuvant-therapy-for-bladder-cancer-followed-by-active-surveillance-versus-treatment.html\n9\n",
+      "urls": [
+        "https://www.urotoday.com/conference-highlights/aua-2025/aua-2025-bladder-cancer/160106-aua-2025-neo-blast-neoadjuvant-therapy-for-bladder-cancer-followed-by-active-surveillance-versus-treatment.html"
+      ]
+    },
+    {
+      "slide_number": 10,
+      "title": "A pre-cystectomy ctDNA quantitative threshold may identify patients who need additional NAT",
+      "text": "A pre-cystectomy ctDNA quantitative threshold may identify patients who need additional NAT\nCohort\nN = 59 evaluable patients at 3-month post-cystectomy landmark\n\nCo-Primary Endpoint 1: Association\nPre-cystectomy ctDNA significantly predicts post-cystectomy MRD OR 1.89 per 10-fold increase (95% CI 1.37\u20132.76) p<0.001\nCo-Primary Endpoint 2: Threshold Performance\nPre-cystectomy ctDNA cutoff (0.1 MTM/mL) Sensitivity ~82% | Specificity ~68% | PPV ~60% | NPV ~86% (bootstrap-validated)\nConclusion\nPre-cystectomy ctDNA above 0.1 MTM/mL reliably identifies patients at high risk for persistent MRD after surgery.\n10\nPreliminary Data\n",
+      "urls": []
+    },
+    {
+      "slide_number": 11,
+      "title": "Adjuvant",
+      "text": "Adjuvant\n11\n",
+      "urls": []
+    },
+    {
+      "slide_number": 12,
+      "title": "ctDNA identifies patients who benefit from ICI adjuvant therapy",
+      "text": "ctDNA identifies patients who benefit from ICI adjuvant therapy\nhttps://pmc.ncbi.nlm.nih.gov/articles/PMC8495594/\n\nhttps://www.sciencedirect.com/science/article/pii/S0302283823029020?via%3Dihub#f0010\n12\nHR 0.59 [95% CI 0.42\u20130.83]\n",
+      "urls": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC8495594/",
+        "https://www.sciencedirect.com/science/article/pii/S0302283823029020?via%3Dihub#f0010"
+      ]
+    },
+    {
+      "slide_number": 13,
+      "title": "CheckMate 274: Replication of Findings",
+      "text": "CheckMate 274: Replication of Findings\nAdjuvant ICI Improves DFS for ctDNA + patients at high-risk of recurrence (\u2265ypT2/N+ or \u2265pT3/N+) after RC\nhttps://www.urotoday.com/conference-highlights/esmo-2025/esmo-2025-bladder-cancer/164022-esmo-2025-adjuvant-nivolumab-versus-placebo-for-high-risk-muscle-invasive-urothelial-carcinoma-5-year-efficacy-and-ctdna-results-from-checkmate-274.html\n\nBajorin et al., NEJM 2021\n13\nCheckmate 274\n",
+      "urls": [
+        "https://www.urotoday.com/conference-highlights/esmo-2025/esmo-2025-bladder-cancer/164022-esmo-2025-adjuvant-nivolumab-versus-placebo-for-high-risk-muscle-invasive-urothelial-carcinoma-5-year-efficacy-and-ctdna-results-from-checkmate-274.html"
+      ]
+    },
+    {
+      "slide_number": 14,
+      "title": "IMvigor011: First Prospective ctDNA-Guided Trial",
+      "text": "IMvigor011: First Prospective ctDNA-Guided Trial\nhttps://www.nejm.org/doi/full/10.1056/NEJMoa2511885\n14\n",
+      "urls": [
+        "https://www.nejm.org/doi/full/10.1056/NEJMoa2511885"
+      ]
+    },
+    {
+      "slide_number": 15,
+      "title": "What We Don\u2019t Know",
+      "text": "What We Don\u2019t Know\nDe-escalation: Can we safely watch-and-wait if ctDNA negative?\n \nTreatment escalation: Should ctDNA-positive patients get dual immunotherapy?\n15\nAdapted from Hemenway et al., ASCO Educational Book 2024\n",
+      "urls": []
+    },
+    {
+      "slide_number": 16,
+      "title": "Surveillance",
+      "text": "Surveillance\n16\n",
+      "urls": []
+    },
+    {
+      "slide_number": 17,
+      "title": "ctDNA identifies patients at low risk for reccurence after surgery",
+      "text": "ctDNA identifies patients at low risk for reccurence after surgery\nIMVIGOR11: Persistently ctDNA-negative patients: 95% DFS at 12 months, ctDNA (-)-->(+) DFS ~40% at 12 months\nctDNA detects recurrence median 90 day lead time earlier than imaging\nhttps://euoncology.europeanurology.com/article/S2588-9311(25)00124-5/fulltext\n17\n",
+      "urls": [
+        "https://euoncology.europeanurology.com/article/S2588-9311(25)00124-5/fulltext"
+      ]
+    },
+    {
+      "slide_number": 18,
+      "title": "Can ctDNA-guided surveillance safely replace scheduled imaging surveillance for detecting recurrences outside the urothelial tract after curative-intent surgery?",
+      "text": "Can ctDNA-guided surveillance safely replace scheduled imaging surveillance for detecting recurrences outside the urothelial tract after curative-intent surgery?\n18\n",
+      "urls": []
+    },
+    {
+      "slide_number": 19,
+      "title": "ctDNA-Guided Surveillance After Curative-Intent Therapy in Urothelial Carcinoma (GUIDE-UC)",
+      "text": "19\nctDNA-Guided Surveillance After Curative-Intent Therapy in Urothelial Carcinoma (GUIDE-UC)\nTrial Under Review\nPIs: Karol+Galsky\n",
+      "urls": []
+    },
+    {
+      "slide_number": 20,
+      "title": "Metastatic",
+      "text": "Metastatic\n20\n",
+      "urls": []
+    },
+    {
+      "slide_number": 21,
+      "title": "Quantitative baseline ctDNA is prognostic prior to a new line of therapy",
+      "text": "Quantitative baseline ctDNA is prognostic prior to a new line of therapy\nPrior work: Qualitative baseline ctDNA associated with worse OS (HR 2.06)1\nWe retrospectively analyzed N=38 patients with metastatic bladder who had baseline ctDNA measured within 21 days prior to initiating a systemic therapy line (N=48 observations)\nhttps://www.nature.com/articles/s41591-024-03091-7/figures/4\n\nhttps://pmc.ncbi.nlm.nih.gov/articles/PMC11175790/\n21\nPreliminary Data\nBaseline Quantitative ctDNA and OS. Cox proportional hazards models evaluating baseline ctDNA (log10[ctDNA + 1]) and OS. HR >1 indicates increased risk of death.\n",
+      "urls": [
+        "https://www.nature.com/articles/s41591-024-03091-7/figures/4",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC11175790/"
+      ]
+    },
+    {
+      "slide_number": 22,
+      "title": "ctDNA clearance as a surrogate endpoint in metastatic bladder cancer?",
+      "text": "ctDNA clearance as a surrogate endpoint in metastatic bladder cancer?\nPrior work: ctDNA C2/C1 reduction below median during ICI monotherapy associated with better OS\nhttps://www.nature.com/articles/s41591-024-03091-7/figures/4\n\nhttps://pmc.ncbi.nlm.nih.gov/articles/PMC11175790/\n22\nPreliminary Data\nOur work: ctDNA clearance between 6-24 weeks from starting therapy shows significantly improved OS (p=0.01 adjusted for line of therapy)\n",
+      "urls": [
+        "https://www.nature.com/articles/s41591-024-03091-7/figures/4",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC11175790/"
+      ]
+    },
+    {
+      "slide_number": 23,
+      "title": "Response Criteria",
+      "text": "Response Criteria\n23\n",
+      "urls": []
+    },
+    {
+      "slide_number": 24,
+      "title": "RECIST criteria for ctDNA?",
+      "text": "RECIST criteria for ctDNA?\nhttps://www.annalsofoncology.org/article/S0923-7534(23)05114-1/fulltext\n24\n",
+      "urls": [
+        "https://www.annalsofoncology.org/article/S0923-7534(23)05114-1/fulltext"
+      ]
+    },
+    {
+      "slide_number": 25,
+      "title": "Qualitative ctDNA Response Criteria is Non-inferior to Quantitative and ML Models",
+      "text": "Qualitative ctDNA Response Criteria is Non-inferior to Quantitative and ML Models\n25\nQuantitative\nQualitative\nMachine learning\nPreliminary Data\n",
+      "urls": []
+    },
+    {
+      "slide_number": 26,
+      "title": "Acknowledgements",
+      "text": "Acknowledgements\nMatthew Galsky\nMarcio Diniz\nGU oncology department\nAnna, Ruveyda, Lexi, Elliana, TJ, Lydia\n26\n",
+      "urls": []
+    },
+    {
+      "slide_number": 27,
+      "title": "",
+      "text": "Thank You/Any Questions?\n",
+      "urls": []
+    }
+  ],
+  "citations": {
+    "https://en.wikipedia.org/wiki/Circulating_tumor_DNA": {
+      "type": "website",
+      "authors": "",
+      "title": "",
+      "journal": "Wikipedia",
+      "year": "",
+      "doi": "",
+      "citation_key": "Wikipedia1"
+    },
+    "https://www.mdpi.com/2073-4409/14/3/161": {
+      "type": "article",
+      "authors": "",
+      "title": "",
+      "journal": "MDPI Cells",
+      "year": "",
+      "doi": "",
+      "citation_key": "MDPI1"
+    },
+    "https://www.natera.com/oncology/signatera-advanced-cancer-detection/?utm_campaign=2025_ONC_Clinician_Signatera_Indication-Skin&utm_source=google&utm_medium=cpc&utm_term=ctdna%20melanoma&matchtype=b&device=c&utm_adgroup=&gad_source=1&gad_campaignid=22056580994&gbraid=0AAAAAD1MwgwHRvHODSRf7CEB_DkIsTRyU&gclid=Cj0KCQiA6sjKBhCSARIsAJvYcpORyUs5w3wu9cPAFk1dYLX5pal19wHkA16VbE3XhYpJh4Q-OGvu1ZsaApUYEALw_wcB": {
+      "type": "website",
+      "authors": "",
+      "title": "",
+      "journal": "Natera Website",
+      "year": "",
+      "doi": "",
+      "citation_key": "Natera1"
+    },
+    "https://www.urotoday.com/conference-highlights/aua-2025/aua-2025-bladder-cancer/160106-aua-2025-neo-blast-neoadjuvant-therapy-for-bladder-cancer-followed-by-active-surveillance-versus-treatment.html": {
+      "type": "conference",
+      "authors": "",
+      "title": "",
+      "journal": "UroToday Conference Highlights",
+      "year": "",
+      "doi": "",
+      "citation_key": "UroToday1"
+    },
+    "https://pmc.ncbi.nlm.nih.gov/articles/PMC8495594/": {
+      "type": "article",
+      "authors": "",
+      "title": "",
+      "journal": "PMC Article",
+      "year": "",
+      "doi": "",
+      "citation_key": "PMC1"
+    },
+    "https://www.sciencedirect.com/science/article/pii/S0302283823029020?via%3Dihub#f0010": {
+      "type": "article",
+      "authors": "",
+      "title": "",
+      "journal": "European Urology Oncology",
+      "year": "",
+      "doi": "",
+      "citation_key": "EUO1"
+    },
+    "https://www.urotoday.com/conference-highlights/esmo-2025/esmo-2025-bladder-cancer/164022-esmo-2025-adjuvant-nivolumab-versus-placebo-for-high-risk-muscle-invasive-urothelial-carcinoma-5-year-efficacy-and-ctdna-results-from-checkmate-274.html": {
+      "type": "conference",
+      "authors": "",
+      "title": "",
+      "journal": "UroToday Conference Highlights",
+      "year": "",
+      "doi": "",
+      "citation_key": "UroToday2"
+    },
+    "https://www.nejm.org/doi/full/10.1056/NEJMoa2511885": {
+      "type": "article",
+      "authors": "",
+      "title": "",
+      "journal": "New England Journal of Medicine",
+      "year": "",
+      "doi": "full/10.1056/NEJMoa2511885",
+      "citation_key": "NEJM1"
+    },
+    "https://euoncology.europeanurology.com/article/S2588-9311(25)00124-5/fulltext": {
+      "type": "article",
+      "authors": "",
+      "title": "",
+      "journal": "European Urology Oncology",
+      "year": "",
+      "doi": "",
+      "citation_key": "EUO2"
+    },
+    "https://www.nature.com/articles/s41591-024-03091-7/figures/4": {
+      "type": "article",
+      "authors": "",
+      "title": "",
+      "journal": "Nature Medicine",
+      "year": "",
+      "doi": "",
+      "citation_key": "1"
+    },
+    "https://pmc.ncbi.nlm.nih.gov/articles/PMC11175790/": {
+      "type": "article",
+      "authors": "",
+      "title": "",
+      "journal": "PMC Article",
+      "year": "",
+      "doi": "",
+      "citation_key": "PMC2"
+    },
+    "https://www.annalsofoncology.org/article/S0923-7534(23)05114-1/fulltext": {
+      "type": "article",
+      "authors": "",
+      "title": "",
+      "journal": "Annals of Oncology",
+      "year": "",
+      "doi": "",
+      "citation_key": "AnnalsOncol1"
+    }
+  }
+}

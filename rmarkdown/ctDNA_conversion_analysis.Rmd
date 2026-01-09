@@ -1,0 +1,419 @@
+---
+title: "ctDNA Conversion Analysis"
+author: "Alex Karol"
+date: "2025-10-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# ==============================
+# Setup
+# ==============================
+knitr::opts_knit$set(root.dir = "~/R")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+# Core libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(knitr)
+  library(kableExtra)
+})
+
+# Cohort sizes
+TOTAL_N    <- 310
+SCREENED_N <- 108
+
+# Helper functions
+as_date_safe <- function(x) {
+  v <- as.character(x)
+  num <- suppressWarnings(as.numeric(v))
+  out <- rep(as.Date(NA), length(v))
+  # Excel serials (roughly 1955–2064)
+  is_serial <- !is.na(num) & num > 20000 & num < 60000
+  out[is_serial] <- as.Date(num[is_serial], origin = "1899-12-30")
+  # Strings
+  left <- !is_serial
+  if (any(left)) {
+    parsed <- suppressWarnings(parse_date_time(v[left], orders = c("Y-m-d","m/d/Y","d/m/Y","m/d/y","d/m/y","Ymd"), tz = "UTC"))
+    out[left] <- as.Date(parsed)
+  }
+  # Clamp to reasonable range
+  bad <- is.na(out) | year(out) < 2000 | year(out) > 2100
+  out[bad] <- as.Date(NA)
+  out
+}
+
+# Build long ctDNA table
+build_ctdna_long <- function(dat, id_col) {
+  val <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+$")) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp", values_to = "ctdna_value_raw") %>%
+    mutate(ctdna_value = suppressWarnings(as.numeric(gsub("^<\\s*", "", gsub(",", "", as.character(ctdna_value_raw))))) )
+  dt  <- dat %>% select(all_of(id_col), matches("^ct_dna_level_\\d+_date$")) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp_date", values_to = "ctdna_date_raw")
+  out <- val %>%
+    mutate(tp_idx = as.integer(str_extract(tp, "\\d+"))) %>%
+    left_join(dt %>% mutate(tp_idx = as.integer(str_extract(tp_date, "\\d+"))) %>% select(all_of(id_col), tp_idx, ctdna_date_raw),
+              by = c(id_col, "tp_idx")) %>%
+    mutate(ctdna_date = as_date_safe(ctdna_date_raw)) %>%
+    filter(!is.na(ctdna_date)) %>%
+    select(all_of(id_col), ctdna_date, ctdna_value)
+  out
+}
+```
+
+```{r load_data, include=FALSE}
+# ==============================
+# Load and clean data
+# ==============================
+file_path <- "Natera_Sheet_cleaned.xlsx"
+dat <- read_excel(file_path, sheet = 1, col_names = TRUE) %>%
+  clean_names() %>%
+  mutate(patient_id = record_id_linking_key) %>%
+  filter(!is.na(patient_id)) %>%
+  mutate(across(everything(), ~ifelse(. == "", NA, .)))
+
+# Build long ctDNA table
+ctdna_long <- build_ctdna_long(dat, "patient_id")
+```
+
+```{r conversion_analysis, include=FALSE}
+# ==============================
+# ctDNA Conversion Analysis
+# ==============================
+
+# Define non-metastatic at first ctDNA
+non_metastatic_at_first <- dat %>%
+  filter(
+    str_detect(tolower(clinical_disease_state_at_time_of_first_ct_dna_nmibc_mibc_advanced_metastatic), "nmibc|mibc") &
+    !str_detect(tolower(clinical_disease_state_at_time_of_first_ct_dna_nmibc_mibc_advanced_metastatic), "advanced|metastatic")
+  )
+
+cat("Patients without metastatic disease at first ctDNA:", nrow(non_metastatic_at_first), "\n")
+
+# Get ctDNA conversion data for these patients
+conversion_data <- ctdna_long %>%
+  inner_join(non_metastatic_at_first %>% select(patient_id), by = "patient_id") %>%
+  arrange(patient_id, ctdna_date) %>%
+  group_by(patient_id) %>%
+  mutate(
+    first_ctdna_result = case_when(
+      ctdna_value > 0 ~ "Positive",
+      ctdna_value == 0 ~ "Negative", 
+      TRUE ~ NA_character_
+    ),
+    first_positive_date = ifelse(ctdna_value > 0, ctdna_date, NA),
+    first_positive_date = min(first_positive_date, na.rm = TRUE),
+    first_positive_date = ifelse(is.infinite(first_positive_date), NA, first_positive_date)
+  ) %>%
+  ungroup() %>%
+  group_by(patient_id) %>%
+  summarise(
+    first_ctdna_result = first(first_ctdna_result),
+    first_positive_date = first(first_positive_date),
+    ever_positive = any(ctdna_value > 0, na.rm = TRUE),
+    conversion = case_when(
+      first_ctdna_result == "Negative" & ever_positive ~ "Converted",
+      first_ctdna_result == "Positive" ~ "Always Positive",
+      first_ctdna_result == "Negative" & !ever_positive ~ "Remained Negative",
+      TRUE ~ "Unknown"
+    ),
+    .groups = "drop"
+  )
+
+# Add clinical information
+conversion_summary <- conversion_data %>%
+  left_join(dat %>% select(
+    patient_id,
+    metastatic_disease_ever_diagnosed_yes_no,
+    alive_yes_no,
+    death_date,
+    cause_of_death
+  ), by = "patient_id") %>%
+  mutate(
+    metastatic_ever = case_when(
+      str_detect(tolower(metastatic_disease_ever_diagnosed_yes_no), "yes|y|1") ~ "Yes",
+      str_detect(tolower(metastatic_disease_ever_diagnosed_yes_no), "no|n|0") ~ "No",
+      TRUE ~ "Unknown"
+    ),
+    alive_status = case_when(
+      str_detect(tolower(alive_yes_no), "yes|y|1") ~ "Alive",
+      str_detect(tolower(alive_yes_no), "no|n|0") ~ "Deceased",
+      TRUE ~ "Unknown"
+    ),
+    death_date_parsed = as_date_safe(death_date),
+    cancer_related_death = case_when(
+      alive_status == "Alive" ~ "N/A",
+      str_detect(tolower(cause_of_death), "cancer|bladder|tumor|metastatic") ~ "Yes",
+      str_detect(tolower(cause_of_death), "other|cardiac|heart|stroke") ~ "No",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# Filter to converted patients only
+converted_patients <- conversion_summary %>%
+  filter(conversion == "Converted") %>%
+  mutate(
+    expected_count = round(n() / SCREENED_N * TOTAL_N),
+    first_positive_date_formatted = ifelse(is.na(first_positive_date), "Not available", as.character(first_positive_date))
+  ) %>%
+  select(
+    patient_id,
+    first_positive_date_formatted,
+    metastatic_ever,
+    alive_status,
+    cancer_related_death
+  ) %>%
+  arrange(patient_id)
+```
+
+```{r conversion_summary}
+# ==============================
+# ctDNA Conversion Summary
+# ==============================
+
+cat("## ctDNA Conversion Analysis\n\n")
+
+# Overall conversion statistics
+conversion_stats <- conversion_summary %>%
+  count(conversion) %>%
+  mutate(
+    expected_count = round(n / sum(n) * TOTAL_N),
+    percentage = round(n / sum(n) * 100, 1)
+  )
+
+cat("**Overall ctDNA Conversion Status:**\n")
+kable(conversion_stats, 
+      col.names = c("Conversion Status", "N (Screened)", "Expected (Total)", "Percentage"),
+      caption = sprintf("ctDNA conversion status among non-metastatic patients at first ctDNA (N=%d screened, %d total)", SCREENED_N, TOTAL_N)) %>%
+  kable_styling(full_width = FALSE)
+
+cat("\n**Conversion Rate:**\n")
+converted_count <- conversion_stats %>% filter(conversion == "Converted") %>% pull(n)
+total_analyzed <- sum(conversion_stats$n)
+conversion_rate <- round(converted_count / total_analyzed * 100, 1)
+expected_converted <- round(converted_count / SCREENED_N * TOTAL_N)
+
+cat("- Patients with ctDNA conversion:", converted_count, "\n")
+cat("- Expected when chart review complete:", expected_converted, "\n")
+cat("- Conversion rate:", conversion_rate, "%\n\n")
+```
+
+```{r converted_patients_list}
+# ==============================
+# List of Converted Patients
+# ==============================
+
+cat("## Patients with ctDNA Conversion (0 → >0)\n\n")
+
+if (nrow(converted_patients) > 0) {
+  cat("**Patient Details:**\n")
+  cat("(Patients who had undetectable ctDNA initially, then became detectable)\n\n")
+  
+  # Format the table nicely
+  converted_table <- converted_patients %>%
+    rename(
+      "Patient ID" = patient_id,
+      "First Positive ctDNA Date" = first_positive_date_formatted,
+      "Metastatic Disease Ever" = metastatic_ever,
+      "Alive Status" = alive_status,
+      "Cancer-Related Death" = cancer_related_death
+    )
+  
+  kable(converted_table, 
+        caption = sprintf("Patients with ctDNA conversion (N=%d screened, ≈%d expected when complete)", 
+                        nrow(converted_patients), 
+                        round(nrow(converted_patients) / SCREENED_N * TOTAL_N))) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+  
+  cat("\n**Summary of Converted Patients:**\n")
+  
+  # Metastatic disease summary
+  metastatic_summary <- converted_patients %>%
+    count(metastatic_ever) %>%
+    mutate(percentage = round(n / sum(n) * 100, 1))
+  
+  cat("- **Metastatic Disease Development:**\n")
+  for (i in 1:nrow(metastatic_summary)) {
+    cat("  -", metastatic_summary$metastatic_ever[i], ":", metastatic_summary$n[i], "patients (", metastatic_summary$percentage[i], "%)\n")
+  }
+  
+  # Survival summary
+  survival_summary <- converted_patients %>%
+    count(alive_status) %>%
+    mutate(percentage = round(n / sum(n) * 100, 1))
+  
+  cat("\n- **Survival Status:**\n")
+  for (i in 1:nrow(survival_summary)) {
+    cat("  -", survival_summary$alive_status[i], ":", survival_summary$n[i], "patients (", survival_summary$percentage[i], "%)\n")
+  }
+  
+  # Cancer-related death summary
+  death_summary <- converted_patients %>%
+    filter(alive_status == "Deceased") %>%
+    count(cancer_related_death) %>%
+    mutate(percentage = round(n / sum(n) * 100, 1))
+  
+  if (nrow(death_summary) > 0) {
+    cat("\n- **Cause of Death (among deceased):**\n")
+    for (i in 1:nrow(death_summary)) {
+      cat("  -", death_summary$cancer_related_death[i], ":", death_summary$n[i], "patients (", death_summary$percentage[i], "%)\n")
+    }
+  }
+  
+} else {
+  cat("**No patients found with ctDNA conversion from 0 to >0**\n")
+  cat("(All patients either remained negative or were always positive)\n")
+}
+```
+
+```{r detailed_analysis}
+# ==============================
+# Detailed Analysis
+# ==============================
+
+cat("## Detailed Analysis\n\n")
+
+# Time to conversion analysis
+if (nrow(converted_patients) > 0) {
+  cat("**Time to ctDNA Conversion:**\n")
+  
+  # Get detailed timeline for converted patients
+  timeline_data <- ctdna_long %>%
+    inner_join(converted_patients %>% select(patient_id), by = "patient_id") %>%
+    arrange(patient_id, ctdna_date) %>%
+    group_by(patient_id) %>%
+    mutate(
+      first_negative_date = min(ctdna_date[ctdna_value == 0], na.rm = TRUE),
+      first_positive_date = min(ctdna_date[ctdna_value > 0], na.rm = TRUE),
+      days_to_conversion = as.numeric(first_positive_date - first_negative_date)
+    ) %>%
+    filter(!is.na(days_to_conversion)) %>%
+    slice_head(n = 1) %>%
+    ungroup()
+  
+  if (nrow(timeline_data) > 0) {
+    time_summary <- timeline_data %>%
+      summarise(
+        median_days = median(days_to_conversion, na.rm = TRUE),
+        q1_days = quantile(days_to_conversion, 0.25, na.rm = TRUE),
+        q3_days = quantile(days_to_conversion, 0.75, na.rm = TRUE),
+        min_days = min(days_to_conversion, na.rm = TRUE),
+        max_days = max(days_to_conversion, na.rm = TRUE)
+      )
+    
+    cat("- Median time to conversion:", round(time_summary$median_days), "days\n")
+    cat("- Range:", round(time_summary$min_days), "-", round(time_summary$max_days), "days\n")
+    cat("- IQR:", round(time_summary$q1_days), "-", round(time_summary$q3_days), "days\n\n")
+  }
+}
+
+# Risk factors analysis
+cat("**Clinical Characteristics of Converted Patients:**\n")
+
+if (nrow(converted_patients) > 0) {
+  # Add clinical characteristics
+  clinical_data <- converted_patients %>%
+    left_join(dat %>% select(
+      patient_id,
+      race,
+      ethnicity,
+      cancer_stage_natera,
+      pathology_t_stage,
+      pathology_n_stage,
+      neoadjuvant_systemic_therapy_yes_no
+    ), by = "patient_id")
+  
+  # Stage distribution
+  stage_dist <- clinical_data %>%
+    count(cancer_stage_natera) %>%
+    arrange(desc(n))
+  
+  cat("- **Cancer Stage Distribution:**\n")
+  for (i in 1:nrow(stage_dist)) {
+    cat("  -", stage_dist$cancer_stage_natera[i], ":", stage_dist$n[i], "patients\n")
+  }
+  
+  # NAC distribution
+  nac_dist <- clinical_data %>%
+    count(neoadjuvant_systemic_therapy_yes_no) %>%
+    arrange(desc(n))
+  
+  cat("\n- **Neoadjuvant Chemotherapy:**\n")
+  for (i in 1:nrow(nac_dist)) {
+    cat("  -", nac_dist$neoadjuvant_systemic_therapy_yes_no[i], ":", nac_dist$n[i], "patients\n")
+  }
+}
+```
+
+```{r export_data}
+# ==============================
+# Export Converted Patients Data
+# ==============================
+
+cat("## Data Export\n\n")
+
+if (nrow(converted_patients) > 0) {
+  # Create detailed export table
+  export_data <- converted_patients %>%
+    left_join(dat %>% select(
+      patient_id,
+      race,
+      ethnicity,
+      cancer_stage_natera,
+      pathology_t_stage,
+      pathology_n_stage,
+      neoadjuvant_systemic_therapy_yes_no,
+      date_of_first_diagnosis_of_bladder_cancer_any_location
+    ), by = "patient_id") %>%
+    mutate(
+      diagnosis_date = as_date_safe(date_of_first_diagnosis_of_bladder_cancer_any_location),
+      diagnosis_date_formatted = ifelse(is.na(diagnosis_date), "Not available", as.character(diagnosis_date))
+    ) %>%
+    select(
+      patient_id,
+      diagnosis_date_formatted,
+      first_positive_date_formatted,
+      race,
+      ethnicity,
+      cancer_stage_natera,
+      pathology_t_stage,
+      pathology_n_stage,
+      neoadjuvant_systemic_therapy_yes_no,
+      metastatic_ever,
+      alive_status,
+      cancer_related_death
+    ) %>%
+    rename(
+      "Patient ID" = patient_id,
+      "Diagnosis Date" = diagnosis_date_formatted,
+      "First Positive ctDNA Date" = first_positive_date_formatted,
+      "Race" = race,
+      "Ethnicity" = ethnicity,
+      "Cancer Stage" = cancer_stage_natera,
+      "T Stage" = pathology_t_stage,
+      "N Stage" = pathology_n_stage,
+      "Neoadjuvant Chemotherapy" = neoadjuvant_systemic_therapy_yes_no,
+      "Metastatic Disease Ever" = metastatic_ever,
+      "Alive Status" = alive_status,
+      "Cancer-Related Death" = cancer_related_death
+    )
+  
+  cat("**Complete Patient Data for Export:**\n")
+  kable(export_data, caption = "Complete clinical data for patients with ctDNA conversion") %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 12)
+  
+  # Save to CSV
+  write.csv(export_data, "ctDNA_conversion_patients.csv", row.names = FALSE)
+  cat("\n✅ **Data exported to:** `ctDNA_conversion_patients.csv`\n")
+  
+} else {
+  cat("No patients with ctDNA conversion found to export.\n")
+}
+
+cat("\n**Analysis completed:**", Sys.time(), "\n")
+```

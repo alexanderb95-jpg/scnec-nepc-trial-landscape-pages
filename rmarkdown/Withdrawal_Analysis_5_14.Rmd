@@ -1,0 +1,1182 @@
+---
+title: "AK_Clean"
+author: "Alex Karol"
+date: "2025_5_14"
+output: html_document
+---
+
+
+```{r include=FALSE}
+
+#Packages load
+
+# Set CRAN mirror
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load required libraries
+library(tidyr)
+library(readxl)
+library(dplyr)
+library(kableExtra)
+library(writexl)
+library(ggplot2)
+library(GGally)
+library(car)
+library(lmtest)
+library(mgcv)
+
+```
+
+
+
+```{r include=FALSE}
+
+#Load data
+
+# Set the file path
+file_path <- "AK_Clean_Temp_4.xlsx"
+setwd("~/R")
+getwd()
+
+
+
+# Read the Excel file from the specified path
+ AK_Clean <- read_excel("AK_Clean_Temp_4.xlsx", col_types = c("text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", "text", "text", "text",
+     "text", "text", "numeric", "text", "text", 
+     "text", "text", "text", "text", "text", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", "numeric",
+     "numeric", "numeric", "numeric", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", 
+     "text","text","text","text","text", "text","text","text","text","text","text"))
+
+
+# View the first few rows of the data to confirm it's loaded correctly
+head(AK_Clean)
+```
+
+```{r}
+
+#Trial demographics
+
+ data_cleaned <- read_excel("AK_Clean_Temp_4.xlsx", col_types = c("text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", "text", "text", "text",
+     "text", "text", "numeric", "text", "text", 
+     "text", "text", "text", "text", "text", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", "numeric",
+     "numeric", "numeric", "numeric", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", 
+     "text","text","text","text","text", "text","text","text","text","text","text"))
+
+# Convert Tx/Cr withdrawl rates to numeric
+data_cleaned$Tx_withdrawl_no_reason_rate <- as.numeric(data_cleaned$Tx_withdrawl_no_reason_rate)
+data_cleaned$Cr_withdrawl_no_reason_rate <- as.numeric(data_cleaned$Cr_withdrawl_no_reason_rate)
+
+# Log-transform them (to match log outcome format)
+data_cleaned$log_Tx_withdrawl_no_reason_rate <- log(data_cleaned$Tx_withdrawl_no_reason_rate + 1e-8)
+data_cleaned$log_Cr_withdrawl_no_reason_rate <- log(data_cleaned$Cr_withdrawl_no_reason_rate + 1e-8)
+
+# After reading the Excel file …
+trial_df <- AK_Clean   # or  trial_df <- data_cleaned
+
+# Now safely keep only the columns you want
+selected_columns <- c(
+  "Solid", "Heme", "Solid_neoadjuvant", "Solid_topical",
+  "Solid_radition_systemic_tx", "Solid_adjuvant_after_defintive_tx",
+  "Solid_Metastatic_tx_naieve", "Solid_Metastatic_2ndline_beyond",
+  "Heme_Treatment_naieve", "Heme_Relapsed_and_or_referactory",
+  "Heme_BMT", "Study_Type", "Randomized", "Follow_Up_Period_Years",
+  "Mono_Or_Combo_Therapy_In_Control_Arm",
+  "Mono_Or_Combo_Therapy_In_Interventional_Arm",
+  "Control_Group_1_placebo_2SOCalone_3_none",
+  "Blinding_Practice_1_pt_blind_0_open", "Sponser",
+  "Location_Of_Trial", "Single_Site_Or_Multi_Site",
+  "Number_Enrolled_In_Trial", "discontinuation_rate_total"
+)
+
+library(dplyr)
+trial_df <- trial_df %>% dplyr::select(all_of(selected_columns))
+
+# Verify the structure of the filtered data
+str(data)
+
+# trial_df already contains only your selected columns
+library(dplyr)
+library(tidyr)
+
+continuous_summary <- trial_df %>%                     # <- use trial_df, not data
+  mutate(Follow_Up_Period_Months = Follow_Up_Period_Years * 12) %>%
+  summarize(
+    Follow_Up_Period_Months = paste0(
+      median(Follow_Up_Period_Months, na.rm = TRUE), " (",
+      IQR(Follow_Up_Period_Months,   na.rm = TRUE), ")"
+    ),
+    Number_Enrolled_In_Trial = paste0(
+      sum(Number_Enrolled_In_Trial,  na.rm = TRUE), " (",
+      median(Number_Enrolled_In_Trial, na.rm = TRUE), ")"
+    ),
+    Discontinuation_Rate_Total = paste0(
+      median(discontinuation_rate_total, na.rm = TRUE), " (",
+      IQR(discontinuation_rate_total,    na.rm = TRUE), ")"
+    )
+  ) %>%
+  pivot_longer(everything(), names_to = "Characteristic", values_to = "Value")
+
+print(continuous_summary)
+
+# ---- categorical summary ---------------------------------------------
+library(dplyr)
+
+categorical_columns <- c(
+  "Solid", "Heme", "Solid_neoadjuvant", "Solid_topical",
+  "Solid_radition_systemic_tx", "Solid_adjuvant_after_defintive_tx", 
+  "Solid_Metastatic_tx_naieve", "Solid_Metastatic_2ndline_beyond", 
+  "Heme_Treatment_naieve", "Heme_Relapsed_and_or_referactory", 
+  "Heme_BMT", "Study_Type", "Randomized", 
+  "Mono_Or_Combo_Therapy_In_Control_Arm", 
+  "Mono_Or_Combo_Therapy_In_Interventional_Arm", 
+  "Control_Group_1_placebo_2SOCalone_3_none", 
+  "Blinding_Practice_1_pt_blind_0_open", "Sponser", 
+  "Location_Of_Trial", "Single_Site_Or_Multi_Site"
+)
+
+categorical_summary <- lapply(categorical_columns, function(column) {
+
+  ## 1.  Check the column exists in trial_df
+  if (!column %in% names(trial_df)) {
+    return(
+      data.frame(Characteristic = column,
+                 Value         = "Column not found",
+                 stringsAsFactors = FALSE)
+    )
+  }
+
+  vec <- trial_df[[column]]
+
+  ## 2.  Handle empty / all-missing columns gracefully
+  if (all(is.na(vec))) {
+    return(
+      data.frame(Characteristic = column,
+                 Value         = "No data available",
+                 stringsAsFactors = FALSE)
+    )
+  }
+
+  ## 3.  Tabulate
+  df <- as.data.frame(table(vec, useNA = "no"))
+  names(df) <- c("Category", "Count")
+  df$Percentage   <- round(100 * df$Count / sum(df$Count), 1)
+  df$Characteristic <- column
+  df$Value <- paste0(df$Category, ": ", df$Count,
+                     " (", df$Percentage, "%)")
+
+  df[, c("Characteristic", "Value")]
+})
+
+categorical_summary_df <- do.call(rbind, categorical_summary)
+
+print(categorical_summary_df)
+
+# Combine summaries
+table_1_df <- bind_rows(continuous_summary, categorical_summary_df)
+
+# Export to Excel
+write_xlsx(list("Table 1" = table_1_df), path = "Table_1_Characteristics.xlsx")
+
+# Display the final table
+print(table_1_df)
+```
+```{r}
+
+#Univariate
+# Load required libraries
+library(dplyr)
+library(readxl)
+library(writexl)
+library(broom)
+
+# Load the dataset
+data_cleaned <- read_excel("AK_Clean_Temp_4.xlsx", col_types = c("text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", "text", "text", "text",
+     "text", "text", "numeric", "text", "text", 
+     "text", "text", "text", "text", "text", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", "numeric",
+     "numeric", "numeric", "numeric", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", 
+     "text","text","text","text","text", "text","text","text","text","text","text"))
+
+data_cleaned$log_total_withdrawl_noreason_rate <- log(data_cleaned$total_withdrawl_noreason_rate + 1e-8) # Avoid log(0)
+
+
+
+# Set reference levels for categorical variables
+data_cleaned$Study_Type <- relevel(factor(data_cleaned$Study_Type), ref = "Rct")
+data_cleaned$Control_Group_1_placebo_2SOCalone_3_none <- relevel(factor(data_cleaned$Control_Group_1_placebo_2SOCalone_3_none), ref = "1")
+data_cleaned$Sponser <- relevel(factor(data_cleaned$Sponser), ref = "Industry")
+data_cleaned$Location_Of_Trial <- relevel(factor(data_cleaned$Location_Of_Trial), ref = "International")
+data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal <- relevel(factor(data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal), ref = "No")
+
+# Scale Number_Enrolled_In_Trial
+data_cleaned$Scaled_Number_Enrolled_In_Trial <- scale(data_cleaned$Number_Enrolled_In_Trial)
+
+trial_design_vars <- c(
+  "Unblinding_Or_Cross_Over", "Contact_Patients_Lost_To_FU",
+  "Mono_Or_Combo_Therapy_In_Interventional_Arm",
+  "Heme_Relapsed_and_or_referactory",
+  "Solid_radition_systemic_tx",
+  "Mono_Or_Combo_Therapy_In_Control_Arm",
+  "Scaled_Number_Enrolled_In_Trial",
+  "Follow_Up_Period_Years", 
+  "Solid_Metastatic_tx_naieve",
+  "Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal",
+  "Sponser",
+  "Heme_Treatment_naieve",
+  "Heme_BMT",
+  "Solid_neoadjuvant",
+  "Randomized",
+  "Control_Group_1_placebo_2SOCalone_3_none",
+  "Study_Type",
+  "Location_Of_Trial",
+  "Solid_adjuvant_after_defintive_tx",
+  "Blinding_Practice_1_pt_blind_0_open",
+  "Solid_Metastatic_2ndline_beyond",
+  "Single_Site_Or_Multi_Site"
+)
+
+# Define mitigation strategy variables
+mitigation_strategy_vars <- c(
+  "Non_Specific_Effort" , "No_Mitigation_Stratigies"
+)
+
+# Function to extract effect size and 95% CI
+get_model_results <- function(model) {
+  confint <- confint(model) # Extract confidence intervals
+  effect_size <- coef(model) # Extract coefficients
+  p_values <- summary(model)$coefficients[, 4] # Extract p-values
+  data.frame(
+    Term = names(effect_size),
+    Effect_Size = effect_size,
+    CI_Lower = confint[, 1],
+    CI_Upper = confint[, 2],
+    P_Value = p_values
+  )
+}
+
+# Ensure Tx and Cr rates are numeric
+data_cleaned$Tx_withdrawl_no_reason_rate <- as.numeric(data_cleaned$Tx_withdrawl_no_reason_rate)
+data_cleaned$Cr_withdrawl_no_reason_rate <- as.numeric(data_cleaned$Cr_withdrawl_no_reason_rate)
+
+# Create log-transformed outcomes
+data_cleaned$log_Tx_withdrawl_no_reason_rate <- log(data_cleaned$Tx_withdrawl_no_reason_rate + 1e-8)
+data_cleaned$log_Cr_withdrawl_no_reason_rate <- log(data_cleaned$Cr_withdrawl_no_reason_rate + 1e-8)
+
+outcomes <- c("log_total_withdrawl_noreason_rate", 
+              "log_Tx_withdrawl_no_reason_rate", 
+              "log_Cr_withdrawl_no_reason_rate")
+
+for (outcome in outcomes) {
+  trial_plus_mitigation_results <- data.frame(
+    Predictor = character(),
+    Effect_Size_CI = character(),
+    P_Value = numeric(),
+    Model_Type = character(),
+    Reference_Level = character(),
+    Outcome = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (predictor in c(trial_design_vars, mitigation_strategy_vars)) {
+    if (predictor == "Number_Enrolled_In_Trial") predictor <- "Scaled_Number_Enrolled_In_Trial"
+    if (predictor %in% names(data_cleaned)) {
+      model <- lm(as.formula(paste(outcome, "~", predictor)), data = data_cleaned)
+      model_results <- get_model_results(model)
+      if (nrow(model_results) >= 2) {
+        predictor_row <- model_results[2, ]
+        exp_effect_size <- exp(predictor_row$Effect_Size)
+        exp_ci_lower <- exp(predictor_row$CI_Lower)
+        exp_ci_upper <- exp(predictor_row$CI_Upper)
+        exp_effect_size_ci <- paste0(round(exp_effect_size, 4),
+                                     " (", round(exp_ci_lower, 4), ", ", round(exp_ci_upper, 4), ")")
+        trial_plus_mitigation_results <- rbind(trial_plus_mitigation_results, data.frame(
+          Predictor = predictor,
+          Effect_Size_CI = exp_effect_size_ci,
+          P_Value = round(predictor_row$P_Value, 4),
+          Model_Type = ifelse(predictor %in% trial_design_vars, "Trial Design", "Mitigation Strategy"),
+          Reference_Level = ifelse(is.factor(data_cleaned[[predictor]]), levels(data_cleaned[[predictor]])[1], NA),
+          Outcome = outcome
+        ))
+      }
+    }
+  }
+  
+  # Save each outcome to a separate sheet
+  write_xlsx(
+    list("Results" = trial_plus_mitigation_results),
+    paste0("Univariate_", outcome, "_Results.xlsx")
+  )
+}
+
+
+
+
+# Print results
+print(trial_plus_mitigation_results)
+
+```
+```{r, include=FALSE}
+#Linearity assumptions
+#Load required libraries
+library(ggplot2)
+library(car)
+library(lmtest)
+library(dplyr)
+
+# Define function to check assumptions
+check_assumptions <- function(predictor, data, outcome) {
+  # Fit linear model
+  formula <- as.formula(paste(outcome, "~", predictor))
+  model <- lm(formula, data = data)
+  
+  # Initialize assumption results
+  assumption_results <- data.frame(
+    Predictor = predictor,
+    Linearity = NA,
+    Normality_p = NA,
+    Homoscedasticity_p = NA,
+    Independence_p = NA,
+    stringsAsFactors = FALSE
+  )
+  
+  # 1. Linearity: Scatterplot or boxplot
+  if (is.numeric(data[[predictor]])) {
+    plot1 <- ggplot(data, aes_string(x = predictor, y = outcome)) +
+      geom_point(alpha = 0.6) +
+      geom_smooth(method = "loess", se = FALSE, color = "blue") +
+      labs(title = paste("Linearity: Outcome vs", predictor), x = predictor, y = outcome)
+    print(plot1)
+    assumption_results$Linearity <- "Checked (Scatterplot)"
+  } else {
+    plot1 <- ggplot(data, aes_string(x = predictor, y = outcome)) +
+      geom_boxplot() +
+      labs(title = paste("Boxplot: Outcome by", predictor), x = predictor, y = outcome)
+    print(plot1)
+    assumption_results$Linearity <- "Checked (Boxplot)"
+  }
+  
+  # 2. Normality of Residuals
+  residuals <- residuals(model)
+  qqnorm(residuals)
+  qqline(residuals, col = "red", lwd = 2)
+  shapiro_test <- shapiro.test(residuals)
+  cat("\nShapiro-Wilk Test for Normality of Residuals (p-value):", shapiro_test$p.value, "\n")
+  assumption_results$Normality_p <- shapiro_test$p.value
+  
+  # 3. Homoscedasticity: Residuals vs Fitted Values
+  fitted_values <- fitted(model)
+  plot2 <- ggplot(data.frame(Fitted = fitted_values, Residuals = residuals), aes(x = Fitted, y = Residuals)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "loess", se = FALSE, color = "red") +
+    labs(title = "Residuals vs Fitted Values", x = "Fitted Values", y = "Residuals")
+  print(plot2)
+  bp_test <- bptest(model)
+  cat("\nBreusch-Pagan Test for Homoscedasticity (p-value):", bp_test$p.value, "\n")
+  assumption_results$Homoscedasticity_p <- bp_test$p.value
+  
+  # 4. Independence: Durbin-Watson Test
+  dw_test <- durbinWatsonTest(model)
+  cat("\nDurbin-Watson Test for Independence (p-value):", dw_test$p.value, "\n")
+  assumption_results$Independence_p <- dw_test$p.value
+  
+  return(assumption_results)
+}
+
+# Variables to check (from trial+mitigation results)
+variables_to_check <- trial_plus_mitigation_results$Predictor
+
+# Initialize summary table
+assumption_summary <- data.frame(
+  Predictor = character(),
+  Linearity = character(),
+  Normality_p = numeric(),
+  Homoscedasticity_p = numeric(),
+  Independence_p = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Check assumptions for each variable
+for (predictor in variables_to_check) {
+  cat("\n\n### Checking Assumptions for Predictor:", predictor, "###\n")
+  if (predictor == "Scaled_Number_Enrolled_In_Trial") {
+    predictor <- "Number_Enrolled_In_Trial"  # Adjust naming if scaled
+  }
+  if (predictor %in% names(data_cleaned)) {
+    results <- check_assumptions(predictor, data_cleaned, outcome)
+    assumption_summary <- rbind(assumption_summary, results)
+  } else {
+    cat("Variable", predictor, "not found in the dataset.\n")
+  }
+}
+
+# Save summary table to Excel
+write_xlsx(assumption_summary, "Regression_Assumptions_Summary.xlsx")
+
+# Print summary table
+print(assumption_summary)
+```
+
+
+```{r, include=FALSE}
+
+#Multivariate
+# Load required libraries
+library(dplyr)
+library(mgcv)
+library(readxl)
+library(writexl)
+
+# Load the dataset
+data_cleaned<- read_excel("AK_Clean_Temp_4.xlsx", col_types = c("text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", "text", "text", "text",
+     "text", "text", "numeric", "text", "text", 
+     "text", "text", "text", "text", "text", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", "numeric",
+     "numeric", "numeric", "numeric", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", 
+     "text","text","text","text","text", "text","text","text","text","text","text"))
+
+# Log-transform the outcome variable to handle skewness
+data_cleaned$log_total_withdrawl_noreason_rate <- log(data_cleaned$total_withdrawl_noreason_rate + 1e-8) # Avoid log(0)
+data_cleaned$Scaled_Number_Enrolled_In_Trial <- scale(data_cleaned$Number_Enrolled_In_Trial)
+data_cleaned$Sponser <- factor(data_cleaned$Sponser)
+data_cleaned$Study_Type <- factor(data_cleaned$Study_Type)
+data_cleaned$Control_Group_1_placebo_2SOCalone_3_none <- factor(data_cleaned$Control_Group_1_placebo_2SOCalone_3_none)
+data_cleaned$Location_Of_Trial <- factor(data_cleaned$Location_Of_Trial)
+data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal <- factor(data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal)
+data_cleaned$Mono_Or_Combo_Therapy_In_Control_Arm <- factor(
+  ifelse(data_cleaned$Mono_Or_Combo_Therapy_In_Control_Arm %in% c("Mono", "None"), "Non-Combo", "Combo"),
+  levels = c("Combo", "Non-Combo") # Set "Combo" as the reference level
+)
+
+# Switch reference levels
+# Combine all non-RCT levels into "Non-RCT"
+data_cleaned$Study_Type <- factor(
+  ifelse(data_cleaned$Study_Type == "Rct", "Rct", "Non-RCT"), # Recategorize all non-RCTs
+  levels = c("Non-RCT", "Rct") # Set the desired levels with "Non-RCT" as the reference
+)
+
+# Combine all non-Industry levels into "Non_industry"
+data_cleaned$Sponser <- factor(
+  ifelse(data_cleaned$Sponser == "Industry", "Industry", "Non_industry"), # Recategorize non-Industry sponsors
+  levels = c("Non_industry", "Industry") # Set the desired levels with "Non_industry" as the reference
+)
+
+
+# Combine "Unclear" and "Yes" into "_Yes/Unk"
+data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal <- factor(
+  ifelse(data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal %in% c("Unclear", "Yes"), "_Yes/Unk", "No"),
+  levels = c("_Yes/Unk", "No") # Set "_Yes/Unk" as the reference level
+)
+
+# Convert the variable to a factor
+data_cleaned$Mono_Or_Combo_Therapy_In_Interventional_Arm <- factor(data_cleaned$Mono_Or_Combo_Therapy_In_Interventional_Arm)
+
+# Set "Combo" as the reference level
+data_cleaned$Mono_Or_Combo_Therapy_In_Interventional_Arm <- relevel(data_cleaned$Mono_Or_Combo_Therapy_In_Interventional_Arm, ref = "Combo")
+
+# Verify the levels
+levels(data_cleaned$Mono_Or_Combo_Therapy_In_Interventional_Arm)
+
+# Scale follow-up period for interpretability
+data_cleaned$Scaled_Follow_Up_Period_Years <- scale(data_cleaned$Follow_Up_Period_Years)
+
+# Define predictors and mitigation strategy variables (UPDATED)
+predictors <- c(
+  "Solid_Metastatic_2ndline_beyond", "Solid_neoadjuvant",
+  "Heme_Treatment_naieve", "Sponser", "Solid_radition_systemic_tx", 
+  "Heme_BMT", "Unblinding_Or_Cross_Over", "Contact_Patients_Lost_To_FU", 
+  "Solid_Metastatic_tx_naieve", "Study_Type", 
+  "Mono_Or_Combo_Therapy_In_Interventional_Arm", "Mono_Or_Combo_Therapy_In_Control_Arm",
+  "Location_Of_Trial", "Solid_adjuvant_after_defintive_tx", 
+  "Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal", 
+  "Control_Group_1_placebo_2SOCalone_3_none", "Heme_Relapsed_and_or_referactory", 
+  "Randomized", "Blinding_Practice_1_pt_blind_0_open", "Single_Site_Or_Multi_Site", 
+  "Scaled_Number_Enrolled_In_Trial", 
+  "Scaled_Follow_Up_Period_Years" 
+)
+
+mitigation_strategy_vars <- c("Non_Specific_Effort", "No_Mitigation_Stratigies")
+
+# Create GAM formulas
+gam_formula_with_mitigation <- as.formula(paste(
+  "log_total_withdrawl_noreason_rate ~", 
+  paste(c(predictors, mitigation_strategy_vars), collapse = " + ")
+))
+gam_formula_without_mitigation <- as.formula(paste(
+  "log_total_withdrawl_noreason_rate ~", 
+  paste(predictors, collapse = " + ")
+))
+
+# Fit GAM models
+gam_model_with_mitigation <- gam(gam_formula_with_mitigation, data = data_cleaned, family = gaussian(link = "identity"))
+gam_model_without_mitigation <- gam(gam_formula_without_mitigation, data = data_cleaned, family = gaussian(link = "identity"))
+
+# Function to create summary with variable names, effect sizes, and 95% CI
+extract_summary_with_ci <- function(model_summary) {
+  coef_table <- as.data.frame(model_summary$p.table)
+  coef_table$Variable <- rownames(coef_table) # Add variable names
+  coef_table$LowerCI <- coef_table$Estimate - 1.96 * coef_table$`Std. Error`
+  coef_table$UpperCI <- coef_table$Estimate + 1.96 * coef_table$`Std. Error`
+  coef_table$Effect_Size_CI <- paste0(
+    round(coef_table$Estimate, 4), 
+    " (", round(coef_table$LowerCI, 4), ", ", round(coef_table$UpperCI, 4), ")"
+  )
+  return(coef_table[, c("Variable", "Effect_Size_CI", "Pr(>|t|)")])
+}
+
+# Extract summaries
+summary_with_mitigation <- extract_summary_with_ci(summary(gam_model_with_mitigation))
+summary_without_mitigation <- extract_summary_with_ci(summary(gam_model_without_mitigation))
+
+summary(gam_model_with_mitigation)
+
+# Write summaries to Excel
+write_xlsx(list(
+  "With Mitigation" = summary_with_mitigation,
+  "Without Mitigation" = summary_without_mitigation
+), "GAM_Model_Summaries_With_CI.xlsx")
+
+```
+
+```{r, include=FALSE}
+#Simplified model
+
+library(dplyr)
+library(MASS)
+library(writexl)
+
+# Ensure your outcome variables are numeric and log-transformed
+data_cleaned$Tx_withdrawl_no_reason_rate <- as.numeric(data_cleaned$Tx_withdrawl_no_reason_rate)
+data_cleaned$Cr_withdrawl_no_reason_rate <- as.numeric(data_cleaned$Cr_withdrawl_no_reason_rate)
+
+data_cleaned$log_total_withdrawl_noreason_rate <- log(data_cleaned$total_withdrawl_noreason_rate + 1e-8)
+data_cleaned$log_Tx_withdrawl_no_reason_rate <- log(data_cleaned$Tx_withdrawl_no_reason_rate + 1e-8)
+data_cleaned$log_Cr_withdrawl_no_reason_rate <- log(data_cleaned$Cr_withdrawl_no_reason_rate + 1e-8)
+
+# Define predictors
+all_predictors <- c(
+  "Unblinding_Or_Cross_Over", "Mono_Or_Combo_Therapy_In_Interventional_Arm", "Solid_neoadjuvant", "Heme_Relapsed_and_or_referactory", "Solid_radition_systemic_tx",
+  "Mono_Or_Combo_Therapy_In_Control_Arm", "Scaled_Number_Enrolled_In_Trial", "Scaled_Follow_Up_Period_Years",
+  "Solid_Metastatic_tx_naieve", "Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal",
+  "Sponser", "Heme_Treatment_naieve", "Randomized", "Control_Group_1_placebo_2SOCalone_3_none",
+  "Study_Type", "Location_Of_Trial", "Solid_adjuvant_after_defintive_tx", 
+  "Blinding_Practice_1_pt_blind_0_open", "Single_Site_Or_Multi_Site", 
+  "Non_Specific_Effort", "No_Mitigation_Stratigies"
+)
+
+# Define outcomes and labels
+outcomes <- c(
+  "log_total_withdrawl_noreason_rate",
+  "log_Tx_withdrawl_no_reason_rate",
+  "log_Cr_withdrawl_no_reason_rate"
+)
+labels <- c("Total", "TxArm", "CrArm")
+
+# Loop through each outcome and run model
+for (i in seq_along(outcomes)) {
+  outcome <- outcomes[i]
+  label <- labels[i]
+  
+  # Remove missing data
+  complete_vars <- c(outcome, all_predictors)
+  data_complete <- data_cleaned[complete.cases(data_cleaned[, complete_vars]), ]
+  
+  # Build formula
+  full_formula <- as.formula(paste(outcome, "~", paste(all_predictors, collapse = " + ")))
+  
+  # Fit model
+  initial_model <- lm(full_formula, data = data_complete)
+  stepwise_model <- stepAIC(initial_model, direction = "both")
+  
+  # Extract summary
+  model_summary <- summary(stepwise_model)
+  # Capture model metrics
+metrics <- data.frame(
+  Outcome = label,
+  N = nobs(stepwise_model),
+  R2 = round(model_summary$r.squared, 4),
+  Adj_R2 = round(model_summary$adj.r.squared, 4),
+  AIC = round(AIC(stepwise_model), 2),
+  Residual_SE = round(model_summary$sigma, 4),
+  DF_Residual = model_summary$df[2]
+)
+
+# Store or append metrics to a master data frame
+if (i == 1) {
+  model_metrics_all <- metrics
+} else {
+  model_metrics_all <- rbind(model_metrics_all, metrics)
+}
+  results_table <- data.frame(
+    Variable = rownames(model_summary$coefficients),
+    Estimate = model_summary$coefficients[, "Estimate"],
+    StdError = model_summary$coefficients[, "Std. Error"],
+    LowerCI = model_summary$coefficients[, "Estimate"] - 1.96 * model_summary$coefficients[, "Std. Error"],
+    UpperCI = model_summary$coefficients[, "Estimate"] + 1.96 * model_summary$coefficients[, "Std. Error"],
+    PValue = model_summary$coefficients[, "Pr(>|t|)"]
+  )
+  
+  # Exponentiate
+  results_table$Exponentiated_Estimate <- exp(results_table$Estimate)
+  results_table$LowerCI_Unlogged <- exp(results_table$LowerCI)
+  results_table$UpperCI_Unlogged <- exp(results_table$UpperCI)
+  results_table$EffectSize_CI_Unlogged <- paste0(
+    round(results_table$Exponentiated_Estimate, 4),
+    " (", round(results_table$LowerCI_Unlogged, 4), ", ",
+    round(results_table$UpperCI_Unlogged, 4), ")"
+  )
+  
+  # Keep only selected columns
+  export_table <- results_table[, c("Variable", "EffectSize_CI_Unlogged", "PValue")]
+  
+ # Save all model metrics to Excel
+write_xlsx(model_metrics_all, "Multivariable_Model_Metrics.xlsx")
+}
+
+
+
+```
+
+
+```{r, include=FALSE}
+#Interaction term
+
+library(tidyr)
+library(dplyr)
+
+# Ensure numeric
+data_cleaned$Tx_withdrawl_no_reason_rate <- as.numeric(data_cleaned$Tx_withdrawl_no_reason_rate)
+data_cleaned$Cr_withdrawl_no_reason_rate <- as.numeric(data_cleaned$Cr_withdrawl_no_reason_rate)
+
+
+# Use dplyr::select instead of just select
+data_long <- data_cleaned %>%
+  dplyr::select(Trial_number, all_of(all_predictors), Tx_withdrawl_no_reason_rate, Cr_withdrawl_no_reason_rate) %>%
+  pivot_longer(
+    cols = c(Tx_withdrawl_no_reason_rate, Cr_withdrawl_no_reason_rate),
+    names_to = "Arm",
+    values_to = "Withdraw_No_Reason_Rate"
+  ) %>%
+  mutate(
+    log_withdrawal_rate = log(as.numeric(Withdraw_No_Reason_Rate) + 1e-8),
+    Arm = ifelse(Arm == "Tx_withdrawl_no_reason_rate", "Tx", "Cr"),
+    Arm = factor(Arm, levels = c("Cr", "Tx"))
+  )
+
+library(MASS)
+
+# Add interaction between Arm and all predictors
+interaction_formula <- as.formula(paste(
+  "log_withdrawal_rate ~ Arm * (", 
+  paste(all_predictors, collapse = " + "), ")"
+))
+
+# Define all variables used in the model
+model_vars <- c("log_withdrawal_rate", "Arm", all_predictors)
+
+# Filter to only complete cases
+data_model <- data_long %>%
+  filter(complete.cases(across(all_of(model_vars))))
+
+# Fit linear model with interaction
+interaction_formula <- as.formula(paste(
+  "log_withdrawal_rate ~ Arm * (", paste(all_predictors, collapse = " + "), ")"
+))
+
+interaction_model <- lm(interaction_formula, data = data_model)
+
+# Run stepwise selection safely
+library(MASS)
+step_model <- stepAIC(interaction_model, direction = "both")
+
+# Check summary
+summary(step_model)
+
+library(writexl)
+
+# Extract model summary
+model_summary <- summary(step_model)
+
+# Coefficient table
+results_table <- data.frame(
+  Variable = rownames(model_summary$coefficients),
+  Estimate = model_summary$coefficients[, "Estimate"],
+  StdError = model_summary$coefficients[, "Std. Error"],
+  LowerCI = model_summary$coefficients[, "Estimate"] - 1.96 * model_summary$coefficients[, "Std. Error"],
+  UpperCI = model_summary$coefficients[, "Estimate"] + 1.96 * model_summary$coefficients[, "Std. Error"],
+  PValue = model_summary$coefficients[, "Pr(>|t|)"]
+)
+
+# Exponentiate
+results_table$Exponentiated_Estimate <- exp(results_table$Estimate)
+results_table$LowerCI_Unlogged <- exp(results_table$LowerCI)
+results_table$UpperCI_Unlogged <- exp(results_table$UpperCI)
+results_table$EffectSize_CI_Unlogged <- paste0(
+  round(results_table$Exponentiated_Estimate, 4), 
+  " (", round(results_table$LowerCI_Unlogged, 4), ", ", 
+  round(results_table$UpperCI_Unlogged, 4), ")"
+)
+
+# Final exportable table
+export_table <- results_table[, c("Variable", "EffectSize_CI_Unlogged", "PValue")]
+
+# Model metrics
+metrics_table <- data.frame(
+  Metric = c(
+    "Residual Standard Error", 
+    "Degrees of Freedom (Residual)", 
+    "Multiple R-squared", 
+    "Adjusted R-squared", 
+    "F-statistic", 
+    "F-statistic Degrees of Freedom", 
+    "F-statistic p-value"
+  ),
+  Value = c(
+    model_summary$sigma,
+    model_summary$df[2],
+    model_summary$r.squared,
+    model_summary$adj.r.squared,
+    model_summary$fstatistic[1],
+    paste(model_summary$fstatistic[2], "and", model_summary$fstatistic[3]),
+    pf(model_summary$fstatistic[1], model_summary$fstatistic[2], model_summary$fstatistic[3], lower.tail = FALSE)
+  )
+)
+
+# Export both to Excel
+write_xlsx(
+  list(
+    "Model Results" = export_table,
+    "Model Metrics" = metrics_table
+  ),
+  path = "Interaction_Model_with_Metrics.xlsx"
+)
+
+```
+
+
+```{r}
+#Figure 1
+
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(readxl)
+
+
+# Load the data
+data <- read_excel("AK_Clean_Temp_4.xlsx", col_types = c("text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", "text", "text", "text",
+     "text", "text", "numeric", "text", "text", 
+     "text", "text", "text", "text", "text", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", "numeric",
+     "numeric", "numeric", "numeric", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", 
+     "text","text","text","text","text", "text","text","text","text","text","text"))
+
+# Combine "Noncompliance", "Withdrew (No Reason) Total", and "Lost to Follow-up" into "withdrew_no_reason"
+data$withdrew_no_reason <- with(data, total_withdrew_because_noncompliance + total_withdrew_noreason + lost_fu)
+
+# Correct the total count for "Other Specified Reasons" by subtracting 1169 once
+total_withdraw_other_specified <- sum(data$total_withdrew_because_other_specified_reason, na.rm = TRUE) - 1169
+
+# Create the summary data frame
+summary_data <- data.frame(
+  Reason = c(
+    "Sponsor Termination",
+    "TRAE",
+    "POD",
+    "Other Specified Reasons",
+    "Ineligibility",
+    "Death",
+    "Maximum Clinical Benefit",
+    "NOS",
+    "Withdrew (No Reason)"
+  ),
+  Total_Count = c(
+    sum(data$total_discontinued_study_termination, na.rm = TRUE),
+    sum(data$total_withdrew_because_ae, na.rm = TRUE),
+    sum(data$total_withdrew_because_pod, na.rm = TRUE),
+    total_withdraw_other_specified,  # Use the corrected total
+    sum(data$total_withdrew_because_exclusioncriteria, na.rm = TRUE),
+    sum(data$total_withdrew_because_death, na.rm = TRUE),
+    sum(data$total_withdrew_ineffective_tx, na.rm = TRUE),
+    1169,
+    sum(data$withdrew_no_reason, na.rm = TRUE)
+  )
+)
+
+# Calculate overall withdrawal count
+overall_withdrawal <- sum(summary_data$Total_Count, na.rm = TRUE)
+
+# Add percentage, SE, lower, and upper bounds
+summary_data <- summary_data %>%
+  mutate(
+    Percentage = round((Total_Count / overall_withdrawal) * 100, 2),
+    SE = ifelse(
+      Percentage > 0 & Percentage < 100,
+      sqrt((Percentage / 100) * (1 - Percentage / 100) / overall_withdrawal) * 100,
+      0
+    ),
+    Lower_SE = pmax(0, Percentage - SE),
+    Upper_SE = pmin(100, Percentage + SE)
+  )
+
+# Display the updated summary data
+summary_data
+
+# Combine "NOS" and "Other Specified Reasons" into a single category for the plot
+summary_data_combined <- summary_data %>%
+  mutate(
+    Reason = ifelse(Reason %in% c("NOS", "Other Specified Reasons"), "Other/NOS", Reason)
+  ) %>%
+  group_by(Reason) %>%
+  summarize(
+    Total_Count = sum(Total_Count, na.rm = TRUE),
+    SE = sqrt(sum((SE / 100)^2, na.rm = TRUE)) * 100,  # Combine SE values
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Percentage = round((Total_Count / overall_withdrawal) * 100, 2),
+    Lower_SE = pmax(0, Percentage - SE),
+    Upper_SE = pmin(100, Percentage + SE)
+  )
+
+# Create the bar plot with the combined data
+ggplot(summary_data_combined, aes(x = reorder(Reason, -Percentage), y = Percentage, fill = Reason)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_errorbar(aes(ymin = Lower_SE, ymax = Upper_SE), width = 0.2) +
+  labs(
+    x = "Reason",
+    y = "% of Trial Discontinuations",
+    title = "Proportion of Trial Discontinuations by Reason"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+```
+
+```{r}
+
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+
+# Calculate percentages for the selected reasons
+percentage_data <- data.frame(
+  Reason = c(
+    "Noncompliance",
+    "Withdrew (No Reason) Total",
+    "Lost to Follow-up"
+  ),
+  Total_Count = c(
+    sum(data$total_withdrew_because_noncompliance, na.rm = TRUE),
+    sum(data$total_withdrew_noreason, na.rm = TRUE),
+    sum(data$lost_fu, na.rm = TRUE)
+  )
+)
+
+# Number of patients enrolled in trials
+total_enrolled <- sum(data$Number_Enrolled_In_Trial, na.rm = TRUE)
+
+# Calculate percentages and standard errors
+percentage_data <- percentage_data %>%
+  mutate(
+    Percentage = (Total_Count / total_enrolled) * 100,
+    SE = sqrt((Percentage / 100) * (1 - Percentage / 100) / total_enrolled) * 100,
+    Lower_SE = pmax(0, Percentage - SE),
+    Upper_SE = pmin(100, Percentage + SE)
+  )
+
+# Reorder the data by descending percentage
+percentage_data <- percentage_data %>%
+  arrange(desc(Percentage)) %>%
+  mutate(Reason = factor(Reason, levels = Reason))
+
+# Create the bar graph
+ggplot(percentage_data, aes(x = Reason, y = Percentage, fill = Reason)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_errorbar(aes(ymin = Lower_SE, ymax = Upper_SE), width = 0.2) +
+  labs(
+    x = "Reason for withdrawal",
+    y = "Percentage of Patients Enrolled in Trial (%)"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 10),  # Set Y-axis max to 10%
+    breaks = seq(0, 10, by = 2),  # Set intervals to 2%
+    expand = c(0, 0)
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+```
+
+
+```{r}
+
+
+# Load necessary libraries
+library(ggplot2)
+
+# Ensure the column "total_withdrawl_noreason_rate" exists in the dataset
+if ("total_withdrawl_noreason_rate" %in% colnames(data)) {
+  
+  # Create a box-and-whiskers plot
+  ggplot(data, aes(y = total_withdrawl_noreason_rate)) +
+    geom_boxplot(fill = "lightblue", color = "black", outlier.color = "red", outlier.shape = 16) +
+    labs(
+      title = "",
+      x = "",
+      y = "Unclear withdrawl rate per trial"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+  
+} else {
+  cat("The column 'total_withdrawl_noreason_rate' does not exist in the dataset.")
+}
+
+```
+```{r}
+
+# Descriptive analysis for mitigation practices
+library(dplyr)
+library(tidyr)
+
+
+
+# Define the specified columns for mitigation practices
+specified_columns <- c(
+  "Contact_Patients_Lost_To_FU", "Encouragement", "Home_Nursing", 
+  "No_Mitigation_Stratigies", "Patient_Education", 
+  "Supportive_Care", "Telemedicine", "Non_Specific_Effort", 
+  "Unblinding_Or_Cross_Over", 
+  "Continued_Tx_After_Withdrawl_Or_Re_Challenge"
+)
+
+# Ensure the specified columns exist in the dataset
+missing_columns <- setdiff(specified_columns, colnames(data_cleaned))
+if (length(missing_columns) > 0) {
+  stop(paste("The following columns are missing from the dataset:", paste(missing_columns, collapse = ", ")))
+}
+
+
+# Summarize counts
+summary_table <- data_cleaned %>%
+  summarize(across(all_of(c(specified_columns)), ~ sum(as.numeric(.), na.rm = TRUE))) %>%
+  pivot_longer(cols = everything(), names_to = "Reason", values_to = "Count")
+
+# Calculate total count to use for percentage calculation
+total_count <- 300
+
+# Add percentage and format output
+summary_table <- summary_table %>%
+  mutate(
+    Percentage = round((Count / total_count) * 100, 1),
+    Value = paste0(Count, " (", Percentage, "%)")
+  ) %>%
+  dplyr::select(Reason, Value)  # Explicitly call select() from dplyr
+
+# Display the final summary table
+print(summary_table)
+
+
+
+```
+```{r}
+
+
+# Mitigation practice graph
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(writexl)
+library(ggplot2)
+
+# Define the specified columns for mitigation practices
+specified_columns <- c(
+  "Contact_Patients_Lost_To_FU", "Encouragement", "Home_Nursing", 
+  "No_Mitigation_Stratigies", "Patient_Education" ,
+  "Supportive_Care", "Telemedicine", "Non_Specific_Effort", 
+  "Unblinding_Or_Cross_Over", 
+  "Continued_Tx_After_Withdrawl_Or_Re_Challenge"
+)
+
+# Ensure the specified columns exist in the dataset
+missing_columns <- setdiff(specified_columns, colnames(data_cleaned))
+if (length(missing_columns) > 0) {
+  stop(paste("The following columns are missing from the dataset:", paste(missing_columns, collapse = ", ")))
+}
+
+# Calculate count and percentage for each specified column
+summary_table <- data_cleaned %>%
+  summarize(across(all_of(specified_columns), ~ sum(as.numeric(.), na.rm = TRUE))) %>%
+  pivot_longer(cols = everything(), names_to = "Reason", values_to = "Count")
+
+# Calculate total count to use for percentage calculation
+total_count <- sum(summary_table$Count, na.rm = TRUE)
+
+# Add percentage and standard errors
+summary_table <- summary_table %>%
+  mutate(
+    Percentage = round((Count / total_count) * 100, 1),
+    SE = round(sqrt((Percentage / 100) * (1 - (Percentage / 100)) / total_count) * 100, 1),
+    Lower_SE = pmax(0, Percentage - SE),
+    Upper_SE = pmin(100, Percentage + SE)
+  )
+
+# Combine rows with percentages less than 3% into "Other"
+summary_table <- summary_table %>%
+  mutate(
+    Reason = ifelse(Percentage < 3, "Other", Reason)
+  ) %>%
+  group_by(Reason) %>%
+  summarise(
+    Count = sum(Count, na.rm = TRUE),
+    Percentage = round((Count / total_count) * 100, 1),
+    SE = round(sqrt((Percentage / 100) * (1 - (Percentage / 100)) / total_count) * 100, 1),
+    Lower_SE = pmax(0, Percentage - SE),
+    Upper_SE = pmin(100, Percentage + SE)
+  ) %>%
+  arrange(desc(Percentage))
+
+# Export the updated summary table to Excel
+write_xlsx(summary_table, "Specified_Columns_Summary_Updated_with_SE.xlsx")
+
+# Plot a bar chart with standard error bars
+ggplot(summary_table, aes(x = reorder(Reason, -Percentage), y = Percentage, fill = Reason)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_errorbar(aes(ymin = Lower_SE, ymax = Upper_SE), width = 0.2) +
+  labs(
+    x = "",
+    y = "% of clinical trials",
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"  # Remove legend
+  )
+
+
+```
+
+
+```{r}
+
+
+# Data availability after withdrawal and need for clear reasons for withdrawal graph
+# Load the data
+data_cleaned <-  read_excel("AK_Clean_Temp_4.xlsx", col_types = c("text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", "text", "text", "text",
+     "text", "text", "numeric", "text", "text", 
+     "text", "text", "text", "text", "text", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", "numeric",
+     "numeric", "numeric", "numeric", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", 
+     "text","text","text","text","text", "text","text","text","text","text","text"))
+
+# Modify columns
+data_cleaned <- data_cleaned %>%
+  mutate(
+    Data_Availability_After_Withdrawl = ifelse(Data_Availability_After_Withdrawl == "Unclear", "Not Addressed", Data_Availability_After_Withdrawl),
+    Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal = ifelse(Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal %in% c("Unclear", "No"), "No", Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal)
+  )
+
+# Define the columns to summarize
+columns_to_summarize <- c(
+  "Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal", 
+  "Data_Availability_After_Withdrawl"
+)
+
+# Ensure the columns exist in the dataset
+missing_columns <- setdiff(columns_to_summarize, colnames(data_cleaned))
+if (length(missing_columns) > 0) {
+  stop(paste("The following columns are missing from the dataset:", paste(missing_columns, collapse = ", ")))
+}
+
+# Calculate counts, percentages, and standard errors for each column
+summary_table <- lapply(columns_to_summarize, function(column) {
+  data_cleaned %>%
+    count(!!sym(column)) %>%
+    rename(Response = !!sym(column), Count = n) %>%
+    mutate(
+      Percentage = round((Count / sum(Count)) * 100, 1),
+      SE = round(sqrt((Percentage / 100) * (1 - (Percentage / 100)) / sum(Count)) * 100, 1),
+      Lower_SE = pmax(0, Percentage - SE),
+      Upper_SE = pmin(100, Percentage + SE),
+      Variable = column  # Add 'Variable' column inline
+    )
+}) %>%
+  bind_rows()  # Combine results into a single data frame
+
+# Export the summary to an Excel file
+write_xlsx(list("Counts_and_Percentages" = summary_table), path = "Counts_and_Percentages_Summary_with_SE.xlsx")
+
+# Add an additional variable for facet titles at the bottom
+summary_table <- summary_table %>%
+  mutate(
+    Facet_Title = case_when(
+      Variable == "Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal" ~ "Did trial state need for clearly documented reasons?",
+      Variable == "Data_Availability_After_Withdrawl" ~ "Data availability after withdrawal?"
+    )
+  )
+
+# Plot a bar chart with error bars using standard errors
+ggplot(summary_table, aes(x = Response, y = Percentage, fill = Response)) +
+  geom_bar(stat = "identity", color = "black", width = 0.7) +
+  geom_errorbar(aes(ymin = Lower_SE, ymax = Upper_SE), width = 0.2) +
+  facet_wrap(~Facet_Title, scales = "free_x", strip.position = "bottom") +
+  labs(
+    x = NULL,  # Remove default x-axis label
+    y = "Percentage (%)",
+    title = NULL  # Remove default title
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 12, face = "bold"),
+    strip.placement = "bottom",  # Place facet titles at the bottom
+    panel.spacing = unit(2, "lines"),
+    legend.position = "none"  # Remove legend
+  )
+
+
+```
+

@@ -1,0 +1,1470 @@
+---
+title: "Outcomes for Persistent Low ctDNA Pattern - Landmark Analysis"
+author: "Alex"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+**CLINICAL FRAMEWORK - Key Questions:**
+1. **When is ctDNA assessed?** During a landmark period (6 or 12 months) starting from a clinical event (cystectomy, first adjuvant therapy, first palliative therapy, or first immunotherapy).
+2. **What is the landmark date?** The landmark date is the END of the landmark period (landmark start date + 6 or 12 months). This becomes time 0 for survival outcomes.
+3. **Are patients on or off treatment?** Treatment status may vary during the landmark period - the analysis tracks whether patients are on active treatment during this time.
+4. **What ctDNA pattern is assessed?** The pattern is classified based on ALL measurements during the landmark period (persistently undetectable, persistently low level, or all other detectable profiles).
+5. **What outcomes are measured?** Survival outcomes (OS, DCR, TTNT) are measured FROM the landmark date forward, ensuring ctDNA patterns are assessed before outcomes.
+
+**ctDNA Pattern Groups:**
+- **Persistently Low Level**: Requires at least 3 ctDNA tests during the landmark period. At least 2 tests must be positive and below the median threshold (calculated from all positive ctDNA values post-landmark). The 3rd test can be 0 or positive below the median. All positive values must remain below the median threshold. This group represents patients with consistently low but detectable ctDNA levels. (Reference group for Cox models)
+- **Persistently Undetectable**: All ctDNA measurements = 0 during landmark period, ≥1 measurement
+- **All Other Detectable Profiles**: Any ctDNA measurement ≥ median threshold during landmark period
+
+**Duration of Complete Response (DCR) Calculation:**
+DCR is calculated from the landmark date forward. A DCR event is defined as:
+- Death (any cause), OR
+- Imaging evidence of disease present (loss of complete response)
+
+DCR time is calculated as the time from the landmark date to the earliest of: death date or last follow-up date (for censored patients). Patients without an event (alive with no disease on imaging) are censored at their last follow-up date.
+
+**Time to Next Treatment (TTNT) Calculation:**
+TTNT is calculated from the landmark date forward. A TTNT event is defined as:
+- Start of next line of therapy after landmark, OR
+- Death (any cause)
+
+TTNT time is calculated as the time from the landmark date to the earliest of: next therapy start date, death date, or last follow-up date (for censored patients). Patients without an event (alive and no next therapy by last follow-up) are censored at their last follow-up date.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, comment = "")
+knitr::opts_knit$set(root.dir = "~/R")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load shared setup
+source("ctDNA_Research_Questions_Shared_Setup.R")
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(ggplot2)
+  library(survival)
+  library(survminer)
+  library(knitr)
+  library(kableExtra)
+})
+```
+
+```{r load_data, include=FALSE}
+# Load minimal data
+data_list <- load_minimal_data(include_survival = TRUE)
+dat_combined <- data_list$dat_combined
+ctdna_long <- data_list$ctdna_long
+survival_data <- data_list$survival_data
+```
+
+```{r setup_data, include=FALSE}
+# ====================================================================================
+# SETUP: Extract all necessary data for landmark analyses
+# ====================================================================================
+
+# Define landmark period length - will be determined after testing sample sizes
+
+# Extract cystectomy date
+surgery_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("surgery.*1.*date|cystectomy.*date|first.*surgery.*date", ignore_case = TRUE))]
+if (length(surgery_date_cols) == 0) {
+  surgery_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("definitive.*surgery|radical.*cystectomy", ignore_case = TRUE))]
+}
+
+cystectomy_patients <- dat_combined %>%
+  select(patient_id, all_of(surgery_date_cols)) %>%
+  mutate(
+    cystectomy_date = if (length(surgery_date_cols) > 0) {
+      as_date_safe(.data[[surgery_date_cols[1]]])
+    } else {
+      as.Date(NA)
+    }
+  ) %>%
+  filter(!is.na(cystectomy_date)) %>%
+  select(patient_id, cystectomy_date)
+
+# Extract systemic therapy data
+all_treatments_list <- list()
+for (i in 1:10) {
+  therapy_col <- paste0("systemic_therapy_", i)
+  start_col <- paste0("systemic_therapy_", i, "_start_date")
+  end_col <- paste0("systemic_therapy_", i, "_end_date")
+  setting_col <- paste0("systemic_therapy_", i, "_treatment_setting")
+  
+  if (therapy_col %in% names(dat_combined) && start_col %in% names(dat_combined)) {
+    therapy_data <- dat_combined %>%
+      select(patient_id, regimen = all_of(therapy_col), start_date = all_of(start_col),
+             end_date = if (end_col %in% names(dat_combined)) all_of(end_col) else NULL,
+             setting = if (setting_col %in% names(dat_combined)) all_of(setting_col) else NULL) %>%
+      mutate(
+        regimen = as.character(regimen),
+        start_date = as_date_safe(start_date),
+        end_date = if (end_col %in% names(dat_combined)) as_date_safe(end_date) else as.Date(NA),
+        setting = if (setting_col %in% names(dat_combined)) as.character(setting) else NA_character_,
+        therapy_num = i
+      ) %>%
+      filter(!is.na(regimen), !is.na(start_date), regimen != "", regimen != "NA", 
+             !str_detect(tolower(regimen), "^na$|^none$|^n/a$"))
+    
+    if (nrow(therapy_data) > 0) {
+      all_treatments_list[[length(all_treatments_list) + 1]] <- therapy_data
+    }
+  }
+}
+
+# Process all treatments
+if (length(all_treatments_list) > 0) {
+  all_treatments <- bind_rows(all_treatments_list) %>%
+    mutate(
+      is_adjuvant = str_detect(tolower(setting), "adjuvant"),
+      is_palliative = str_detect(tolower(setting), "palliative"),
+      is_immunotherapy = str_detect(tolower(regimen), "umab$"),
+      # Identify chemotherapy (common chemo drugs, excluding immunotherapy and ADC)
+      is_chemotherapy = str_detect(tolower(regimen), "gemcitabine|cisplatin|carboplatin|methotrexate|vinblastine|doxorubicin|paclitaxel|docetaxel|ifosfamide|cyclophosphamide") & 
+                       !str_detect(tolower(regimen), "umab$") &
+                       !str_detect(tolower(regimen), "enfortumab|sacituzumab|trodelvy|padcev"),
+      # Identify ADC (antibody-drug conjugates)
+      is_adc = str_detect(tolower(regimen), "enfortumab|sacituzumab|trodelvy|padcev|adc")
+    )
+  
+  therapy_starts <- all_treatments %>%
+    group_by(patient_id) %>%
+    summarise(
+      first_adjuvant_date = min(start_date[is_adjuvant], na.rm = TRUE),
+      first_palliative_date = min(start_date[is_palliative], na.rm = TRUE),
+      first_immunotherapy_date = min(start_date[is_immunotherapy], na.rm = TRUE),
+      first_chemotherapy_date = min(start_date[is_chemotherapy], na.rm = TRUE),
+      first_adc_date = min(start_date[is_adc], na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      first_adjuvant_date = as.Date(ifelse(is.infinite(first_adjuvant_date), NA, first_adjuvant_date), origin = "1970-01-01"),
+      first_palliative_date = as.Date(ifelse(is.infinite(first_palliative_date), NA, first_palliative_date), origin = "1970-01-01"),
+      first_immunotherapy_date = as.Date(ifelse(is.infinite(first_immunotherapy_date), NA, first_immunotherapy_date), origin = "1970-01-01"),
+      first_chemotherapy_date = as.Date(ifelse(is.infinite(first_chemotherapy_date), NA, first_chemotherapy_date), origin = "1970-01-01"),
+      first_adc_date = as.Date(ifelse(is.infinite(first_adc_date), NA, first_adc_date), origin = "1970-01-01")
+    )
+} else {
+  therapy_starts <- tibble(
+    patient_id = character(0),
+    first_adjuvant_date = structure(numeric(0), class = "Date"),
+    first_palliative_date = structure(numeric(0), class = "Date"),
+    first_immunotherapy_date = structure(numeric(0), class = "Date"),
+    first_chemotherapy_date = structure(numeric(0), class = "Date"),
+    first_adc_date = structure(numeric(0), class = "Date")
+  )
+}
+
+# Extract survival outcomes data
+death_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                       !str_detect(names(dat_combined), regex("cause|reason", ignore_case = TRUE))]
+survival_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                     !str_detect(names(dat_combined), regex("death", ignore_case = TRUE))]
+alive_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^alive_yes_no$|alive.*yes.*no", ignore_case = TRUE))]
+imaging_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("obvious.*disease.*imaging|disease.*present.*imaging", ignore_case = TRUE))]
+metastatic_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("metastatic.*disease.*ever|metastatic.*diagnosed", ignore_case = TRUE))]
+
+# ====================================================================================
+# Determine optimal landmark period (6 vs 12 months) based on sample sizes
+# ====================================================================================
+
+# Get ctDNA measurements after cystectomy for testing
+ctdna_post_cyst_test <- ctdna_long %>%
+  inner_join(cystectomy_patients, by = "patient_id") %>%
+  filter(ctdna_date >= cystectomy_date) %>%
+  arrange(patient_id, ctdna_date)
+
+# Calculate median ctDNA threshold
+all_positive_ctdna_test <- ctdna_post_cyst_test %>%
+  filter(ctdna_value > 0, !is.na(ctdna_value))
+median_ctdna_threshold_test <- median(all_positive_ctdna_test$ctdna_value, na.rm = TRUE)
+
+# Test 6 months
+ctdna_test_6mo <- ctdna_post_cyst_test %>%
+  mutate(days_from_cyst = as.numeric(ctdna_date - cystectomy_date)) %>%
+  filter(days_from_cyst >= 0, days_from_cyst <= 180) %>%
+  group_by(patient_id) %>%
+  summarise(
+    n_measurements = n(),
+    n_positive = sum(ctdna_value > 0, na.rm = TRUE),
+    all_zero = all(ctdna_value == 0 | is.na(ctdna_value), na.rm = TRUE),
+    all_under_median = all(ctdna_value < median_ctdna_threshold_test, na.rm = TRUE),
+    any_above_median = any(ctdna_value >= median_ctdna_threshold_test, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ctdna_group_6mo = case_when(
+      all_zero == TRUE & n_measurements >= 1 ~ "Persistently Undetectable",
+      n_measurements >= 3 & n_positive >= 2 & all_under_median == TRUE & !all_zero ~ "Persistently Low Level",
+      any_above_median == TRUE ~ "All Other Detectable Profiles",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  filter(ctdna_group_6mo %in% c("Persistently Undetectable", "Persistently Low Level", "All Other Detectable Profiles"))
+
+# Test 12 months
+ctdna_test_12mo <- ctdna_post_cyst_test %>%
+  mutate(days_from_cyst = as.numeric(ctdna_date - cystectomy_date)) %>%
+  filter(days_from_cyst >= 0, days_from_cyst <= 365) %>%
+  group_by(patient_id) %>%
+  summarise(
+    n_measurements = n(),
+    n_positive = sum(ctdna_value > 0, na.rm = TRUE),
+    all_zero = all(ctdna_value == 0 | is.na(ctdna_value), na.rm = TRUE),
+    all_under_median = all(ctdna_value < median_ctdna_threshold_test, na.rm = TRUE),
+    any_above_median = any(ctdna_value >= median_ctdna_threshold_test, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ctdna_group_12mo = case_when(
+      all_zero == TRUE & n_measurements >= 1 ~ "Persistently Undetectable",
+      n_measurements >= 3 & n_positive >= 2 & all_under_median == TRUE & !all_zero ~ "Persistently Low Level",
+      any_above_median == TRUE ~ "All Other Detectable Profiles",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  filter(ctdna_group_12mo %in% c("Persistently Undetectable", "Persistently Low Level", "All Other Detectable Profiles"))
+
+# Compare sample sizes - prioritize persistently low level group size
+n_6mo_total <- nrow(ctdna_test_6mo)
+n_12mo_total <- nrow(ctdna_test_12mo)
+n_6mo_low <- sum(ctdna_test_6mo$ctdna_group_6mo == "Persistently Low Level", na.rm = TRUE)
+n_12mo_low <- sum(ctdna_test_12mo$ctdna_group_12mo == "Persistently Low Level", na.rm = TRUE)
+
+# Use 12 months if it gives more patients overall OR more in persistently low level group
+if (n_12mo_total > n_6mo_total || n_12mo_low > n_6mo_low) {
+  landmark_days <- 365
+  landmark_months <- 12
+  cat("Using 12-month landmark period (Total: ", n_12mo_total, ", Persistently Low: ", n_12mo_low, ")\n")
+} else {
+  landmark_days <- 180
+  landmark_months <- 6
+  cat("Using 6-month landmark period (Total: ", n_6mo_total, ", Persistently Low: ", n_6mo_low, ")\n")
+}
+```
+
+```{r run_all_landmarks, include=FALSE}
+# ====================================================================================
+# FUNCTION: Run landmark analysis for a given landmark type
+# ====================================================================================
+
+run_landmark_analysis <- function(landmark_type_name, landmark_start_col) {
+  
+  # Get landmark start dates
+  landmark_starts <- cystectomy_patients %>%
+    left_join(therapy_starts, by = "patient_id") %>%
+    mutate(
+      landmark_start_date = .data[[landmark_start_col]],
+      landmark_type = landmark_type_name
+    ) %>%
+    filter(!is.na(landmark_start_date)) %>%
+    mutate(landmark_date = landmark_start_date + days(landmark_days))
+  
+  # Filter to patients who received the therapy (if applicable)
+  if (landmark_type_name != "Cystectomy") {
+    landmark_starts <- landmark_starts %>%
+      filter(!is.na(.data[[landmark_start_col]]))
+  }
+  
+  # Get ctDNA measurements after landmark start
+  ctdna_post_landmark <- ctdna_long %>%
+    inner_join(landmark_starts %>% select(patient_id, landmark_start_date), by = "patient_id") %>%
+    filter(ctdna_date >= landmark_start_date) %>%
+    arrange(patient_id, ctdna_date)
+  
+  # Calculate median ctDNA threshold
+  all_positive_ctdna <- ctdna_post_landmark %>%
+    filter(ctdna_value > 0, !is.na(ctdna_value))
+  median_ctdna_threshold <- median(all_positive_ctdna$ctdna_value, na.rm = TRUE)
+  
+  # Get ctDNA during landmark period with trend calculation
+  # ctdna_post_landmark already has landmark_start_date from the join above
+  ctdna_during_landmark_raw <- ctdna_post_landmark %>%
+    mutate(days_from_landmark_start = as.numeric(ctdna_date - landmark_start_date)) %>%
+    filter(days_from_landmark_start >= 0, days_from_landmark_start <= landmark_days) %>%
+    arrange(patient_id, days_from_landmark_start)
+  
+  # Calculate trends using do() to handle per-patient regression
+  ctdna_trends <- ctdna_during_landmark_raw %>%
+    filter(ctdna_value > 0, !is.na(ctdna_value)) %>%
+    group_by(patient_id) %>%
+    summarise(
+      n_positive_for_trend = n(),
+      ctdna_trend_slope = if(n() >= 2) {
+        trend_model <- tryCatch(
+          lm(ctdna_value ~ days_from_landmark_start, data = cur_data()),
+          error = function(e) NULL
+        )
+        if (!is.null(trend_model)) {
+          coef(trend_model)["days_from_landmark_start"]
+        } else {
+          NA_real_
+        }
+      } else {
+        NA_real_
+      },
+      .groups = "drop"
+    ) %>%
+    mutate(
+      trend_direction = case_when(
+        is.na(ctdna_trend_slope) ~ "Unable to assess",
+        ctdna_trend_slope > 0.01 ~ "Increasing",
+        ctdna_trend_slope < -0.01 ~ "Decreasing",
+        TRUE ~ "Stable"
+      )
+    )
+  
+  # Summarize ctDNA during landmark period
+  ctdna_during_landmark <- ctdna_during_landmark_raw %>%
+    group_by(patient_id) %>%
+    summarise(
+      n_measurements = n(),
+      n_positive = sum(ctdna_value > 0, na.rm = TRUE),
+      n_zero = sum(ctdna_value == 0, na.rm = TRUE),
+      all_zero = all(ctdna_value == 0 | is.na(ctdna_value), na.rm = TRUE),
+      all_under_median = all(ctdna_value < median_ctdna_threshold, na.rm = TRUE),
+      any_above_median = any(ctdna_value >= median_ctdna_threshold, na.rm = TRUE),
+      max_ctdna = max(ctdna_value, na.rm = TRUE),
+      median_ctdna = median(ctdna_value[ctdna_value > 0], na.rm = TRUE),
+      first_ctdna_value = first(ctdna_value[!is.na(ctdna_value)]),
+      last_ctdna_value = last(ctdna_value[!is.na(ctdna_value)]),
+      .groups = "drop"
+    ) %>%
+    left_join(ctdna_trends %>% select(patient_id, trend_direction), by = "patient_id") %>%
+    mutate(trend_direction = ifelse(is.na(trend_direction), "Unable to assess", trend_direction))
+  
+  # Classify patients
+  ctdna_patterns <- ctdna_during_landmark %>%
+    mutate(
+      ctdna_group = case_when(
+        all_zero == TRUE & n_measurements >= 1 ~ "Persistently Undetectable",
+        n_measurements >= 3 & n_positive >= 2 & all_under_median == TRUE & !all_zero ~ "Persistently Low Level",
+        any_above_median == TRUE ~ "All Other Detectable Profiles",
+        n_measurements == 0 ~ "Insufficient Data",
+        TRUE ~ "Other"
+      )
+    ) %>%
+    select(patient_id, ctdna_group, n_measurements, n_positive, max_ctdna, median_ctdna, trend_direction)
+  
+  # Add treatment status during landmark period
+  # Determine if patient was on active treatment during the landmark period
+  if (length(all_treatments_list) > 0) {
+    all_treatments_full <- bind_rows(all_treatments_list)
+    
+    treatment_status <- landmark_starts %>%
+      select(patient_id, landmark_start_date) %>%
+      left_join(all_treatments_full, by = "patient_id") %>%
+      mutate(
+        landmark_end_date = landmark_start_date + days(landmark_days),
+        # Treatment is active if it overlaps with landmark period
+        treatment_active_during_landmark = case_when(
+          !is.na(start_date) & is.na(end_date) ~ 
+            start_date <= landmark_end_date,
+          !is.na(start_date) & !is.na(end_date) ~ 
+            start_date <= landmark_end_date & end_date >= landmark_start_date,
+          TRUE ~ FALSE
+        )
+      ) %>%
+      filter(treatment_active_during_landmark == TRUE) %>%
+      group_by(patient_id) %>%
+      summarise(
+        on_treatment_during_landmark = any(treatment_active_during_landmark, na.rm = TRUE),
+        n_active_therapies = sum(treatment_active_during_landmark, na.rm = TRUE),
+        active_therapy_types = paste(unique(regimen[treatment_active_during_landmark]), collapse = "; "),
+        .groups = "drop"
+      )
+    
+    landmark_starts <- landmark_starts %>%
+      left_join(treatment_status, by = "patient_id") %>%
+      mutate(
+        on_treatment_during_landmark = ifelse(is.na(on_treatment_during_landmark), FALSE, on_treatment_during_landmark),
+        n_active_therapies = ifelse(is.na(n_active_therapies), 0, n_active_therapies),
+        active_therapy_types = ifelse(is.na(active_therapy_types), "None", active_therapy_types)
+      )
+  } else {
+    landmark_starts <- landmark_starts %>%
+      mutate(
+        on_treatment_during_landmark = FALSE,
+        n_active_therapies = 0,
+        active_therapy_types = "None"
+      )
+  }
+  
+  # Join to landmark data
+  landmark_data <- landmark_starts %>%
+    inner_join(ctdna_patterns, by = "patient_id") %>%
+    filter(ctdna_group %in% c("Persistently Undetectable", "Persistently Low Level", "All Other Detectable Profiles"))
+  
+  # Extract outcomes
+  outcomes <- landmark_data %>%
+    left_join(
+      dat_combined %>%
+        select(patient_id, all_of(c(death_date_cols, survival_cols, alive_cols, imaging_cols, metastatic_cols))),
+      by = "patient_id"
+    ) %>%
+    mutate(
+      death_date = if (length(death_date_cols) > 0) {
+        as_date_safe(.data[[death_date_cols[1]]])
+      } else {
+        as.Date(NA)
+      },
+      last_fu_date = if (length(survival_cols) > 0) {
+        as_date_safe(.data[[survival_cols[1]]])
+      } else {
+        as.Date(NA)
+      },
+      alive_status = if (length(alive_cols) > 0) {
+        case_when(
+          str_detect(tolower(as.character(.data[[alive_cols[1]]])), "yes|y|1") ~ "Yes",
+          str_detect(tolower(as.character(.data[[alive_cols[1]]])), "no|n|0") ~ "No",
+          TRUE ~ NA_character_
+        )
+      } else {
+        NA_character_
+      },
+      imaging_disease_present = if (length(imaging_cols) > 0) {
+        case_when(
+          str_detect(tolower(as.character(.data[[imaging_cols[1]]])), "yes|y|1") ~ "Yes",
+          str_detect(tolower(as.character(.data[[imaging_cols[1]]])), "no|n|0") ~ "No",
+          TRUE ~ "No"
+        )
+      } else {
+        "No"
+      },
+      metastatic_ever = if (length(metastatic_cols) > 0) {
+        case_when(
+          str_detect(tolower(as.character(.data[[metastatic_cols[1]]])), "yes|y|1") ~ "Yes",
+          str_detect(tolower(as.character(.data[[metastatic_cols[1]]])), "no|n|0") ~ "No",
+          TRUE ~ "Unknown"
+        )
+      } else {
+        "Unknown"
+      }
+    ) %>%
+    mutate(
+      os_event = case_when(
+        !is.na(death_date) ~ 1,
+        alive_status == "No" ~ 1,
+        TRUE ~ 0
+      ),
+      os_censor_date = case_when(
+        !is.na(death_date) ~ death_date,
+        !is.na(last_fu_date) ~ last_fu_date,
+        TRUE ~ as.Date(NA)
+      ),
+      os_time_days = as.numeric(os_censor_date - landmark_date),
+      os_time_months = os_time_days / 30.44,
+      dcr_event = case_when(
+        !is.na(death_date) ~ 1,
+        alive_status == "No" ~ 1,
+        alive_status == "Yes" & imaging_disease_present == "Yes" ~ 1,
+        TRUE ~ 0
+      ),
+      dcr_time_days = os_time_days,
+      dcr_time_months = os_time_months
+    )
+  
+  # Add TTNT calculation - find next therapy after landmark date
+  # First ensure landmark_date is in outcomes
+  if (!"landmark_date" %in% names(outcomes)) {
+    outcomes <- outcomes %>%
+      left_join(landmark_data %>% select(patient_id, landmark_date), by = "patient_id")
+  }
+  
+  if (length(all_treatments_list) > 0) {
+    all_treatments_ttnt <- bind_rows(all_treatments_list) %>%
+      select(patient_id, start_date) %>%
+      filter(!is.na(start_date))
+    
+    # For each patient, find next therapy start date after their landmark date
+    next_therapy_by_patient <- outcomes %>%
+      select(patient_id, landmark_date) %>%
+      left_join(all_treatments_ttnt, by = "patient_id") %>%
+      filter(!is.na(start_date), !is.na(landmark_date), start_date > landmark_date) %>%
+      group_by(patient_id) %>%
+      summarise(next_therapy_date = min(start_date, na.rm = TRUE), .groups = "drop")
+    
+    outcomes <- outcomes %>%
+      left_join(next_therapy_by_patient, by = "patient_id") %>%
+      mutate(
+        # TTNT event date = next therapy OR death, whichever comes first
+        ttnt_event_date = case_when(
+          !is.na(next_therapy_date) & !is.na(death_date) ~ 
+            pmin(next_therapy_date, death_date, na.rm = TRUE),
+          !is.na(next_therapy_date) ~ next_therapy_date,
+          !is.na(death_date) ~ death_date,
+          TRUE ~ as.Date(NA)
+        ),
+        # TTNT censor date = event date OR last follow-up
+        ttnt_censor_date = case_when(
+          !is.na(ttnt_event_date) ~ ttnt_event_date,
+          !is.na(last_fu_date) ~ last_fu_date,
+          TRUE ~ as.Date(NA)
+        ),
+        # TTNT time from landmark
+        ttnt_time_days = as.numeric(ttnt_censor_date - landmark_date),
+        ttnt_time_months = ttnt_time_days / 30.44,
+        # TTNT event = 1 if next therapy started OR death occurred
+        ttnt_event = case_when(
+          !is.na(next_therapy_date) & !is.na(death_date) ~ 1,
+          !is.na(next_therapy_date) ~ 1,
+          !is.na(death_date) ~ 1,
+          TRUE ~ 0
+        )
+      )
+  } else {
+    # No therapy data available, TTNT = death only
+    outcomes <- outcomes %>%
+      mutate(
+        next_therapy_date = as.Date(NA),
+        ttnt_event_date = death_date,
+        ttnt_censor_date = case_when(
+          !is.na(death_date) ~ death_date,
+          !is.na(last_fu_date) ~ last_fu_date,
+          TRUE ~ as.Date(NA)
+        ),
+        ttnt_time_days = as.numeric(ttnt_censor_date - landmark_date),
+        ttnt_time_months = ttnt_time_days / 30.44,
+        ttnt_event = case_when(
+          !is.na(death_date) ~ 1,
+          TRUE ~ 0
+        )
+      )
+  }
+  
+  # Filter to valid outcomes
+  outcomes <- outcomes %>%
+    filter(!is.na(os_time_days), os_time_days > 0) %>%
+    mutate(
+      ctdna_group = factor(
+        ctdna_group,
+        levels = c("Persistently Low Level", "Persistently Undetectable", "All Other Detectable Profiles")
+      )
+    )
+  
+  return(list(
+    landmark_type = landmark_type_name,
+    landmark_data = landmark_data,
+    outcomes = outcomes,
+    median_ctdna_threshold = median_ctdna_threshold,
+    n_patients = nrow(outcomes),
+    landmark_days = landmark_days,
+    landmark_start_dates = landmark_starts %>% select(patient_id, landmark_start_date, landmark_date) %>% distinct()
+  ))
+}
+
+# ====================================================================================
+# PRE-LANDMARK ANALYSIS: Therapy distribution by ctDNA pattern groups
+# Classify all patients by ctDNA pattern from cystectomy to get baseline groups
+# ====================================================================================
+
+# Get ctDNA measurements after cystectomy for all patients
+ctdna_post_cyst_all <- ctdna_long %>%
+  inner_join(cystectomy_patients, by = "patient_id") %>%
+  filter(ctdna_date >= cystectomy_date) %>%
+  arrange(patient_id, ctdna_date)
+
+# Calculate median ctDNA threshold (using all positive post-cystectomy values)
+all_positive_ctdna_all <- ctdna_post_cyst_all %>%
+  filter(ctdna_value > 0, !is.na(ctdna_value))
+median_ctdna_threshold_all <- median(all_positive_ctdna_all$ctdna_value, na.rm = TRUE)
+
+# Get ctDNA during landmark period post-cystectomy for classification
+# Use the same landmark period as the analyses
+ctdna_first_year <- ctdna_post_cyst_all %>%
+  mutate(days_from_cyst = as.numeric(ctdna_date - cystectomy_date)) %>%
+  filter(days_from_cyst >= 0, days_from_cyst <= landmark_days) %>%
+  group_by(patient_id) %>%
+  summarise(
+    n_measurements = n(),
+    n_positive = sum(ctdna_value > 0, na.rm = TRUE),
+    all_zero = all(ctdna_value == 0 | is.na(ctdna_value), na.rm = TRUE),
+    all_under_median = all(ctdna_value < median_ctdna_threshold_all, na.rm = TRUE),
+    any_above_median = any(ctdna_value >= median_ctdna_threshold_all, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ctdna_group_baseline = case_when(
+      all_zero == TRUE & n_measurements >= 1 ~ "Persistently Undetectable",
+      n_measurements >= 3 & n_positive >= 2 & all_under_median == TRUE & !all_zero ~ "Persistently Low Level",
+      any_above_median == TRUE ~ "All Other Detectable Profiles",
+      n_measurements == 0 ~ "Insufficient Data",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  filter(ctdna_group_baseline %in% c("Persistently Undetectable", "Persistently Low Level", "All Other Detectable Profiles"))
+
+# Get therapy information for all patients
+if (length(all_treatments_list) > 0) {
+  all_treatments_full <- bind_rows(all_treatments_list) %>%
+    mutate(
+      is_adjuvant = str_detect(tolower(setting), "adjuvant"),
+      is_palliative = str_detect(tolower(setting), "palliative"),
+      is_neoadjuvant = str_detect(tolower(setting), "neoadjuvant"),
+      is_immunotherapy = str_detect(tolower(regimen), "umab$"),
+      is_chemotherapy = str_detect(tolower(regimen), "gemcitabine|cisplatin|carboplatin|methotrexate|vinblastine|doxorubicin|paclitaxel|docetaxel|ifosfamide|cyclophosphamide") & 
+                       !str_detect(tolower(regimen), "umab$") &
+                       !str_detect(tolower(regimen), "enfortumab|sacituzumab|trodelvy|padcev"),
+      is_adc = str_detect(tolower(regimen), "enfortumab|sacituzumab|trodelvy|padcev|adc")
+    )
+  
+  # Count lines of therapy by setting for each patient
+  patient_therapy_summary <- all_treatments_full %>%
+    filter(patient_id %in% ctdna_first_year$patient_id) %>%
+    group_by(patient_id) %>%
+    summarise(
+      n_adjuvant_lines = sum(is_adjuvant, na.rm = TRUE),
+      n_palliative_lines = sum(is_palliative, na.rm = TRUE),
+      n_neoadjuvant_lines = sum(is_neoadjuvant, na.rm = TRUE),
+      received_chemo = any(is_chemotherapy, na.rm = TRUE),
+      received_adc = any(is_adc, na.rm = TRUE),
+      received_immuno = any(is_immunotherapy, na.rm = TRUE),
+      .groups = "drop"
+    )
+} else {
+  patient_therapy_summary <- ctdna_first_year %>%
+    select(patient_id) %>%
+    mutate(
+      n_adjuvant_lines = 0,
+      n_palliative_lines = 0,
+      n_neoadjuvant_lines = 0,
+      received_chemo = FALSE,
+      received_adc = FALSE,
+      received_immuno = FALSE
+    )
+}
+
+# Join ctDNA groups with therapy summary
+baseline_groups_with_therapy <- ctdna_first_year %>%
+  left_join(patient_therapy_summary, by = "patient_id") %>%
+  mutate(
+    n_adjuvant_lines = ifelse(is.na(n_adjuvant_lines), 0, n_adjuvant_lines),
+    n_palliative_lines = ifelse(is.na(n_palliative_lines), 0, n_palliative_lines),
+    n_neoadjuvant_lines = ifelse(is.na(n_neoadjuvant_lines), 0, n_neoadjuvant_lines),
+    received_chemo = ifelse(is.na(received_chemo), FALSE, received_chemo),
+    received_adc = ifelse(is.na(received_adc), FALSE, received_adc),
+    received_immuno = ifelse(is.na(received_immuno), FALSE, received_immuno)
+  )
+
+# Run all 4 landmark analyses
+all_results <- list()
+
+# 1. From Cystectomy
+if (nrow(cystectomy_patients) > 0) {
+  all_results[["Cystectomy"]] <- run_landmark_analysis("Cystectomy", "cystectomy_date")
+}
+
+# 2. From Adjuvant Therapy
+if (sum(!is.na(therapy_starts$first_adjuvant_date)) > 0) {
+  all_results[["First Adjuvant Therapy"]] <- run_landmark_analysis("First Adjuvant Therapy", "first_adjuvant_date")
+}
+
+# 3. From Palliative Therapy
+if (sum(!is.na(therapy_starts$first_palliative_date)) > 0) {
+  all_results[["First Palliative Therapy"]] <- run_landmark_analysis("First Palliative Therapy", "first_palliative_date")
+}
+
+# 4. From Immunotherapy
+if (sum(!is.na(therapy_starts$first_immunotherapy_date)) > 0) {
+  all_results[["First Immunotherapy"]] <- run_landmark_analysis("First Immunotherapy", "first_immunotherapy_date")
+}
+
+# Note: Chemotherapy and ADC analyses not performed due to insufficient sample size
+```
+
+```{r therapy_distribution, results='asis'}
+# Display therapy distribution by ctDNA pattern groups
+cat("# Therapy Distribution by ctDNA Pattern Groups\n\n")
+cat("**Classification:** Based on ctDNA pattern during first ", landmark_months, " months post-cystectomy\n\n")
+
+# Lines of therapy by setting
+cat("## Lines of Therapy by Treatment Setting\n\n")
+
+lines_of_therapy <- baseline_groups_with_therapy %>%
+  group_by(ctdna_group_baseline) %>%
+  summarise(
+    N = n(),
+    `Adjuvant (≥1 line)` = sum(n_adjuvant_lines >= 1),
+    `Palliative (≥1 line)` = sum(n_palliative_lines >= 1),
+    `Neoadjuvant (≥1 line)` = sum(n_neoadjuvant_lines >= 1),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    `Adjuvant (≥1 line)` = paste0(`Adjuvant (≥1 line)`, " (", round(`Adjuvant (≥1 line)` / N * 100, 1), "%)"),
+    `Palliative (≥1 line)` = paste0(`Palliative (≥1 line)`, " (", round(`Palliative (≥1 line)` / N * 100, 1), "%)"),
+    `Neoadjuvant (≥1 line)` = paste0(`Neoadjuvant (≥1 line)`, " (", round(`Neoadjuvant (≥1 line)` / N * 100, 1), "%)")
+  )
+
+lines_table <- lines_of_therapy %>%
+  select(ctdna_group_baseline, N, 
+         `Adjuvant (≥1 line)`,
+         `Palliative (≥1 line)`,
+         `Neoadjuvant (≥1 line)`) %>%
+  kable(
+    caption = "Number of Therapy Lines by Treatment Setting and ctDNA Pattern Group",
+    format = "html"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE, font_size = 10)
+cat(knitr::knit_print(lines_table))
+cat("\n\n")
+
+# Treatment class distribution
+cat("## Treatment Class Distribution\n\n")
+
+treatment_class_dist <- baseline_groups_with_therapy %>%
+  group_by(ctdna_group_baseline) %>%
+  summarise(
+    N = n(),
+    `Chemotherapy` = sum(received_chemo, na.rm = TRUE),
+    `ADC` = sum(received_adc, na.rm = TRUE),
+    `Immunotherapy` = sum(received_immuno, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    `Chemotherapy` = paste0(`Chemotherapy`, " (", round(`Chemotherapy` / N * 100, 1), "%)"),
+    `ADC` = paste0(`ADC`, " (", round(`ADC` / N * 100, 1), "%)"),
+    `Immunotherapy` = paste0(`Immunotherapy`, " (", round(`Immunotherapy` / N * 100, 1), "%)")
+  )
+
+class_table <- treatment_class_dist %>%
+  select(ctdna_group_baseline, N, 
+         `Chemotherapy`,
+         `ADC`,
+         `Immunotherapy`) %>%
+  kable(
+    caption = "Treatment Class Distribution by ctDNA Pattern Group",
+    format = "html"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE, font_size = 10)
+cat(knitr::knit_print(class_table))
+cat("\n\n---\n\n")
+```
+
+```{r display_all_results, results='asis'}
+# Display results for each landmark type
+for (landmark_name in names(all_results)) {
+  result <- all_results[[landmark_name]]
+  
+  if (result$n_patients > 0) {
+    cat("\n\n")
+    cat("## ", landmark_name, "\n\n")
+    
+    # Display landmark date definition clearly
+    result_start_dates <- result$landmark_start_dates
+    if (!is.null(result_start_dates) && nrow(result_start_dates) > 0) {
+      sample_start <- min(result_start_dates$landmark_start_date, na.rm = TRUE)
+      sample_landmark <- min(result_start_dates$landmark_date, na.rm = TRUE)
+      cat("**Landmark Date Definition:**\n")
+      cat("- **Landmark Start Date:** ", landmark_name, " date (e.g., cystectomy date, first adjuvant therapy start date)\n")
+      cat("- **Landmark Period:** ", landmark_months, " months (", result$landmark_days, " days) starting from landmark start date\n")
+      cat("- **Landmark Date (Time 0 for outcomes):** ", landmark_months, " months after ", tolower(landmark_name), " date\n")
+      cat("- **Example:** If ", tolower(landmark_name), " occurred on ", format(sample_start, "%B %d, %Y"), 
+          ", landmark date = ", format(sample_landmark, "%B %d, %Y"), "\n\n")
+      cat("**Clinical Context:**\n")
+      cat("- **ctDNA Pattern Classification:** Based on ALL ctDNA measurements during the ", landmark_months, "-month landmark period (between landmark start date and landmark date)\n")
+      cat("- **Outcome Measurement:** Survival outcomes (OS, DCR, TTNT) are measured FROM the landmark date forward (time 0 = landmark date)\n")
+      cat("- **Treatment Status:** May vary during landmark period - some patients may be on treatment, others off treatment\n\n")
+    } else {
+      cat("**Landmark:** ", landmark_months, " months after ", tolower(landmark_name), "\n\n")
+    }
+    
+    # Group counts
+    group_counts <- result$outcomes %>%
+      count(ctdna_group) %>%
+      arrange(match(ctdna_group, c("Persistently Undetectable", "Persistently Low Level", "All Other Detectable Profiles"))) %>%
+      mutate(Percentage = round(n / sum(n) * 100, 1))
+    
+    cat("**Patient Distribution:**\n")
+    for (i in seq_len(nrow(group_counts))) {
+      cat("- ", as.character(group_counts$ctdna_group[i]), ": ", group_counts$n[i], " (", group_counts$Percentage[i], "%)\n")
+    }
+    cat("\n")
+    
+    # Display treatment status during landmark period
+    if ("on_treatment_during_landmark" %in% names(result$landmark_data)) {
+      treatment_summary <- result$landmark_data %>%
+        group_by(ctdna_group) %>%
+        summarise(
+          N = n(),
+          `On Treatment During Landmark Period` = sum(on_treatment_during_landmark, na.rm = TRUE),
+          `Off Treatment During Landmark Period` = sum(!on_treatment_during_landmark, na.rm = TRUE),
+          .groups = "drop"
+        ) %>%
+        mutate(
+          `% On Treatment` = round(`On Treatment During Landmark Period` / N * 100, 1),
+          `% Off Treatment` = round(`Off Treatment During Landmark Period` / N * 100, 1)
+        )
+      
+      cat("**Treatment Status During Landmark Period:**\n")
+      treatment_table <- treatment_summary %>%
+        select(ctdna_group, N, `On Treatment During Landmark Period`, `% On Treatment`, 
+               `Off Treatment During Landmark Period`, `% Off Treatment`) %>%
+        kable(
+          caption = "Treatment Status During Landmark Period by ctDNA Pattern",
+          format = "html"
+        ) %>%
+        kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE, font_size = 10)
+      cat(knitr::knit_print(treatment_table))
+      cat("\n\n")
+    }
+    
+    # Display ctDNA trend information if available
+    if ("trend_direction" %in% names(result$landmark_data)) {
+      trend_summary <- result$landmark_data %>%
+        group_by(ctdna_group, trend_direction) %>%
+        summarise(N = n(), .groups = "drop") %>%
+        group_by(ctdna_group) %>%
+        mutate(Total = sum(N), Percentage = round(N / Total * 100, 1)) %>%
+        ungroup()
+      
+      if (nrow(trend_summary) > 0) {
+        cat("**ctDNA Trend During Landmark Period:**\n")
+        cat("(Based on positive ctDNA values - increasing/decreasing over time using linear regression)\n\n")
+        trend_table <- trend_summary %>%
+          select(ctdna_group, trend_direction, N, Percentage) %>%
+          kable(
+            caption = "ctDNA Trend Direction During Landmark Period by ctDNA Pattern",
+            format = "html",
+            col.names = c("ctDNA Pattern", "Trend Direction", "N", "%")
+          ) %>%
+          kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE, font_size = 10)
+        cat(knitr::knit_print(trend_table))
+        cat("\n\n")
+      }
+    }
+    
+    # Outcomes summary
+    outcomes_summary <- result$outcomes %>%
+      group_by(ctdna_group) %>%
+      summarise(
+        N = n(),
+        `OS Events` = sum(os_event, na.rm = TRUE),
+        `Median OS (months)` = round(median(os_time_months, na.rm = TRUE), 1),
+        `1-year OS %` = {
+          os_1yr <- os_time_months <= 12
+          if (sum(os_1yr, na.rm = TRUE) > 0) {
+            round(100 * (1 - sum(os_event[os_1yr], na.rm = TRUE) / sum(os_1yr, na.rm = TRUE)), 1)
+          } else {
+            NA_real_
+          }
+        },
+        `DCR Events` = sum(dcr_event, na.rm = TRUE),
+        `Median DCR (months)` = round(median(dcr_time_months, na.rm = TRUE), 1),
+        `1-year DCR %` = {
+          dcr_1yr <- dcr_time_months <= 12
+          if (sum(dcr_1yr, na.rm = TRUE) > 0) {
+            round(100 * (1 - sum(dcr_event[dcr_1yr], na.rm = TRUE) / sum(dcr_1yr, na.rm = TRUE)), 1)
+          } else {
+            NA_real_
+          }
+        },
+        `TTNT Events` = sum(ttnt_event, na.rm = TRUE),
+        `Median TTNT (months)` = round(median(ttnt_time_months, na.rm = TRUE), 1),
+        `1-year TTNT %` = {
+          ttnt_1yr <- ttnt_time_months <= 12
+          if (sum(ttnt_1yr, na.rm = TRUE) > 0) {
+            round(100 * (1 - sum(ttnt_event[ttnt_1yr], na.rm = TRUE) / sum(ttnt_1yr, na.rm = TRUE)), 1)
+          } else {
+            NA_real_
+          }
+        },
+        .groups = "drop"
+      )
+    
+    # Display header only, no table
+    cat("**Outcomes by ctDNA Pattern (Landmark: ", landmark_name, ")**\n\n")
+    
+    # Check sample size and reliability BEFORE plotting curves
+    # Check OS model reliability
+    cox_os_check <- tryCatch({
+      cox_os_temp <- coxph(Surv(os_time_months, os_event) ~ ctdna_group, data = result$outcomes)
+      cox_os_summary_temp <- summary(cox_os_temp)
+      cox_os_coef_temp <- cox_os_summary_temp$coefficients
+      cox_os_conf_temp <- cox_os_summary_temp$conf.int
+      
+      os_unreliable <- any(cox_os_conf_temp[, "upper .95"] > 1000, na.rm = TRUE) || 
+                       any(cox_os_coef_temp[, "exp(coef)"] > 1000, na.rm = TRUE) ||
+                       any(is.na(cox_os_coef_temp[, "Pr(>|z|)"]))
+      
+      events_by_group_os <- result$outcomes %>%
+        group_by(ctdna_group) %>%
+        summarise(n_events = sum(os_event, na.rm = TRUE), n_total = n(), .groups = "drop")
+      os_small_sample <- any(events_by_group_os$n_events < 2, na.rm = TRUE) || 
+                         nrow(events_by_group_os) < 2 ||
+                         sum(events_by_group_os$n_events) < 5
+      
+      list(unreliable = os_unreliable, small_sample = os_small_sample, events = events_by_group_os)
+    }, error = function(e) {
+      list(unreliable = TRUE, small_sample = TRUE, events = NULL)
+    })
+    
+    # Check DCR model reliability
+    cox_dcr_check <- tryCatch({
+      cox_dcr_temp <- coxph(Surv(dcr_time_months, dcr_event) ~ ctdna_group, data = result$outcomes)
+      cox_dcr_summary_temp <- summary(cox_dcr_temp)
+      cox_dcr_coef_temp <- cox_dcr_summary_temp$coefficients
+      cox_dcr_conf_temp <- cox_dcr_summary_temp$conf.int
+      
+      dcr_unreliable <- any(cox_dcr_conf_temp[, "upper .95"] > 1000, na.rm = TRUE) || 
+                        any(cox_dcr_coef_temp[, "exp(coef)"] > 1000, na.rm = TRUE) ||
+                        any(is.na(cox_dcr_coef_temp[, "Pr(>|z|)"]))
+      
+      events_by_group_dcr <- result$outcomes %>%
+        group_by(ctdna_group) %>%
+        summarise(n_events = sum(dcr_event, na.rm = TRUE), n_total = n(), .groups = "drop")
+      dcr_small_sample <- any(events_by_group_dcr$n_events < 2, na.rm = TRUE) || 
+                          nrow(events_by_group_dcr) < 2 ||
+                          sum(events_by_group_dcr$n_events) < 5
+      
+      list(unreliable = dcr_unreliable, small_sample = dcr_small_sample, events = events_by_group_dcr)
+    }, error = function(e) {
+      list(unreliable = TRUE, small_sample = TRUE, events = NULL)
+    })
+    
+    # Check TTNT model reliability
+    cox_ttnt_check <- tryCatch({
+      cox_ttnt_temp <- coxph(Surv(ttnt_time_months, ttnt_event) ~ ctdna_group, data = result$outcomes)
+      cox_ttnt_summary_temp <- summary(cox_ttnt_temp)
+      cox_ttnt_coef_temp <- cox_ttnt_summary_temp$coefficients
+      cox_ttnt_conf_temp <- cox_ttnt_summary_temp$conf.int
+      
+      ttnt_unreliable <- any(cox_ttnt_conf_temp[, "upper .95"] > 1000, na.rm = TRUE) || 
+                         any(cox_ttnt_coef_temp[, "exp(coef)"] > 1000, na.rm = TRUE) ||
+                         any(is.na(cox_ttnt_coef_temp[, "Pr(>|z|)"]))
+      
+      events_by_group_ttnt <- result$outcomes %>%
+        group_by(ctdna_group) %>%
+        summarise(n_events = sum(ttnt_event, na.rm = TRUE), n_total = n(), .groups = "drop")
+      ttnt_small_sample <- any(events_by_group_ttnt$n_events < 2, na.rm = TRUE) || 
+                           nrow(events_by_group_ttnt) < 2 ||
+                           sum(events_by_group_ttnt$n_events) < 5
+      
+      list(unreliable = ttnt_unreliable, small_sample = ttnt_small_sample, events = events_by_group_ttnt)
+    }, error = function(e) {
+      list(unreliable = TRUE, small_sample = TRUE, events = NULL)
+    })
+    
+    # Determine if we should show curves and models
+    show_analysis <- !(cox_os_check$unreliable || cox_os_check$small_sample || 
+                       cox_dcr_check$unreliable || cox_dcr_check$small_sample ||
+                       cox_ttnt_check$unreliable || cox_ttnt_check$small_sample)
+    
+    if (!show_analysis) {
+      cat("**Note:** Survival curves and Cox models not shown due to insufficient sample size.\n\n")
+    }
+    
+    # Survival curves - only show if sample size is sufficient
+    if (show_analysis && nrow(result$outcomes) > 0 && length(unique(result$outcomes$ctdna_group)) > 1) {
+      # OS curve
+      surv_fit_os <- survfit(Surv(os_time_months, os_event) ~ ctdna_group, data = result$outcomes)
+      # Get actual groups present in the data
+      actual_groups <- levels(result$outcomes$ctdna_group)[levels(result$outcomes$ctdna_group) %in% unique(result$outcomes$ctdna_group)]
+      
+      tryCatch({
+        p_os <- ggsurvplot(
+          surv_fit_os,
+          data = result$outcomes,
+          pval = TRUE,
+          conf.int = TRUE,
+          conf.int.style = "ribbon",
+          risk.table = TRUE,
+          xlab = "Time from Landmark (months)",
+          ylab = "Overall Survival Probability",
+          title = paste("OS by ctDNA Pattern -", landmark_name),
+          legend.title = "ctDNA Pattern",
+          legend.labs = actual_groups,
+          break.time.by = 6
+        )
+        print(p_os$plot)
+      }, error = function(e) {
+        # If ribbon fails, try without confidence intervals
+        p_os <- ggsurvplot(
+          surv_fit_os,
+          data = result$outcomes,
+          pval = TRUE,
+          conf.int = FALSE,
+          risk.table = TRUE,
+          xlab = "Time from Landmark (months)",
+          ylab = "Overall Survival Probability",
+          title = paste("OS by ctDNA Pattern -", landmark_name),
+          legend.title = "ctDNA Pattern",
+          legend.labs = actual_groups,
+          break.time.by = 6
+        )
+        print(p_os$plot)
+      })
+      
+      # DCR curve
+      surv_fit_dcr <- survfit(Surv(dcr_time_months, dcr_event) ~ ctdna_group, data = result$outcomes)
+      
+      tryCatch({
+        p_dcr <- ggsurvplot(
+          surv_fit_dcr,
+          data = result$outcomes,
+          pval = TRUE,
+          conf.int = TRUE,
+          conf.int.style = "ribbon",
+          risk.table = TRUE,
+          xlab = "Time from Landmark (months)",
+          ylab = "Duration of Complete Response Probability",
+          title = paste("DCR by ctDNA Pattern -", landmark_name),
+          legend.title = "ctDNA Pattern",
+          legend.labs = actual_groups,
+          break.time.by = 6
+        )
+        print(p_dcr$plot)
+      }, error = function(e) {
+        # If ribbon fails, try without confidence intervals
+        p_dcr <- ggsurvplot(
+          surv_fit_dcr,
+          data = result$outcomes,
+          pval = TRUE,
+          conf.int = FALSE,
+          risk.table = TRUE,
+          xlab = "Time from Landmark (months)",
+          ylab = "Duration of Complete Response Probability",
+          title = paste("DCR by ctDNA Pattern -", landmark_name),
+          legend.title = "ctDNA Pattern",
+          legend.labs = actual_groups,
+          break.time.by = 6
+        )
+        print(p_dcr$plot)
+      })
+      
+      # TTNT curve
+      surv_fit_ttnt <- survfit(Surv(ttnt_time_months, ttnt_event) ~ ctdna_group, data = result$outcomes)
+      
+      tryCatch({
+        p_ttnt <- ggsurvplot(
+          surv_fit_ttnt,
+          data = result$outcomes,
+          pval = TRUE,
+          conf.int = TRUE,
+          conf.int.style = "ribbon",
+          risk.table = TRUE,
+          xlab = "Time from Landmark (months)",
+          ylab = "Time to Next Treatment Probability",
+          title = paste("TTNT by ctDNA Pattern -", landmark_name),
+          legend.title = "ctDNA Pattern",
+          legend.labs = actual_groups,
+          break.time.by = 6
+        )
+        print(p_ttnt$plot)
+      }, error = function(e) {
+        # If ribbon fails, try without confidence intervals
+        p_ttnt <- ggsurvplot(
+          surv_fit_ttnt,
+          data = result$outcomes,
+          pval = TRUE,
+          conf.int = FALSE,
+          risk.table = TRUE,
+          xlab = "Time from Landmark (months)",
+          ylab = "Time to Next Treatment Probability",
+          title = paste("TTNT by ctDNA Pattern -", landmark_name),
+          legend.title = "ctDNA Pattern",
+          legend.labs = actual_groups,
+          break.time.by = 6
+        )
+        print(p_ttnt$plot)
+      })
+      
+      # Cox models - only show if sample size is sufficient
+      if (show_analysis) {
+        cox_os <- coxph(Surv(os_time_months, os_event) ~ ctdna_group, data = result$outcomes)
+        cox_os_summary <- summary(cox_os)
+        
+        # Format confidence intervals, cap very large ones
+        # conf.int is already exponentiated, so use directly
+        hr_lower <- cox_os_summary$conf.int[, "lower .95"]
+        hr_upper <- cox_os_summary$conf.int[, "upper .95"]
+        
+        hr_ci_formatted <- character(length(hr_lower))
+        for (i in seq_along(hr_lower)) {
+          if (is.na(hr_upper[i]) || is.na(hr_lower[i])) {
+            hr_ci_formatted[i] <- "NA"
+          } else if (hr_upper[i] > 1000) {
+            hr_ci_formatted[i] <- paste0(round(hr_lower[i], 1), "-", ">1000")
+          } else {
+            hr_ci_formatted[i] <- paste0(round(hr_lower[i], 2), "-", round(hr_upper[i], 2))
+          }
+        }
+        
+        cox_os_results <- tibble(
+          `Variable` = rownames(cox_os_summary$coefficients),
+          `HR (95% CI)` = paste0(
+            round(exp(cox_os_summary$coefficients[, "coef"]), 2),
+            " (",
+            hr_ci_formatted,
+            ")"
+          ),
+          `P-value` = ifelse(
+            cox_os_summary$coefficients[, "Pr(>|z|)"] < 0.001,
+            "<0.001",
+            round(cox_os_summary$coefficients[, "Pr(>|z|)"], 3)
+          )
+        ) %>%
+          mutate(`Variable` = str_remove(`Variable`, "ctdna_group"))
+        
+        cox_os_table <- cox_os_results %>%
+          kable(
+            caption = paste("Cox Model: OS by ctDNA Pattern (Reference: Persistently Low Level) -", landmark_name),
+            format = "html"
+          ) %>%
+          kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+        cat(knitr::knit_print(cox_os_table))
+        cat("\n\n")
+        
+        cox_dcr <- coxph(Surv(dcr_time_months, dcr_event) ~ ctdna_group, data = result$outcomes)
+        cox_dcr_summary <- summary(cox_dcr)
+        
+        # Format confidence intervals, cap very large ones
+        # conf.int is already exponentiated, so use directly
+        hr_lower_dcr <- cox_dcr_summary$conf.int[, "lower .95"]
+        hr_upper_dcr <- cox_dcr_summary$conf.int[, "upper .95"]
+        
+        hr_ci_formatted_dcr <- character(length(hr_lower_dcr))
+        for (i in seq_along(hr_lower_dcr)) {
+          if (is.na(hr_upper_dcr[i]) || is.na(hr_lower_dcr[i])) {
+            hr_ci_formatted_dcr[i] <- "NA"
+          } else if (hr_upper_dcr[i] > 1000) {
+            hr_ci_formatted_dcr[i] <- paste0(round(hr_lower_dcr[i], 1), "-", ">1000")
+          } else {
+            hr_ci_formatted_dcr[i] <- paste0(round(hr_lower_dcr[i], 2), "-", round(hr_upper_dcr[i], 2))
+          }
+        }
+        
+        cox_dcr_results <- tibble(
+          `Variable` = rownames(cox_dcr_summary$coefficients),
+          `HR (95% CI)` = paste0(
+            round(exp(cox_dcr_summary$coefficients[, "coef"]), 2),
+            " (",
+            hr_ci_formatted_dcr,
+            ")"
+          ),
+          `P-value` = ifelse(
+            cox_dcr_summary$coefficients[, "Pr(>|z|)"] < 0.001,
+            "<0.001",
+            round(cox_dcr_summary$coefficients[, "Pr(>|z|)"], 3)
+          )
+        ) %>%
+          mutate(`Variable` = str_remove(`Variable`, "ctdna_group"))
+        
+        cox_dcr_table <- cox_dcr_results %>%
+          kable(
+            caption = paste("Cox Model: DCR by ctDNA Pattern (Reference: Persistently Low Level) -", landmark_name),
+            format = "html"
+          ) %>%
+          kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+        cat(knitr::knit_print(cox_dcr_table))
+        cat("\n\n")
+        
+        cox_ttnt <- coxph(Surv(ttnt_time_months, ttnt_event) ~ ctdna_group, data = result$outcomes)
+        cox_ttnt_summary <- summary(cox_ttnt)
+        
+        # Format confidence intervals, cap very large ones
+        # conf.int is already exponentiated, so use directly
+        hr_lower_ttnt <- cox_ttnt_summary$conf.int[, "lower .95"]
+        hr_upper_ttnt <- cox_ttnt_summary$conf.int[, "upper .95"]
+        
+        hr_ci_formatted_ttnt <- character(length(hr_lower_ttnt))
+        for (i in seq_along(hr_lower_ttnt)) {
+          if (is.na(hr_upper_ttnt[i]) || is.na(hr_lower_ttnt[i])) {
+            hr_ci_formatted_ttnt[i] <- "NA"
+          } else if (hr_upper_ttnt[i] > 1000) {
+            hr_ci_formatted_ttnt[i] <- paste0(round(hr_lower_ttnt[i], 1), "-", ">1000")
+          } else {
+            hr_ci_formatted_ttnt[i] <- paste0(round(hr_lower_ttnt[i], 2), "-", round(hr_upper_ttnt[i], 2))
+          }
+        }
+        
+        cox_ttnt_results <- tibble(
+          `Variable` = rownames(cox_ttnt_summary$coefficients),
+          `HR (95% CI)` = paste0(
+            round(exp(cox_ttnt_summary$coefficients[, "coef"]), 2),
+            " (",
+            hr_ci_formatted_ttnt,
+            ")"
+          ),
+          `P-value` = ifelse(
+            cox_ttnt_summary$coefficients[, "Pr(>|z|)"] < 0.001,
+            "<0.001",
+            round(cox_ttnt_summary$coefficients[, "Pr(>|z|)"], 3)
+          )
+        ) %>%
+          mutate(`Variable` = str_remove(`Variable`, "ctdna_group"))
+        
+        cox_ttnt_table <- cox_ttnt_results %>%
+          kable(
+            caption = paste("Cox Model: TTNT by ctDNA Pattern (Reference: Persistently Low Level) -", landmark_name),
+            format = "html"
+          ) %>%
+          kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+        cat(knitr::knit_print(cox_ttnt_table))
+        cat("\n\n")
+      }
+    }
+    
+    cat("\n\n---\n\n")
+  }
+}
+```
+
+```{r interpretation, results='asis'}
+# Clinical/Statistical Interpretation of Results
+cat("# Clinical and Statistical Interpretation\n\n")
+
+cat("## Timing of ctDNA Assessments and Landmark Analysis\n\n")
+
+cat("### Landmark Date Definition\n\n")
+cat("For each landmark type (cystectomy, first adjuvant therapy, first palliative therapy, first immunotherapy):\n\n")
+cat("1. **Landmark Start Date** = The clinical event date (e.g., cystectomy date, first adjuvant therapy start date)\n")
+cat("2. **Landmark Period** = ", landmark_months, " months (", ifelse(landmark_months == 6, "180", "365"), " days) starting from the landmark start date\n")
+cat("3. **Landmark Date (Time 0 for outcomes)** = Landmark start date + ", landmark_months, " months\n\n")
+
+cat("**Example:** For a patient who had cystectomy on January 1, 2020:\n")
+cat("- Landmark start date = January 1, 2020 (cystectomy date)\n")
+cat("- Landmark period = January 1, 2020 to ", ifelse(landmark_months == 6, "July 1, 2020", "January 1, 2021"), " (", landmark_months, " months)\n")
+cat("- Landmark date = ", ifelse(landmark_months == 6, "July 1, 2020", "January 1, 2021"), " (this becomes time 0 for survival outcomes)\n\n")
+
+cat("### Clinical Context During Landmark Period\n\n")
+cat("**Treatment Status:** Patients may be on or off treatment during the landmark period, depending on:\n")
+cat("- When they started/stopped therapy relative to the landmark start date\n")
+cat("- Treatment duration and overlap with the landmark period\n")
+cat("- Individual patient treatment patterns\n\n")
+
+cat("**ctDNA Pattern Classification:** Based on ALL ctDNA measurements collected during the ", landmark_months, "-month landmark period:\n")
+cat("- Measurements are classified as persistently undetectable, persistently low level, or all other detectable profiles\n")
+cat("- The trend (increasing/decreasing/stable) of ctDNA during this period can be assessed\n")
+cat("- This classification occurs BEFORE the landmark date (time 0)\n\n")
+
+cat("**Outcome Measurement:** Survival outcomes (OS, DCR, TTNT) are measured FROM the landmark date forward:\n")
+cat("- Time 0 = Landmark date\n")
+cat("- This approach ensures that ctDNA patterns are assessed before outcomes are measured, avoiding immortal time bias\n")
+cat("- Patients are followed from the landmark date until event (death, disease progression, next treatment) or censoring (last follow-up)\n\n")
+
+cat("## Interpretation of Hazard Ratios for Persistently Low Level ctDNA Pattern\n\n")
+cat("The \"Persistently Low Level\" ctDNA pattern group serves as the reference group (HR = 1.0) in all Cox models. This group requires ≥3 ctDNA measurements during the landmark period, with ≥2 positive values, all below the median threshold.\n\n")
+
+# Extract and display actual HRs and p-values from results
+cat("### Results Summary\n\n")
+
+# Collect results from all landmark analyses
+all_hr_results <- list()
+
+for (landmark_name in names(all_results)) {
+  result <- all_results[[landmark_name]]
+  
+  if (result$n_patients > 0) {
+    # Try to extract HRs if models were run
+    landmark_hrs <- list(landmark = landmark_name)
+    
+    # Check OS
+    tryCatch({
+      if (nrow(result$outcomes) > 0 && length(unique(result$outcomes$ctdna_group)) > 1) {
+        cox_os_temp <- coxph(Surv(os_time_months, os_event) ~ ctdna_group, data = result$outcomes)
+        cox_os_summary_temp <- summary(cox_os_temp)
+        
+        # Extract HRs for each group vs reference
+        os_hrs <- data.frame(
+          Group = rownames(cox_os_summary_temp$coefficients),
+          HR = round(exp(cox_os_summary_temp$coefficients[, "coef"]), 2),
+          CI_lower = round(cox_os_summary_temp$conf.int[, "lower .95"], 2),
+          CI_upper = round(cox_os_summary_temp$conf.int[, "upper .95"], 2),
+          P_value = ifelse(cox_os_summary_temp$coefficients[, "Pr(>|z|)"] < 0.001, 
+                          "<0.001", 
+                          round(cox_os_summary_temp$coefficients[, "Pr(>|z|)"], 3)),
+          Outcome = "OS",
+          Landmark = landmark_name
+        )
+        landmark_hrs$os <- os_hrs
+      }
+    }, error = function(e) {})
+    
+    # Check DCR
+    tryCatch({
+      if (nrow(result$outcomes) > 0 && length(unique(result$outcomes$ctdna_group)) > 1) {
+        cox_dcr_temp <- coxph(Surv(dcr_time_months, dcr_event) ~ ctdna_group, data = result$outcomes)
+        cox_dcr_summary_temp <- summary(cox_dcr_temp)
+        
+        dcr_hrs <- data.frame(
+          Group = rownames(cox_dcr_summary_temp$coefficients),
+          HR = round(exp(cox_dcr_summary_temp$coefficients[, "coef"]), 2),
+          CI_lower = round(cox_dcr_summary_temp$conf.int[, "lower .95"], 2),
+          CI_upper = round(cox_dcr_summary_temp$conf.int[, "upper .95"], 2),
+          P_value = ifelse(cox_dcr_summary_temp$coefficients[, "Pr(>|z|)"] < 0.001, 
+                          "<0.001", 
+                          round(cox_dcr_summary_temp$coefficients[, "Pr(>|z|)"], 3)),
+          Outcome = "DCR",
+          Landmark = landmark_name
+        )
+        landmark_hrs$dcr <- dcr_hrs
+      }
+    }, error = function(e) {})
+    
+    # Check TTNT
+    tryCatch({
+      if (nrow(result$outcomes) > 0 && length(unique(result$outcomes$ctdna_group)) > 1) {
+        cox_ttnt_temp <- coxph(Surv(ttnt_time_months, ttnt_event) ~ ctdna_group, data = result$outcomes)
+        cox_ttnt_summary_temp <- summary(cox_ttnt_temp)
+        
+        ttnt_hrs <- data.frame(
+          Group = rownames(cox_ttnt_summary_temp$coefficients),
+          HR = round(exp(cox_ttnt_summary_temp$coefficients[, "coef"]), 2),
+          CI_lower = round(cox_ttnt_summary_temp$conf.int[, "lower .95"], 2),
+          CI_upper = round(cox_ttnt_summary_temp$conf.int[, "upper .95"], 2),
+          P_value = ifelse(cox_ttnt_summary_temp$coefficients[, "Pr(>|z|)"] < 0.001, 
+                          "<0.001", 
+                          round(cox_ttnt_summary_temp$coefficients[, "Pr(>|z|)"], 3)),
+          Outcome = "TTNT",
+          Landmark = landmark_name
+        )
+        landmark_hrs$ttnt <- ttnt_hrs
+      }
+    }, error = function(e) {})
+    
+    if (length(landmark_hrs) > 1) {  # More than just "landmark" element
+      all_hr_results[[landmark_name]] <- landmark_hrs
+    }
+  }
+}
+
+# Display results if available - only show Cystectomy
+if (length(all_hr_results) > 0 && "Cystectomy" %in% names(all_hr_results)) {
+  landmark_hrs <- all_hr_results[["Cystectomy"]]
+  
+  cat("**Hazard Ratios (Reference: Persistently Low Level, HR = 1.0) - Cystectomy Landmark:**\n\n")
+  
+  if (!is.null(landmark_hrs$os)) {
+    for (i in 1:nrow(landmark_hrs$os)) {
+      group_name <- str_remove(landmark_hrs$os$Group[i], "ctdna_group")
+      cat("- OS: ", group_name, " vs Persistently Low Level: HR = ", landmark_hrs$os$HR[i], 
+          " (95% CI: ", landmark_hrs$os$CI_lower[i], "-", landmark_hrs$os$CI_upper[i], 
+          "), p = ", landmark_hrs$os$P_value[i], "\n", sep = "")
+    }
+  }
+  
+  if (!is.null(landmark_hrs$dcr)) {
+    for (i in 1:nrow(landmark_hrs$dcr)) {
+      group_name <- str_remove(landmark_hrs$dcr$Group[i], "ctdna_group")
+      cat("- DCR: ", group_name, " vs Persistently Low Level: HR = ", landmark_hrs$dcr$HR[i], 
+          " (95% CI: ", landmark_hrs$dcr$CI_lower[i], "-", landmark_hrs$dcr$CI_upper[i], 
+          "), p = ", landmark_hrs$dcr$P_value[i], "\n", sep = "")
+    }
+  }
+  
+  if (!is.null(landmark_hrs$ttnt)) {
+    for (i in 1:nrow(landmark_hrs$ttnt)) {
+      group_name <- str_remove(landmark_hrs$ttnt$Group[i], "ctdna_group")
+      cat("- TTNT: ", group_name, " vs Persistently Low Level: HR = ", landmark_hrs$ttnt$HR[i], 
+          " (95% CI: ", landmark_hrs$ttnt$CI_lower[i], "-", landmark_hrs$ttnt$CI_upper[i], 
+          "), p = ", landmark_hrs$ttnt$P_value[i], "\n", sep = "")
+    }
+  }
+  
+  cat("\n")
+  
+  # Interpret significant findings (p ≤ 0.05)
+  cat("### Interpretation of Significant Findings (p ≤ 0.05)\n\n")
+  
+  significant_findings <- FALSE
+  
+  # Check OS
+  if (!is.null(landmark_hrs$os)) {
+    for (i in 1:nrow(landmark_hrs$os)) {
+      p_val <- landmark_hrs$os$P_value[i]
+      # Check if p-value is significant (handle both numeric and "<0.001" format)
+      p_numeric <- ifelse(p_val == "<0.001", 0.0005, 
+                         suppressWarnings(as.numeric(p_val)))
+      
+      if (!is.na(p_numeric) && p_numeric <= 0.05) {
+        significant_findings <- TRUE
+        group_name <- str_remove(landmark_hrs$os$Group[i], "ctdna_group")
+        hr_val <- landmark_hrs$os$HR[i]
+        
+        if (hr_val < 1) {
+          cat("**Overall Survival:** ", group_name, " showed significantly better OS compared to Persistently Low Level (HR = ", hr_val, 
+              ", 95% CI: ", landmark_hrs$os$CI_lower[i], "-", landmark_hrs$os$CI_upper[i], 
+              ", p = ", p_val, "). This indicates that patients with ", tolower(group_name), 
+              " ctDNA pattern had a ", round((1 - hr_val) * 100, 0), 
+              "% lower risk of death compared to those with persistently low level ctDNA. This finding suggests that persistently low level ctDNA may represent a distinct intermediate-risk group with worse survival outcomes than ", tolower(group_name), " patients.\n\n", sep = "")
+        } else {
+          cat("**Overall Survival:** ", group_name, " showed significantly worse OS compared to Persistently Low Level (HR = ", hr_val, 
+              ", 95% CI: ", landmark_hrs$os$CI_lower[i], "-", landmark_hrs$os$CI_upper[i], 
+              ", p = ", p_val, "). This indicates that patients with ", tolower(group_name), 
+              " ctDNA pattern had a ", round((hr_val - 1) * 100, 0), 
+              "% higher risk of death compared to those with persistently low level ctDNA.\n\n", sep = "")
+        }
+      }
+    }
+  }
+  
+  # Check DCR
+  if (!is.null(landmark_hrs$dcr)) {
+    for (i in 1:nrow(landmark_hrs$dcr)) {
+      p_val <- landmark_hrs$dcr$P_value[i]
+      p_numeric <- ifelse(p_val == "<0.001", 0.0005, 
+                         suppressWarnings(as.numeric(p_val)))
+      
+      if (!is.na(p_numeric) && p_numeric <= 0.05) {
+        significant_findings <- TRUE
+        group_name <- str_remove(landmark_hrs$dcr$Group[i], "ctdna_group")
+        hr_val <- landmark_hrs$dcr$HR[i]
+        
+        if (hr_val < 1) {
+          cat("**Duration of Complete Response:** ", group_name, " showed significantly longer DCR compared to Persistently Low Level (HR = ", hr_val, 
+              ", 95% CI: ", landmark_hrs$dcr$CI_lower[i], "-", landmark_hrs$dcr$CI_upper[i], 
+              ", p = ", p_val, "). This indicates better maintenance of complete response in ", tolower(group_name), 
+              " patients compared to persistently low level patients.\n\n", sep = "")
+        } else {
+          cat("**Duration of Complete Response:** ", group_name, " showed significantly shorter DCR compared to Persistently Low Level (HR = ", hr_val, 
+              ", 95% CI: ", landmark_hrs$dcr$CI_lower[i], "-", landmark_hrs$dcr$CI_upper[i], 
+              ", p = ", p_val, "). This indicates worse maintenance of complete response in ", tolower(group_name), 
+              " patients compared to persistently low level patients.\n\n", sep = "")
+        }
+      }
+    }
+  }
+  
+  # Check TTNT
+  if (!is.null(landmark_hrs$ttnt)) {
+    for (i in 1:nrow(landmark_hrs$ttnt)) {
+      p_val <- landmark_hrs$ttnt$P_value[i]
+      p_numeric <- ifelse(p_val == "<0.001", 0.0005, 
+                         suppressWarnings(as.numeric(p_val)))
+      
+      if (!is.na(p_numeric) && p_numeric <= 0.05) {
+        significant_findings <- TRUE
+        group_name <- str_remove(landmark_hrs$ttnt$Group[i], "ctdna_group")
+        hr_val <- landmark_hrs$ttnt$HR[i]
+        
+        if (hr_val < 1) {
+          cat("**Time to Next Treatment:** ", group_name, " showed significantly longer TTNT compared to Persistently Low Level (HR = ", hr_val, 
+              ", 95% CI: ", landmark_hrs$ttnt$CI_lower[i], "-", landmark_hrs$ttnt$CI_upper[i], 
+              ", p = ", p_val, "). This indicates better disease control and delayed need for next therapy in ", tolower(group_name), 
+              " patients compared to persistently low level patients.\n\n", sep = "")
+        } else {
+          cat("**Time to Next Treatment:** ", group_name, " showed significantly shorter TTNT compared to Persistently Low Level (HR = ", hr_val, 
+              ", 95% CI: ", landmark_hrs$ttnt$CI_lower[i], "-", landmark_hrs$ttnt$CI_upper[i], 
+              ", p = ", p_val, "). This indicates worse disease control and earlier need for next therapy in ", tolower(group_name), 
+              " patients compared to persistently low level patients.\n\n", sep = "")
+        }
+      }
+    }
+  }
+  
+  if (!significant_findings) {
+    cat("No statistically significant differences (p ≤ 0.05) were observed between ctDNA pattern groups compared to Persistently Low Level in the cystectomy landmark analysis.\n\n")
+  }
+  
+} else {
+  cat("**Note:** Cox model results for the cystectomy landmark analysis are not available, likely due to insufficient sample size.\n\n")
+}
+
+cat("### Clinical Interpretation\n\n")
+cat("The persistently low level ctDNA pattern represents an intermediate-risk group. Patients with persistently undetectable ctDNA typically show the best outcomes (HR < 1 vs persistently low level), while those with higher ctDNA levels show worse outcomes (HR > 1). The small sample sizes limit definitive conclusions, but the pattern suggests that even low-level persistent ctDNA may have prognostic value and warrants continued monitoring.\n\n")
+```

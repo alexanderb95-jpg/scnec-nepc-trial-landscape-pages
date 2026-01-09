@@ -1,0 +1,230 @@
+---
+title: "Data Cleaning: Missing Death Date and Last Follow-Up Date"
+author: "Data Quality Check"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, comment = "")
+knitr::opts_knit$set(root.dir = "~/R")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load shared setup
+source("ctDNA_Research_Questions_Shared_Setup.R")
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(knitr)
+  library(kableExtra)
+})
+```
+
+```{r load_data, include=FALSE}
+# Load data with survival information
+data_list <- load_minimal_data(include_survival = TRUE)
+dat_combined <- data_list$dat_combined
+```
+
+```{r identify_date_columns, include=FALSE}
+# Identify death date columns
+death_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                       !str_detect(names(dat_combined), regex("cause|reason|method", ignore_case = TRUE))]
+
+# Identify last follow-up date columns
+survival_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                     !str_detect(names(dat_combined), regex("period|duration|length|years|months", ignore_case = TRUE))]
+
+cat("**Date Column Identification:**\n")
+cat("- Death date columns found:", length(death_date_cols), "\n")
+if (length(death_date_cols) > 0) {
+  cat("  Column names:", paste(death_date_cols, collapse = ", "), "\n")
+}
+cat("- Last follow-up date columns found:", length(survival_cols), "\n")
+if (length(survival_cols) > 0) {
+  cat("  Column names:", paste(survival_cols, collapse = ", "), "\n")
+}
+cat("\n")
+```
+
+```{r extract_dates, include=FALSE}
+# Extract death date and last follow-up date for each patient
+patient_dates <- dat_combined %>%
+  select(patient_id, all_of(c(death_date_cols, survival_cols))) %>%
+  mutate(
+    # Parse death date (use first available column)
+    death_date = if (length(death_date_cols) > 0) {
+      as_date_safe(.data[[death_date_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    # Parse last follow-up date (use first available column)
+    last_fu_date = if (length(survival_cols) > 0) {
+      as_date_safe(.data[[survival_cols[1]]])
+    } else {
+      as.Date(NA)
+    },
+    # Create flags for missing dates
+    missing_death_date = is.na(death_date),
+    missing_last_fu_date = is.na(last_fu_date),
+    # Combined flag: missing both
+    missing_both = missing_death_date & missing_last_fu_date,
+    # Missing either
+    missing_either = missing_death_date | missing_last_fu_date
+  ) %>%
+  select(patient_id, death_date, last_fu_date, missing_death_date, missing_last_fu_date, missing_both, missing_either)
+```
+
+```{r summary_statistics}
+cat("## Summary of Missing Date Data\n\n")
+
+total_patients <- nrow(patient_dates)
+missing_death <- sum(patient_dates$missing_death_date, na.rm = TRUE)
+missing_fu <- sum(patient_dates$missing_last_fu_date, na.rm = TRUE)
+missing_both <- sum(patient_dates$missing_both, na.rm = TRUE)
+missing_either <- sum(patient_dates$missing_either, na.rm = TRUE)
+
+cat("**Overall Summary:**\n")
+cat("- Total patients in dataset:", total_patients, "\n")
+cat("- Patients missing death date:", missing_death, "(", round(missing_death/total_patients*100, 1), "%)\n")
+cat("- Patients missing last follow-up date:", missing_fu, "(", round(missing_fu/total_patients*100, 1), "%)\n")
+cat("- Patients missing both dates:", missing_both, "(", round(missing_both/total_patients*100, 1), "%)\n")
+cat("- Patients missing either date:", missing_either, "(", round(missing_either/total_patients*100, 1), "%)\n")
+cat("- Patients with both dates available:", total_patients - missing_either, "(", round((total_patients - missing_either)/total_patients*100, 1), "%)\n\n")
+```
+
+```{r patients_missing_death_date}
+cat("## Patients Missing Death Date\n\n")
+
+patients_missing_death <- patient_dates %>%
+  filter(missing_death_date) %>%
+  arrange(patient_id) %>%
+  select(patient_id, death_date, last_fu_date) %>%
+  mutate(
+    death_date = ifelse(is.na(death_date), "Missing", as.character(death_date)),
+    last_fu_date = ifelse(is.na(last_fu_date), "Missing", as.character(last_fu_date))
+  )
+
+if (nrow(patients_missing_death) > 0) {
+  cat("**Total patients missing death date:**", nrow(patients_missing_death), "\n\n")
+  
+  patients_missing_death %>%
+    kable(caption = "Patients Missing Death Date", align = c("l", "c", "c")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                  full_width = FALSE, position = "left") %>%
+    column_spec(1, bold = TRUE) %>%
+    print()
+} else {
+  cat("**All patients have death date recorded.**\n\n")
+}
+```
+
+```{r patients_missing_last_fu_date}
+cat("## Patients Missing Last Follow-Up Date\n\n")
+
+patients_missing_fu <- patient_dates %>%
+  filter(missing_last_fu_date) %>%
+  arrange(patient_id) %>%
+  select(patient_id, death_date, last_fu_date) %>%
+  mutate(
+    death_date = ifelse(is.na(death_date), "Missing", as.character(death_date)),
+    last_fu_date = ifelse(is.na(last_fu_date), "Missing", as.character(last_fu_date))
+  )
+
+if (nrow(patients_missing_fu) > 0) {
+  cat("**Total patients missing last follow-up date:**", nrow(patients_missing_fu), "\n\n")
+  
+  patients_missing_fu %>%
+    kable(caption = "Patients Missing Last Follow-Up Date", align = c("l", "c", "c")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                  full_width = FALSE, position = "left") %>%
+    column_spec(1, bold = TRUE) %>%
+    print()
+} else {
+  cat("**All patients have last follow-up date recorded.**\n\n")
+}
+```
+
+```{r patients_missing_both}
+cat("## Patients Missing Both Death Date and Last Follow-Up Date\n\n")
+
+patients_missing_both <- patient_dates %>%
+  filter(missing_both) %>%
+  arrange(patient_id) %>%
+  select(patient_id, death_date, last_fu_date) %>%
+  mutate(
+    death_date = "Missing",
+    last_fu_date = "Missing"
+  )
+
+if (nrow(patients_missing_both) > 0) {
+  cat("**Total patients missing both dates:**", nrow(patients_missing_both), "\n\n")
+  cat("**Note:** These patients have no death date AND no last follow-up date recorded. This may indicate incomplete follow-up data.\n\n")
+  
+  patients_missing_both %>%
+    kable(caption = "Patients Missing Both Death Date and Last Follow-Up Date", align = c("l", "c", "c")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                  full_width = FALSE, position = "left") %>%
+    column_spec(1, bold = TRUE) %>%
+    print()
+} else {
+  cat("**All patients have at least one date (death date or last follow-up date) recorded.**\n\n")
+}
+```
+
+```{r patients_missing_either}
+cat("## All Patients Missing Either Death Date or Last Follow-Up Date\n\n")
+
+patients_missing_either <- patient_dates %>%
+  filter(missing_either) %>%
+  arrange(patient_id) %>%
+  mutate(
+    death_date_display = ifelse(is.na(death_date), "Missing", as.character(death_date)),
+    last_fu_date_display = ifelse(is.na(last_fu_date), "Missing", as.character(last_fu_date)),
+    missing_type = case_when(
+      missing_both ~ "Both Missing",
+      missing_death_date ~ "Missing Death Date Only",
+      missing_last_fu_date ~ "Missing Last FU Date Only",
+      TRUE ~ "Unknown"
+    )
+  ) %>%
+  select(patient_id, death_date_display, last_fu_date_display, missing_type) %>%
+  rename(
+    `Patient ID` = patient_id,
+    `Death Date` = death_date_display,
+    `Last Follow-Up Date` = last_fu_date_display,
+    `Missing Type` = missing_type
+  )
+
+if (nrow(patients_missing_either) > 0) {
+  cat("**Total patients missing at least one date:**", nrow(patients_missing_either), "\n\n")
+  
+  patients_missing_either %>%
+    kable(caption = "All Patients Missing Either Death Date or Last Follow-Up Date", align = c("l", "c", "c", "l")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                  full_width = FALSE, position = "left") %>%
+    column_spec(1, bold = TRUE) %>%
+    column_spec(4, italic = TRUE) %>%
+    scroll_box(height = "600px") %>%
+    print()
+} else {
+  cat("**All patients have both death date and last follow-up date recorded.**\n\n")
+}
+```
+
+```{r export_missing_patients, include=FALSE}
+# Export list of patients with missing dates to CSV for further review
+if (exists("patients_missing_either") && nrow(patients_missing_either) > 0) {
+  write.csv(patients_missing_either, 
+            file = "patients_missing_dates.csv", 
+            row.names = FALSE)
+  cat("**Note:** List of patients with missing dates has been exported to 'patients_missing_dates.csv' for further review.\n\n")
+}
+```
+

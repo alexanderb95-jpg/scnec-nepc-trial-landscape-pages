@@ -1,0 +1,19 @@
+---
+title: "Test"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Test setup chunk
+library(dplyr)
+```
+
+```{r test1}
+# Test chunk 1
+print("Hello")
+```
+
+```{r test2}
+# Test chunk 2
+print("World")
+```

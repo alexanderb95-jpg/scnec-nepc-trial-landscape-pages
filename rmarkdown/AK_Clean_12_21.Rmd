@@ -1,0 +1,489 @@
+---
+title: "AK_Clean"
+author: "Alex Karol"
+date: "2024-12-21"
+output: html_document
+---
+
+
+```{r, echo=FALSE}
+
+#Packages load
+
+# Set CRAN mirror
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load required libraries
+library(tidyr)
+library(readxl)
+library(dplyr)
+library(kableExtra)
+library(writexl)
+library(ggplot2)
+library(GGally)
+library(car)
+library(lmtest)
+library(mgcv)
+
+```
+
+
+
+```{r, echo=FALSE}
+
+#Load data
+
+# Set the file path
+file_path <- "AK_Clean_Temp.xlsx"
+setwd("~/R")
+getwd()
+
+
+
+# Read the Excel file from the specified path
+ AK_Clean <- read_excel("AK_Clean_Temp.xlsx", col_types = c("text", 
+     "text", "text", "text", "text", "text", 
+     "text", "text", "text", "text", "text", 
+     "text", "text", "numeric", "text", "text", 
+     "text", "text", "text", "text", "text", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", 
+     "text"))
+
+
+# View the first few rows of the data to confirm it's loaded correctly
+head(AK_Clean)
+```
+```{r}
+
+#Trial demographics
+
+data<- read_excel("AK_Clean_Temp.xlsx", col_types = c("text", 
+     "text", "text", "text", "text", "text", 
+     "text", "text", "text", "text", "text", 
+     "text", "text", "numeric", "text", "text", 
+     "text", "text", "text", "text", "text", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "numeric", 
+     "numeric", "numeric", "numeric", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", 
+     "text", "text", "text", "text", 
+     "text"))
+
+
+
+# Specify the columns to include
+selected_columns <- c(
+  "Solid", "Heme", "Solid_clinically_localized_tx", 
+  "Solid_radition_systemic_tx", "Solid_adjuvant_after_defintive_tx", 
+  "Solid_Metastatic_tx_naieve", "Solid_Metastatic_2ndline_beyond", 
+  "Heme_Treatment_naieve", "Heme_Relapsed_and_or_referactory", 
+  "Heme_BMT", "Study_Type", "Randomized", "Follow_Up_Period_Years", 
+  "Mono_Or_Combo_Therapy_In_Control_Arm", 
+  "Mono_Or_Combo_Therapy_In_Interventional_Arm", 
+  "Control_Group_1_placebo_2SOCalone_3_none", 
+  "Blinding_Practice_1_pt_blind_0_open", "Sponser", 
+  "Location_Of_Trial", "Single_Site_Or_Multi_Site", 
+  "Number_Enrolled_In_Trial", "discontinuation_rate_total"
+)
+
+# Filter the data to include only the selected columns
+data <- data %>% select(all_of(selected_columns))
+
+# Continuous variable summary
+continuous_summary <- data %>%
+  mutate(Follow_Up_Period_Months = Follow_Up_Period_Years * 12) %>%
+  summarize(
+    Follow_Up_Period_Months = paste0(
+      median(Follow_Up_Period_Months, na.rm = TRUE), " (",
+      IQR(Follow_Up_Period_Months, na.rm = TRUE), ")"
+    ),
+    Number_Enrolled_In_Trial = paste0(
+      sum(Number_Enrolled_In_Trial, na.rm = TRUE), " (",
+      median(Number_Enrolled_In_Trial, na.rm = TRUE), ")"
+    ),
+    Discontinuation_Rate_Total = paste0(
+      median(discontinuation_rate_total, na.rm = TRUE), " (",
+      IQR(discontinuation_rate_total, na.rm = TRUE), ")"
+    )
+  ) %>%
+  pivot_longer(cols = everything(), names_to = "Characteristic", values_to = "Value")
+
+# Summarize categorical variables
+categorical_columns <- c(
+  "Solid", "Heme", "Solid_clinically_localized_tx", 
+  "Solid_radition_systemic_tx", "Solid_adjuvant_after_defintive_tx", 
+  "Solid_Metastatic_tx_naieve", "Solid_Metastatic_2ndline_beyond", 
+  "Heme_Treatment_naieve", "Heme_Relapsed_and_or_referactory", 
+  "Heme_BMT", "Study_Type", "Randomized", 
+  "Mono_Or_Combo_Therapy_In_Control_Arm", 
+  "Mono_Or_Combo_Therapy_In_Interventional_Arm", 
+  "Control_Group_1_placebo_2SOCalone_3_none", 
+  "Blinding_Practice_1_pt_blind_0_open", "Sponser", 
+  "Location_Of_Trial", "Single_Site_Or_Multi_Site"
+)
+
+categorical_summary <- lapply(categorical_columns, function(column) {
+  if (!is.null(data[[column]]) && length(unique(data[[column]])) > 0) {
+    df <- as.data.frame(table(data[[column]]))
+    colnames(df) <- c("Category", "Count")
+    df$Percentage <- round((df$Count / sum(df$Count)) * 100, 1)
+    df$Characteristic <- column
+    df$Value <- paste0(df$Category, ": ", df$Count, " (", df$Percentage, "%)")
+    return(df[, c("Characteristic", "Value")])
+  } else {
+    return(data.frame(Characteristic = column, Value = "No data available"))
+  }
+})
+
+categorical_summary_df <- do.call(rbind, categorical_summary)
+
+# Combine summaries
+table_1_df <- bind_rows(continuous_summary, categorical_summary_df)
+
+# Export to Excel
+write_xlsx(list("Table 1" = table_1_df), path = "Table_1_Characteristics.xlsx")
+
+# Display the final table
+print(table_1_df)
+```
+```{r}
+
+#Univariate
+# Load required libraries
+library(dplyr)
+library(readxl)
+library(writexl)
+library(broom)
+
+# Load the dataset
+data_cleaned <- read_excel("AK_Clean_Temp.xlsx", col_types = c(
+  "text", "text", "text", "text", "text", "text", 
+  "text", "text", "text", "text", "text", 
+  "text", "text", "numeric", "text", "text", 
+  "text", "text", "text", "text", "text", 
+  "numeric", "numeric", "numeric", "numeric", 
+  "numeric", "numeric", "numeric", "numeric", 
+  "numeric", "numeric", "numeric", "numeric", 
+  "numeric", "numeric", "numeric", "text", 
+  "text", "text", "text", "text", 
+  "text", "text", "text", "text", 
+  "text", "text", "text", "text", 
+  "text"
+))
+outcome <- "discontinuation_rate_total"  # Replace with the correct outcome variable name
+# Set reference levels for categorical variables
+data_cleaned$Study_Type <- relevel(factor(data_cleaned$Study_Type), ref = "Rct")
+data_cleaned$Control_Group_1_placebo_2SOCalone_3_none <- relevel(factor(data_cleaned$Control_Group_1_placebo_2SOCalone_3_none), ref = "1")
+data_cleaned$Sponser <- relevel(factor(data_cleaned$Sponser), ref = "Industry")
+data_cleaned$Location_Of_Trial <- relevel(factor(data_cleaned$Location_Of_Trial), ref = "International")
+data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal <- relevel(factor(data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal), ref = "No")
+
+# Scale Number_Enrolled_In_Trial
+data_cleaned$Scaled_Number_Enrolled_In_Trial <- scale(data_cleaned$Number_Enrolled_In_Trial)
+
+trial_design_vars <- c(
+  "Unblinding_Or_Cross_Over",
+  "Mono_Or_Combo_Therapy_In_Interventional_Arm",
+  "Heme_Relapsed_and_or_referactory",
+  "Solid_radition_systemic_tx",
+  "Mono_Or_Combo_Therapy_In_Control_Arm",
+  "Scaled_Number_Enrolled_In_Trial",
+  "Solid_Metastatic_tx_naieve",
+  "Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal",
+  "Sponser",
+  "Heme_Treatment_naieve",
+  "Heme_BMT",
+  "Solid_clinically_localized_tx",
+  "Randomized",
+  "Control_Group_1_placebo_2SOCalone_3_none",
+  "Study_Type",
+  "Location_Of_Trial",
+  "Solid_adjuvant_after_defintive_tx",
+  "Blinding_Practice_1_pt_blind_0_open",
+  "Solid_Metastatic_2ndline_beyond",
+  "Single_Site_Or_Multi_Site"
+)
+# Define mitigation strategy variables
+mitigation_strategy_vars <- c(
+  "Non_Specific_Effort" , "No_Mitigation_Stratigies"
+)
+
+# Function to extract effect size and 95% CI
+get_model_results <- function(model) {
+  confint <- confint(model) # Extract confidence intervals
+  effect_size <- coef(model) # Extract coefficients
+  p_values <- summary(model)$coefficients[, 4] # Extract p-values
+  data.frame(
+    Term = names(effect_size),
+    Effect_Size = effect_size,
+    CI_Lower = confint[, 1],
+    CI_Upper = confint[, 2],
+    P_Value = p_values
+  )
+}
+
+# Create results data frames for both models
+trial_design_results <- data.frame(
+  Predictor = character(),
+  Effect_Size_CI = character(),
+  P_Value = numeric(),
+  Model_Type = character(),
+  Reference_Level = character(),
+  stringsAsFactors = FALSE
+)
+
+trial_plus_mitigation_results <- data.frame(
+  Predictor = character(),
+  Effect_Size_CI = character(),
+  P_Value = numeric(),
+  Model_Type = character(),
+  Reference_Level = character(),
+  stringsAsFactors = FALSE
+)
+
+
+
+# Analyze trial design + mitigation strategy variables (Model 2)
+for (predictor in c(trial_design_vars, mitigation_strategy_vars)) {
+  if (predictor == "Number_Enrolled_In_Trial") {
+    predictor <- "Scaled_Number_Enrolled_In_Trial"
+  }
+  
+  if (predictor %in% names(data_cleaned)) {
+    model <- lm(as.formula(paste(outcome, "~", predictor)), data = data_cleaned)
+    model_results <- get_model_results(model)
+    
+    if (nrow(model_results) >= 2) {  # Ensure at least 2 rows for intercept and predictor
+      predictor_row <- model_results[2, ]
+      
+      # Format effect size with CI
+      effect_size_ci <- paste0(
+        round(predictor_row$Effect_Size, 4),
+        " (", round(predictor_row$CI_Lower, 4), ", ", round(predictor_row$CI_Upper, 4), ")"
+      )
+      
+      trial_plus_mitigation_results <- rbind(trial_plus_mitigation_results, data.frame(
+        Predictor = predictor,
+        Effect_Size_CI = effect_size_ci,
+        P_Value = round(predictor_row$P_Value, 4),
+        Model_Type = ifelse(predictor %in% trial_design_vars, "Trial Design", "Mitigation Strategy"),
+        Reference_Level = ifelse(is.factor(data_cleaned[[predictor]]), levels(data_cleaned[[predictor]])[1], NA)
+      ))
+    }
+  }
+}
+
+
+
+# Sort results by p-value
+trial_design_results <- trial_design_results %>% arrange(P_Value)
+trial_plus_mitigation_results <- trial_plus_mitigation_results %>% arrange(P_Value)
+
+# Extract predictors dynamically from the univariate results table
+predictors <- trial_plus_mitigation_results$Predictor
+
+# Print to confirm
+print(predictors)
+
+# Save results to Excel
+write_xlsx(
+  list(
+    "Trial Design Only" = trial_design_results,
+    "Trial + Mitigation" = trial_plus_mitigation_results
+  ),
+  "Univariate_Analysis_Two_Models_with_Reference_and_CI.xlsx"
+)
+
+# Print results
+print(trial_plus_mitigation_results)
+
+```
+```{r}
+#linearity
+# Load required libraries
+library(ggplot2)
+library(car)
+library(lmtest)
+library(dplyr)
+
+# Define function to check assumptions
+check_assumptions <- function(predictor, data, outcome) {
+  # Fit linear model
+  formula <- as.formula(paste(outcome, "~", predictor))
+  model <- lm(formula, data = data)
+  
+  # Initialize assumption results
+  assumption_results <- data.frame(
+    Predictor = predictor,
+    Linearity = NA,
+    Normality_p = NA,
+    Homoscedasticity_p = NA,
+    Independence_p = NA,
+    stringsAsFactors = FALSE
+  )
+  
+  # 1. Linearity: Scatterplot or boxplot
+  if (is.numeric(data[[predictor]])) {
+    plot1 <- ggplot(data, aes_string(x = predictor, y = outcome)) +
+      geom_point(alpha = 0.6) +
+      geom_smooth(method = "loess", se = FALSE, color = "blue") +
+      labs(title = paste("Linearity: Outcome vs", predictor), x = predictor, y = outcome)
+    print(plot1)
+    assumption_results$Linearity <- "Checked (Scatterplot)"
+  } else {
+    plot1 <- ggplot(data, aes_string(x = predictor, y = outcome)) +
+      geom_boxplot() +
+      labs(title = paste("Boxplot: Outcome by", predictor), x = predictor, y = outcome)
+    print(plot1)
+    assumption_results$Linearity <- "Checked (Boxplot)"
+  }
+  
+  # 2. Normality of Residuals
+  residuals <- residuals(model)
+  qqnorm(residuals)
+  qqline(residuals, col = "red", lwd = 2)
+  shapiro_test <- shapiro.test(residuals)
+  cat("\nShapiro-Wilk Test for Normality of Residuals (p-value):", shapiro_test$p.value, "\n")
+  assumption_results$Normality_p <- shapiro_test$p.value
+  
+  # 3. Homoscedasticity: Residuals vs Fitted Values
+  fitted_values <- fitted(model)
+  plot2 <- ggplot(data.frame(Fitted = fitted_values, Residuals = residuals), aes(x = Fitted, y = Residuals)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "loess", se = FALSE, color = "red") +
+    labs(title = "Residuals vs Fitted Values", x = "Fitted Values", y = "Residuals")
+  print(plot2)
+  bp_test <- bptest(model)
+  cat("\nBreusch-Pagan Test for Homoscedasticity (p-value):", bp_test$p.value, "\n")
+  assumption_results$Homoscedasticity_p <- bp_test$p.value
+  
+  # 4. Independence: Durbin-Watson Test
+  dw_test <- durbinWatsonTest(model)
+  cat("\nDurbin-Watson Test for Independence (p-value):", dw_test$p.value, "\n")
+  assumption_results$Independence_p <- dw_test$p.value
+  
+  return(assumption_results)
+}
+
+# Variables to check (from trial+mitigation results)
+variables_to_check <- trial_plus_mitigation_results$Predictor
+
+# Initialize summary table
+assumption_summary <- data.frame(
+  Predictor = character(),
+  Linearity = character(),
+  Normality_p = numeric(),
+  Homoscedasticity_p = numeric(),
+  Independence_p = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Check assumptions for each variable
+for (predictor in variables_to_check) {
+  cat("\n\n### Checking Assumptions for Predictor:", predictor, "###\n")
+  if (predictor == "Scaled_Number_Enrolled_In_Trial") {
+    predictor <- "Number_Enrolled_In_Trial"  # Adjust naming if scaled
+  }
+  if (predictor %in% names(data_cleaned)) {
+    results <- check_assumptions(predictor, data_cleaned, outcome)
+    assumption_summary <- rbind(assumption_summary, results)
+  } else {
+    cat("Variable", predictor, "not found in the dataset.\n")
+  }
+}
+
+# Save summary table to Excel
+write_xlsx(assumption_summary, "Regression_Assumptions_Summary.xlsx")
+
+# Print summary table
+print(assumption_summary)
+```
+
+
+```{r}
+
+#Multivariate
+
+# Load required libraries
+library(dplyr)
+library(mgcv)
+library(readxl)
+
+# Load the dataset
+data_cleaned <- read_excel("AK_Clean_Temp.xlsx", col_types = c(
+  "text", "text", "text", "text", "text", "text", 
+  "text", "text", "text", "text", "text", 
+  "text", "text", "numeric", "text", "text", 
+  "text", "text", "text", "text", "text", 
+  "numeric", "numeric", "numeric", "numeric", 
+  "numeric", "numeric", "numeric", "numeric", 
+  "numeric", "numeric", "numeric", "numeric", 
+  "numeric", "numeric", "numeric", "text", 
+  "text", "text", "text", "text", 
+  "text", "text", "text", "text", 
+  "text", "text", "text", "text", 
+  "text"
+))
+
+
+
+# Log-transform the outcome variable to handle skewness
+data_cleaned$log_total_withdrawl_noreason_rate <- log(data_cleaned$total_withdrawl_noreason_rate + 1e-8) # Avoid log(0)
+data_cleaned$Scaled_Number_Enrolled_In_Trial <- scale(data_cleaned$Number_Enrolled_In_Trial)
+data_cleaned$Sponser <- factor(data_cleaned$Sponser)
+data_cleaned$Study_Type <- factor(data_cleaned$Study_Type)
+data_cleaned$Control_Group_1_placebo_2SOCalone_3_none <- factor(data_cleaned$Control_Group_1_placebo_2SOCalone_3_none)
+data_cleaned$Location_Of_Trial <- factor(data_cleaned$Location_Of_Trial)
+data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal <- factor(data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal)
+
+# Set reference levels and combine non-reference levels
+data_cleaned$Study_Type <- factor(ifelse(data_cleaned$Study_Type == "Rct", "Rct", "Non-RCT"), levels = c("Rct", "Non-RCT"))
+data_cleaned$Control_Group_1_placebo_2SOCalone_3_none <- factor(ifelse(data_cleaned$Control_Group_1_placebo_2SOCalone_3_none == "3", "3", "_placebo_use"), levels = c("3", "_placebo_use"))
+data_cleaned$Sponser <- factor(ifelse(data_cleaned$Sponser == "Industry", "Industry", "Non_industry"), levels = c("Industry", "Non_industry"))
+data_cleaned$Location_Of_Trial <- factor(ifelse(data_cleaned$Location_Of_Trial == "International", "International", "Domestic"), levels = c("International", "Domestic"))
+data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal <- factor(
+  ifelse(data_cleaned$Did_Trial_State_Need_For_Clearly_Documented_Reasons_For_Withdrawal == "No", "No", "_Yes/Unk"),
+  levels = c("No", "_Yes/Unk")
+)
+
+
+# Create the GAM formula using the predictors list
+gam_formula <- as.formula(paste(
+  "log_total_withdrawl_noreason_rate ~",
+  paste(sapply(predictors, function(var) {
+    if (is.numeric(data_cleaned[[var]]) || is.logical(data_cleaned[[var]])) {
+      paste0("s(", var, ")")  # Smooth terms for numeric variables
+    } else {
+      var  # Use categorical variables as-is
+    }
+  }), collapse = " + ")
+))
+
+
+# Fit the GAM model
+gam_model <- gam(gam_formula, data = data_cleaned, family = gaussian(link = "identity"))
+
+# Summary of the updated multivariate model
+summary(gam_model)
+
+# Check diagnostics
+gam.check(gam_model)
+
+# Visualize smooth terms
+plot(gam_model, pages = 1, residuals = TRUE, rug = TRUE)
+
+
+
+
+```
+
+
+

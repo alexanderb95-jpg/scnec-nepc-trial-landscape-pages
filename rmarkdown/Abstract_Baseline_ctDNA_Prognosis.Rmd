@@ -1,0 +1,18 @@
+---
+title: "Abstract: Quantitative Baseline ctDNA and Prognosis in Metastatic Urothelial Carcinoma"
+output: 
+  word_document: default
+  html_document:
+    toc: false
+---
+
+# Abstract
+
+**Background:** Circulating tumor DNA (ctDNA) is a prognostic biomarker in metastatic urothelial carcinoma (mUC). While qualitative ctDNA elevations associate with worse overall survival (OS) (HR=0.18, 95% CI 0.09-0.36), the prognostic role of ctDNA before subsequent therapy lines and whether quantitative values outperform qualitative thresholds remain unknown.
+
+**Methods:** We analyzed mUC patients starting new systemic therapy lines (1L, 2L, 3L+) with baseline ctDNA measured within 21 days pre-therapy. Primary endpoint was overall survival (OS). We compared quantitative (continuous log-transformed ctDNA) versus qualitative (binary: 0 vs >0) models using Cox proportional hazards regression, adjusting for line of therapy and Bajorin risk factors (KPS and visceral metastases). Model performance was assessed using Akaike Information Criterion (AIC), where lower values indicate better model fit after penalizing for model complexity, and likelihood ratio tests.
+
+**Results:** Baseline ctDNA inversely associated with OS in quantitative models adjusted for line of therapy, KPS, and visceral metastases (HR per log-unit: [INSERT_HR], 95% CI [INSERT_CI_LOWER]-[INSERT_CI_UPPER], p<0.001), while qualitative models showed no association (HR: [INSERT_HR_QUAL], 95% CI [INSERT_CI_LOWER_QUAL]-[INSERT_CI_UPPER_QUAL], p=[INSERT_P_QUAL]). Quantitative models demonstrated superior fit (AIC difference: [INSERT_AIC_DIFF], favoring quantitative). Likelihood ratio testing confirmed continuous ctDNA adds significant prognostic information beyond binary thresholds (p=[INSERT_P_LRT]).
+
+**Conclusions:** Quantitative baseline ctDNA levels before each new metastatic therapy line significantly associate with OS after adjustment for line of therapy and Bajorin risk factors, and provide superior prognostic information versus qualitative binary thresholds, supporting continuous ctDNA use for risk stratification across multiple therapy lines in mUC.
+

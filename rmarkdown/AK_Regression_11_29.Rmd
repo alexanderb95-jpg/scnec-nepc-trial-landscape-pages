@@ -1,0 +1,361 @@
+---
+title: "AK_Regression_11_29"
+author: "Alex Karol"
+date: "2024-11-29"
+output: html_document
+---
+
+
+```{r}
+
+# Load required libraries
+library(dplyr)
+library(ggpubr)
+library(readxl)
+
+# Set working directory and file path
+setwd("~/R")
+file_path <- "Rodrigo_Clean_data.xlsx"
+
+# Read data, remove missing values, and convert specified columns to factors
+data_cleaned <- read_excel(file_path, sheet = "Sheet1") %>%
+  na.omit() %>%
+  mutate(
+    blinding_practice = as.factor(blinding_practice),
+    treatment_lines = as.factor(treatment_lines),
+    disease_status = as.factor(disease_status),
+    sponsors = as.factor(sponsors),
+    trial_location = as.factor(trial_location),
+    site_number = as.factor(site_number),
+    randomization = as.factor(randomization)  # Convert randomization to factor
+  )
+
+data_cleaned$disease_status <- factor(data_cleaned$disease_status,
+                                      levels = c("1", "2", "3", "4", "5"),
+                                      labels = c("Advanced_Metastatic", 
+                                                 "Progressive_Disease", 
+                                                 "Remission", 
+                                                 "Residual", 
+                                                 "Treatment_Naive"))
+
+# Create derived variables: non_compliance, death_rate, and TRAE_rate
+data_cleaned <- data_cleaned %>%
+  mutate(
+    non_compliance = ifelse(
+      total_number_enrolled > 0,
+      (total_withdrew_noreason + total_withdrew_because_noncompliance + lost_fu) / total_number_enrolled,
+      NA
+    ),
+    death_rate = ifelse(
+      total_number_enrolled > 0,
+      total_withdrew_because_death / total_number_enrolled,
+      NA
+    ),
+    TRAE_rate = ifelse(
+      total_number_withdrew > 0,
+      total_withdrew_because_ae / total_number_withdrew,
+      NA
+    )
+  ) %>%
+  # Filter out rows with missing non_compliance or death_rate, rename non_compliance to outcome
+  filter(!is.na(non_compliance), !is.na(death_rate)) %>%
+  rename(outcome = non_compliance)
+
+# Add a binary variable for unclear follow-up status
+data_cleaned <- data_cleaned %>%
+  mutate(
+    unclear_follow_up_boolean = ifelse(outcome > 0.15, "Above 15%", "15% or Below")
+  )
+
+# Rename values in the blinding_practice column and convert control_group to a factor
+data_cleaned <- data_cleaned %>%
+  mutate(
+    blinding_practice = case_when(
+      blinding_practice == 1 ~ "patient_blind",
+      blinding_practice %in% c(2, 3) ~ "patient_aware",
+      TRUE ~ as.character(blinding_practice)
+    ),
+    control_group = as.factor(control_group)  # Convert control_group to factor
+  )
+
+# Define the list of categorical variables (including randomization)
+categorical_vars <- c("blinding_practice", "treatment_lines", "disease_status", 
+                      "sponsors", "trial_location", "site_number", "control_group", "randomization")
+
+# Perform chi-squared or Fisher's exact test depending on expected frequencies
+chi_squared_results <- lapply(categorical_vars, function(var) {
+  contingency_table <- table(data_cleaned[[var]], data_cleaned$unclear_follow_up_boolean)
+  
+  # Check if any expected frequency is below 5
+  if (any(prop.table(contingency_table) * sum(contingency_table) < 5)) {
+    test_result <- fisher.test(contingency_table)  # Use Fisher's exact test
+  } else {
+    test_result <- chisq.test(contingency_table)  # Use Chi-squared test
+  }
+  
+  return(test_result)
+})
+
+# Combine results for categorical variables into a named list
+names(chi_squared_results) <- categorical_vars
+
+# Extract p-values and test types from chi_squared_results
+categorical_p_values <- data.frame(
+  Variable = names(chi_squared_results),
+  P_Value = sapply(chi_squared_results, function(result) result$p.value),
+  Test_Type = sapply(chi_squared_results, function(result) {
+    if ("method" %in% names(result)) {
+      result$method
+    } else {
+      "Unknown"
+    }
+  }),
+  stringsAsFactors = FALSE
+)
+# Perform Wilcoxon rank-sum tests for numeric variables
+wilcox_results <- list(
+  follow_up = wilcox.test(follow_up_period ~ unclear_follow_up_boolean, data = data_cleaned),
+  TRAE_rate = wilcox.test(TRAE_rate ~ unclear_follow_up_boolean, data = data_cleaned),
+  death_rate = wilcox.test(death_rate ~ unclear_follow_up_boolean, data = data_cleaned)
+)
+
+# Extract Wilcoxon p-values into a data frame
+wilcox_p_values <- data.frame(
+  Variable = names(wilcox_results),
+  P_Value = sapply(wilcox_results, function(result) result$p.value),
+  Test_Type = rep("Wilcoxon rank-sum test", length(wilcox_results)),
+  stringsAsFactors = FALSE
+)
+
+# Print Wilcoxon test results
+cat("Wilcoxon Rank-Sum Test Results:\n")
+print(wilcox_p_values)
+
+# Extract p-values and test types from wilcox_results
+wilcox_p_values <- data.frame(
+  Variable = names(wilcox_results),
+  P_Value = sapply(wilcox_results, function(result) result$p.value),
+  Test_Type = rep("Wilcoxon rank-sum test", length(wilcox_results)),
+  stringsAsFactors = FALSE
+)
+
+# Combine both results into a single table
+combined_p_values <- rbind(categorical_p_values, wilcox_p_values)
+
+# Sort table by Variable name for clarity (optional)
+combined_p_values <- combined_p_values[order(combined_p_values$Variable), ]
+
+# Display the combined table
+print(combined_p_values)
+
+ #Create boxplots for numeric variables
+boxplots <- list(
+  follow_up = ggboxplot(data_cleaned, x = "unclear_follow_up_boolean", y = "follow_up_period",
+                        color = "unclear_follow_up_boolean", title = "Follow-Up Period by Unclear Follow-Up Status",
+                        ylab = "Follow-Up Period", xlab = "Unclear Follow-Up Status"),
+  TEAEs = ggboxplot(data_cleaned, x = "unclear_follow_up_boolean", y = "TRAE_rate",
+                    color = "unclear_follow_up_boolean", title = "TEAEs by Unclear Follow-Up Status",
+                    ylab = "TRAEs Rate", xlab = "Unclear Follow-Up Status"),
+  deaths = ggboxplot(data_cleaned, x = "unclear_follow_up_boolean", y = "death_rate",
+                     color = "unclear_follow_up_boolean", title = "Death Rate by Unclear Follow-Up Status",
+                     ylab = "Death Rate", xlab = "Unclear Follow-Up Status")
+)
+
+# Display the boxplots after combined table output
+lapply(boxplots, print)
+
+# Optionally, write the combined table to an Excel file
+library(writexl)
+write_xlsx(combined_p_values, "Combined_P_Values.xlsx")
+```
+
+
+```{r}
+#Regression
+
+# Load necessary libraries
+library(readxl)     # To read Excel files
+library(dplyr)      # For data manipulation
+library(mgcv)       # For GAM modeling
+library(caret)      # For splitting data
+library(ggplot2)    # For data visualization
+
+# Step 1: Read the data and remove missing values
+file_path <- "Rodrigo_Clean_data.xlsx"  # File path
+data <- read_excel(file_path, sheet = "Sheet1") %>%
+  na.omit()  # Remove rows with missing values
+
+# Step 2: Convert categorical variables to factors and set disease_status5 as the reference level
+data_cleaned <- data %>%
+  mutate(
+    treatment_lines = as.factor(treatment_lines),
+    tx_group_drug = as.factor(tx_group_drug),
+    sponsors = as.factor(sponsors),
+    disease_status = factor(disease_status, 
+                            levels = c("5", "1", "2", "3", "4"),  # Set level 5 as reference
+                            labels = c("Treatment_Naive", "Advanced_Metastatic", 
+                                       "Progressive_Disease", "Remission", "Residual"))
+  )
+
+# Step 3: Create derived variables (`non_compliance` and `death_rate`)
+if (all(c("total_withdrew_noreason", "total_withdrew_because_noncompliance", "lost_fu", "total_number_enrolled") %in% colnames(data_cleaned))) {
+  data_cleaned <- data_cleaned %>%
+    mutate(
+      non_compliance = ifelse(
+        total_number_enrolled > 0,
+        (total_withdrew_noreason + total_withdrew_because_noncompliance + lost_fu) / total_number_enrolled,
+        NA
+      )
+    )
+}
+
+if (all(c("total_withdrew_because_death", "total_number_enrolled") %in% colnames(data_cleaned))) {
+  data_cleaned <- data_cleaned %>%
+    mutate(
+      death_rate = ifelse(
+        total_number_enrolled > 0,
+        total_withdrew_because_death / total_number_enrolled,
+        NA
+      )
+    )
+}
+
+# Calculate TRAE_rate as the ratio of total_withdrew_because_ae to total_number_withdrew
+data_cleaned <- data_cleaned %>%
+  mutate(TRAE_rate = ifelse(total_number_withdrew > 0, 
+                            total_withdrew_because_ae / total_number_withdrew, 
+                            NA))  # Handle cases where denominator is zero
+
+# Remove rows with missing `non_compliance` or `death_rate`
+data_cleaned <- data_cleaned %>%
+  filter(!is.na(non_compliance), !is.na(death_rate)) %>%
+  rename(outcome = non_compliance)  # Rename `non_compliance` to `outcome`
+
+# Step 4: Split data into training, validation, and test sets
+set.seed(123)
+train_index <- createDataPartition(data_cleaned$outcome, p = 0.8, list = FALSE)
+train_data <- data_cleaned[train_index, ]
+remaining_data <- data_cleaned[-train_index, ]
+
+validation_index <- createDataPartition(remaining_data$outcome, p = 0.5, list = FALSE)
+validation_data <- remaining_data[validation_index, ]
+test_data <- remaining_data[-validation_index, ]
+
+# Step 5: Fit the full GAM model
+gam_model_full <- gam(
+  formula = outcome ~ s(follow_up_period, bs = "tp") + s(death_rate, bs = "tp") +
+                      s(TRAE_rate, bs = "tp") + TRAE_rate:follow_up_period +
+                      blinding_practice + disease_status,
+  data = train_data,
+  family = gaussian(link = "log")
+)
+
+# Extract coefficients for disease_status
+coef_summary <- summary(gam_model_full)$p.table  # Extract parametric coefficients
+disease_status_coeffs <- coef_summary[grep("disease_status", rownames(coef_summary)), ]
+
+# Print coefficients for disease_status
+cat("Disease Status Coefficients:\n")
+print(disease_status_coeffs)
+
+# Step 6: Compare models
+# Simplified GAM model
+gam_model_simplified <- gam(
+  formula = outcome ~ s(follow_up_period, bs = "tp") + s(death_rate, bs = "tp"),
+  data = train_data,
+  family = gaussian(link = "log")
+)
+
+# Define RMSE and R² functions
+calculate_r2 <- function(observed, predicted) {
+  ss_residual <- sum((observed - predicted)^2)
+  ss_total <- sum((observed - mean(observed))^2)
+  1 - (ss_residual / ss_total)
+}
+
+calculate_rmse <- function(observed, predicted) {
+  sqrt(mean((observed - predicted)^2))
+}
+
+compare_models <- function(model, data, outcome) {
+  predicted <- predict(model, newdata = data)
+  r2 <- calculate_r2(data[[outcome]], exp(predicted))
+  rmse <- calculate_rmse(data[[outcome]], exp(predicted))
+  list(R2 = r2, RMSE = rmse)
+}
+
+# Full model results
+train_results_full <- compare_models(gam_model_full, train_data, "outcome")
+validation_results_full <- compare_models(gam_model_full, validation_data, "outcome")
+test_results_full <- compare_models(gam_model_full, test_data, "outcome")
+
+# Simplified model results
+train_results_simplified <- compare_models(gam_model_simplified, train_data, "outcome")
+validation_results_simplified <- compare_models(gam_model_simplified, validation_data, "outcome")
+test_results_simplified <- compare_models(gam_model_simplified, test_data, "outcome")
+
+# Calculate baseline RMSE
+calculate_baseline_rmse <- function(data, outcome_col) {
+  baseline_prediction <- mean(data[[outcome_col]])
+  sqrt(mean((data[[outcome_col]] - baseline_prediction)^2))
+}
+
+baseline_rmse_train <- calculate_baseline_rmse(train_data, "outcome")
+baseline_rmse_validation <- calculate_baseline_rmse(validation_data, "outcome")
+baseline_rmse_test <- calculate_baseline_rmse(test_data, "outcome")
+
+# Compile results into a table
+results_comparison <- data.frame(
+  Dataset = c("Train", "Validation", "Test"),
+  Full_RMSE = c(train_results_full$RMSE, validation_results_full$RMSE, test_results_full$RMSE),
+  Full_R2 = c(train_results_full$R2, validation_results_full$R2, test_results_full$R2),
+  Simplified_RMSE = c(train_results_simplified$RMSE, validation_results_simplified$RMSE, test_results_simplified$RMSE),
+  Simplified_R2 = c(train_results_simplified$R2, validation_results_simplified$R2, test_results_simplified$R2),
+  Baseline_RMSE = c(baseline_rmse_train, baseline_rmse_validation, baseline_rmse_test)
+)
+
+# Print results comparison
+print(results_comparison)
+
+# Summaries of both models
+cat("Full Model Summary:\n")
+summary(gam_model_full)
+
+cat("\nSimplified Model Summary:\n")
+summary(gam_model_simplified)
+```
+
+
+
+
+```{r}
+#Assessment for confounding
+
+
+ggplot(data_cleaned, aes(x = outcome, y = TRAE_rate)) +
+    geom_point() +
+    geom_smooth(method = "lm", color = "blue") +
+    labs(title = "TRAEs vs Non-Compliance", x = "Non-Compliance", y = "TRAE Rate")
+
+
+#Add interaction term
+
+gam_model <- gam(
+  formula = outcome ~ blinding_practice + disease_status+ s(follow_up_period, bs = "tp") + s(death_rate, bs = "tp")+ s(TRAE_rate, bs = "tp")+
+             TRAE_rate:follow_up_period,
+  data = train_data,
+  family = gaussian(link = "log")
+)
+
+# Generate predictions for the test set
+test_data$predicted_outcome <- predict(gam_model, newdata = test_data, type = "response")
+
+
+#Invesigate non-linearity
+plot(gam_model, select = 2, pages = 1)  # TRAE_rate
+plot(gam_model, select = 1, pages = 1)  # follow_up_period
+
+
+```
+
+

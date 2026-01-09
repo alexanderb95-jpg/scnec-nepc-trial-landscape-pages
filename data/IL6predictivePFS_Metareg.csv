@@ -1,0 +1,9 @@
+﻿Study_ID,"Cytokine (if multiple, each row gets it's own cytokine)",Type of Biomarker,LogHR_PFS,SE_PFS,IL6_Cutoff_pgmL,Time of cytokine assesment
+Carril-Ajuria 2022-1,IL-6,Predictive,-0.173953307,0.391308765,3.8,baseline (prior to first dose)
+Carril-Ajuria 2022-3,IL-6,Predictive,-0.425267735,0.14275913,3.8,baseline (prior to first dose)
+Myojin 2022,IL-6,Predictive,-0.787092793,0.351091996,4.77,prior to treatment
+Shi 2021-1,IL-6,Predictive,-0.643431588,0.39865772,13.8,within 7 days of therapy initiation
+Shi 2021-2,IL-6,Predictive,-1.643066093,1.206393276,11.3,within 7 days of therapy initiation
+Shi 2021-4,IL-6,Predictive,-0.786182047,0.397005906,11.85,within 7 days of therapy initiation
+Shi 2021-5,IL-6,Predictive,-0.795252403,0.493664229,11.3,within 7 days of therapy initiation
+Shi 2021-7,IL-6,Predictive,-0.722220428,0.362380988,13.8,0-7d prior to first dose and during treatment 

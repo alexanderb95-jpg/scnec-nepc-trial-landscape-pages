@@ -1,0 +1,1400 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+
+#Packages load
+
+install.packages("readxl")
+install.packages("writexl")
+install.packages("kableExtra")
+install.packages("tidyr")
+install.packages("car")
+install.packages("GGally")
+install.packages("mgcv")
+install.packages("glmnet")
+install.packages("openxlsx")
+install.packages("caret")
+install.packages("tible")
+library(tidyr)
+
+
+
+# Load the readxl library
+library(readxl)
+# Load required libraries
+library(dplyr)
+library(kableExtra)
+
+
+
+
+
+
+```
+
+```{r}
+
+#Load data
+
+# Set the file path
+file_path <- "Withdawl_final1.xlsx"
+setwd("~/R")
+getwd()
+
+# Read the Excel file from the specified path
+data <- read_excel("Withdawl_final1.xlsx", 
+    col_types = c("numeric", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "text", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "text", "text", "text", 
+        "text", "text", "text", "numeric", 
+        "text", "text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric"))
+
+# View the first few rows of the data to confirm it's loaded correctly
+head(data)
+```
+
+```{r}
+
+#Load Data for Table 1. Trial demographics
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(writexl)
+
+# Continuous Variables: Convert Follow up period (years) to months
+data <- data %>%
+  mutate(`Follow up period (years)` = as.numeric(gsub("[^0-9.]", "", `Follow up period (years)`)))
+
+# Continuous variable summary
+continuous_summary <- data %>%
+  mutate(`Follow up period (months)` = `Follow up period (years)` * 12) %>%
+  summarize(
+    `Follow up period (months)` = paste0(
+      median(`Follow up period (months)`, na.rm = TRUE), " (", 
+      IQR(`Follow up period (months)`, na.rm = TRUE), ")"
+    ),
+    `Number enrolled in trial` = paste0(
+      sum(`Number enrolled in trial`, na.rm = TRUE), " (", 
+      median(`Number enrolled in trial`, na.rm = TRUE), ")"
+    )  # Include sum (median) for Number enrolled
+  ) %>%
+  pivot_longer(cols = everything(), names_to = "Characteristic", values_to = "Value")
+
+# Categorical Variables: Update column names and handle missing columns
+categorical_columns <- c(
+  "Randomized? (y/n)", 
+  "Study type", 
+  "Control group", 
+  "Type of drug control", 
+  "Mono or combo therapy in control arm", 
+  "Type of drug interventional", 
+  "Mono or combo therapy in interventional arm", 
+  "Subtype",
+  "Blinding practice", 
+  "Lines of treatment", 
+  "Disease status", 
+  "Sponser", 
+  "Location of trial", 
+  "Primary endpoint of trials"
+)
+
+# Filter only columns that exist in `data`
+categorical_columns <- categorical_columns[categorical_columns %in% colnames(data)]
+
+# Generate a summary for each categorical column
+categorical_summary <- lapply(categorical_columns, function(column) {
+  if (!is.null(data[[column]]) && length(unique(data[[column]])) > 0) {
+    # Create the summary table
+    df <- as.data.frame(table(data[[column]]))
+    colnames(df) <- c("Category", "Count")
+    df$Percentage <- round((df$Count / sum(df$Count)) * 100, 1)
+    df$Characteristic <- column
+    df$Value <- paste0(df$Category, ": ", df$Count, " (", df$Percentage, "%)")
+    return(df[, c("Characteristic", "Value")])
+  } else {
+    # Return an empty data frame if the column is missing or empty
+    return(data.frame(Characteristic = column, Value = "No data available"))
+  }
+})
+
+# Combine into a single data frame
+categorical_summary_df <- do.call(rbind, categorical_summary)
+
+# Combine Continuous and Categorical Summaries
+table_1_df <- bind_rows(continuous_summary, categorical_summary_df)
+
+# Export combined summary to Excel
+write_xlsx(list(
+  "Table 1" = table_1_df
+), path = "Table_1_Characteristics.xlsx")
+
+# Display the final table
+print(table_1_df)
+
+
+
+
+```
+
+```{r}
+
+
+#Table 2, withdrawl reasons
+
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(writexl)
+library(stats)
+
+# Define relevant column names
+withdrawal_columns <- c(
+  "Number withdrew from treatment arm(s)",
+  "Number withdrew from treatment arm(s) due to adverse event",
+  "Number withdrew from treatment arm(s) due to progression of disease",
+  "Number withdrew from treatment arm(s) due patient withdrawl of consent",
+  "Number withdrew from control arm",
+  "Number withdrew from control arm due to adverse event",
+  "Number withdrew from control arm due to progression of dz",
+  "Number withdrew from control arm due patient withdrawl of consent"
+)
+
+randomization_columns <- c(
+  "Number randomized (or selected)  to treatment arm(s)",
+  "Number randomized (or selected)  to control arm"
+)
+
+# Clean and convert all relevant columns in a single step
+data <- data %>%
+  mutate(across(all_of(c(withdrawal_columns, randomization_columns)), ~ as.numeric(gsub("[^0-9.]", "", .))))
+
+# Calculate totals
+total_randomized_treatment <- sum(data$`Number randomized (or selected)  to treatment arm(s)`, na.rm = TRUE)
+total_randomized_control <- sum(data$`Number randomized (or selected)  to control arm`, na.rm = TRUE)
+total_enrolled <- total_randomized_treatment + total_randomized_control
+
+# Create summary data
+summary_data <- data.frame(
+  Reason = c(
+    "Overall withdrawal",
+    "Due to adverse event",
+    "Due to progression of disease",
+    "Due to patient withdrawal of consent",
+    "Discontinuation rate"
+  ),
+  Treatment_Count = c(
+    sum(data$`Number withdrew from treatment arm(s)`, na.rm = TRUE),
+    sum(data$`Number withdrew from treatment arm(s) due to adverse event`, na.rm = TRUE),
+    sum(data$`Number withdrew from treatment arm(s) due to progression of disease`, na.rm = TRUE),
+    sum(data$`Number withdrew from treatment arm(s) due patient withdrawl of consent`, na.rm = TRUE),
+    sum(data$`Number withdrew from treatment arm(s)`, na.rm = TRUE) -
+      (sum(data$`Number withdrew from treatment arm(s) due to adverse event`, na.rm = TRUE) +
+       sum(data$`Number withdrew from treatment arm(s) due to progression of disease`, na.rm = TRUE) +
+       sum(data$`Number withdrew from treatment arm(s) due patient withdrawl of consent`, na.rm = TRUE))
+  ),
+  Control_Count = c(
+    sum(data$`Number withdrew from control arm`, na.rm = TRUE),
+    sum(data$`Number withdrew from control arm due to adverse event`, na.rm = TRUE),
+    sum(data$`Number withdrew from control arm due to progression of dz`, na.rm = TRUE),
+    sum(data$`Number withdrew from control arm due patient withdrawl of consent`, na.rm = TRUE),
+    sum(data$`Number withdrew from control arm`, na.rm = TRUE) -
+      (sum(data$`Number withdrew from control arm due to adverse event`, na.rm = TRUE) +
+       sum(data$`Number withdrew from control arm due to progression of dz`, na.rm = TRUE) +
+       sum(data$`Number withdrew from control arm due patient withdrawl of consent`, na.rm = TRUE))
+  )
+)
+
+# Add percentages and p-values
+summary_data <- summary_data %>%
+  mutate(
+    `Treatment Count (%)` = paste0(Treatment_Count, " (", round((Treatment_Count / total_randomized_treatment) * 100, 2), "%)"),
+    `Control Count (%)` = paste0(Control_Count, " (", round((Control_Count / total_randomized_control) * 100, 2), "%)"),
+    `Total Count (%)` = paste0(Treatment_Count + Control_Count, " (", round(((Treatment_Count + Control_Count) / total_enrolled) * 100, 2), "%)"),
+    p_value = sapply(1:nrow(summary_data), function(i) {
+      treatment_count <- Treatment_Count[i]
+      control_count <- Control_Count[i]
+      contingency_table <- matrix(c(treatment_count, total_randomized_treatment - treatment_count,
+                                    control_count, total_randomized_control - control_count), nrow = 2)
+      if (all(contingency_table > 0)) {
+        chisq.test(contingency_table)$p.value
+      } else {
+        NA
+      }
+    })
+  )
+
+# Select final columns and write to Excel
+summary_output <- summary_data %>%
+  select(Reason, `Total Count (%)`, `Treatment Count (%)`, `Control Count (%)`, p_value)
+
+write_xlsx(summary_output, "Withdrawal_Summary_with_Discontinuation_and_P_Values.xlsx")
+
+# Display final table
+summary_output
+
+```
+
+```{r}
+
+#Figure 1
+# Load necessary libraries
+library(readxl)
+library(dplyr)
+library(writexl)
+library(ggplot2)
+
+# Load the data
+file_path <- "Cleaned_Clinical_Trial_Data.xlsx"
+Cleaned_Clinical_Trial_Data <- read_excel(file_path)
+
+# Define the columns of interest
+columns_of_interest <- c(
+    "Total_Withdrawl/Discontinuation",
+    "Total_Withdrawl_Of_Patient_Consent_W/O_Clear_Reasons",
+    "Total_Withdrawl_Due_To_Trae",
+    "Total_Withdrew_Due_To_Progression_Of_Dz",
+    "Total_Withdrawl_Due_To_Complicating_Medical_Disease",
+    "Total_Withdrawl__To_Seek_Alternative_Tx",
+    "Total_Investigator_Initated_Withdrawl_Due_To_No_Longer_Meeting_Study_Eligibility_Criteria",
+    "Withdrew_By_Sponser_Due_To_Non-Compliance",
+    "Withdrew_Due_To_Death",
+    "Unspecified_Loss_To_F/U",
+    "Total_N_For_Other_Reasonsof_Withdrawl"
+)
+
+# Convert columns of interest to numeric, coercing non-numeric values to NA
+Cleaned_Clinical_Trial_Data[columns_of_interest] <- Cleaned_Clinical_Trial_Data[columns_of_interest] %>%
+    mutate(across(everything(), ~ as.numeric(.)))
+
+# Calculate overall withdrawal
+overall_withdrawal <- sum(Cleaned_Clinical_Trial_Data[["Total_Withdrawl/Discontinuation"]], na.rm = TRUE)
+
+# Combine rows as requested
+other_total <- sum(
+    Cleaned_Clinical_Trial_Data[["Total_N_For_Other_Reasonsof_Withdrawl"]], 
+    Cleaned_Clinical_Trial_Data[["Total_Withdrawl_Due_To_Complicating_Medical_Disease"]], 
+    Cleaned_Clinical_Trial_Data[["Total_Withdrawl__To_Seek_Alternative_Tx"]],
+    na.rm = TRUE
+)
+
+trial_driven_total <- sum(
+    Cleaned_Clinical_Trial_Data[["Total_Investigator_Initated_Withdrawl_Due_To_No_Longer_Meeting_Study_Eligibility_Criteria"]],
+    Cleaned_Clinical_Trial_Data[["Withdrew_By_Sponser_Due_To_Non-Compliance"]],
+    na.rm = TRUE
+)
+
+# Update combined rows
+other_total <- sum(
+    Cleaned_Clinical_Trial_Data[["Total_Withdrawl_Due_To_Complicating_Medical_Disease"]], 
+    Cleaned_Clinical_Trial_Data[["Total_Withdrawl__To_Seek_Alternative_Tx"]],
+    na.rm = TRUE
+)
+
+# Updated summary table
+summary_data <- data.frame(
+    Reason = c(
+        "Overall withdrawal",
+        "Withdrawal of patient consent w/o clear reasons",
+        "Withdrawal due to TRAE",
+        "Withdrawal due to progression of disease",
+        "Other",  # Combined rows 32, 33
+        "Investigator-initiated withdrawal due to ineligibility",  # Row 34
+        "Sponsor-initiated withdrawal due to non-compliance",      # Row 35
+        "Withdrawal due to death",
+        "Unspecified loss to follow-up"
+    ),
+    Total_Count = c(
+        overall_withdrawal,
+        sum(Cleaned_Clinical_Trial_Data[["Total_Withdrawl_Of_Patient_Consent_W/O_Clear_Reasons"]], na.rm = TRUE),
+        sum(Cleaned_Clinical_Trial_Data[["Total_Withdrawl_Due_To_Trae"]], na.rm = TRUE),
+        sum(Cleaned_Clinical_Trial_Data[["Total_Withdrew_Due_To_Progression_Of_Dz"]], na.rm = TRUE),
+        other_total,  # Combined total
+        sum(Cleaned_Clinical_Trial_Data[["Total_Investigator_Initated_Withdrawl_Due_To_No_Longer_Meeting_Study_Eligibility_Criteria"]], na.rm = TRUE),
+        sum(Cleaned_Clinical_Trial_Data[["Withdrew_By_Sponser_Due_To_Non-Compliance"]], na.rm = TRUE),
+        sum(Cleaned_Clinical_Trial_Data[["Withdrew_Due_To_Death"]], na.rm = TRUE),
+        sum(Cleaned_Clinical_Trial_Data[["Unspecified_Loss_To_F/U"]], na.rm = TRUE)
+    )
+)
+
+# Recalculate percentages
+summary_data <- summary_data %>%
+    mutate(Percentage = round((Total_Count / overall_withdrawal) * 100, 2))
+
+# Simulate error bars (replace with actual standard error if available)
+summary_data <- summary_data %>%
+    mutate(Error = Percentage * 0.02)  # ±2% of the percentage as an example
+
+# Save the updated summary table to an Excel file
+write_xlsx(summary_data, "Withdrawal_Summary_Updated.xlsx")
+
+# Re-plot the data excluding "Overall withdrawal"
+graph_data <- summary_data %>%
+    filter(Reason != "Overall withdrawal") %>%
+    arrange(desc(Percentage))
+
+ggplot(graph_data, aes(x = reorder(Reason, -Percentage), y = Percentage, fill = Reason)) +
+    geom_bar(stat = "identity", color = "black") +
+    geom_errorbar(aes(ymin = Percentage - Error, ymax = Percentage + Error), width = 0.2) +
+    labs(
+        title = "Reasons for Withdrawal as Percentage of Overall Withdrawal",
+        x = "Reason",
+        y = "Percentage (%)"
+    ) +
+    expand_limits(y = max(graph_data$Percentage + graph_data$Error) + 5) +  # Extend y-axis
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+```
+
+
+
+
+
+```{r}
+#Reasons for attirtion with subgroup analysis by tumor type and dz status
+
+# Load necessary libraries
+library(dplyr)
+library(writexl)
+
+# Define the specified columns for conversion
+columns_to_convert <- c(
+  "Total withdrawl of patient consent w/o clear reasons",
+  "Total withdrawl due to TRAE (tx adverse effects",
+  "Total withdrew due to progression of dz",
+  "Total withdrawl due to complicating medical disease",
+  "Total investigator initated withdrawl due to no longer meeting study eligibility criteria",
+  "Withdrew by sponser due to non-compliance",
+  "Withdrew due to death",
+  "Unspecified loss to f/u",
+  "Total N for other reasonsof withdrawl",
+  "Number withdrew from control arm due to adverse event",
+  "Number withdrew from control arm due to progression of dz",
+  "Number withdrew from control arm due patient withdrawl of consent",
+  "Number randomized (or selected)  to control arm",
+  "Number withdrew from treatment arm(s) due to adverse event",
+  "Number withdrew from treatment arm(s) due to progression of disease",
+  "Number withdrew from treatment arm(s) due patient withdrawl of consent",
+  "Number randomized (or selected)  to treatment arm(s)"
+)
+
+# Convert columns to numeric if they exist in data
+columns_to_convert <- columns_to_convert[columns_to_convert %in% colnames(data)]
+data[columns_to_convert] <- lapply(data[columns_to_convert], function(x) as.numeric(as.character(x)))
+
+# Function to calculate withdrawal summary with count and percentage
+calculate_withdrawal_summary <- function(data) {
+  # Total withdrawals and enrolled
+  total_withdrawals <- sum(data$`Total withdrawl/discontinuation`, na.rm = TRUE)
+  total_enrolled <- sum(data$`Number enrolled in trial`, na.rm = TRUE)
+  
+  # Summarize each reason for withdrawal with counts and percentages
+  summary_table <- data %>%
+    summarize(
+      `Total Withdrawl consent` = paste0(sum(`Total withdrawl of patient consent w/o clear reasons`, na.rm = TRUE), " (", 
+                                         round(sum(`Total withdrawl of patient consent w/o clear reasons`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Total withdrawl due to TRAE` = paste0(sum(`Total withdrawl due to TRAE (tx adverse effects`, na.rm = TRUE), " (", 
+                                                 round(sum(`Total withdrawl due to TRAE (tx adverse effects`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Total withdrew due to progression of dz` = paste0(sum(`Total withdrew due to progression of dz`, na.rm = TRUE), " (", 
+                                                        round(sum(`Total withdrew due to progression of dz`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Total withdrawl due to complicating medical disease` = paste0(sum(`Total withdrawl due to complicating medical disease`, na.rm = TRUE), " (", 
+                                                                     round(sum(`Total withdrawl due to complicating medical disease`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Total investigator initiated withdrawl` = paste0(sum(`Total investigator initated withdrawl due to no longer meeting study eligibility criteria`, na.rm = TRUE), " (", 
+                                                       round(sum(`Total investigator initated withdrawl due to no longer meeting study eligibility criteria`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Withdrew by sponsor due to non-compliance` = paste0(sum(`Withdrew by sponser due to non-compliance`, na.rm = TRUE), " (", 
+                                                          round(sum(`Withdrew by sponser due to non-compliance`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Withdrew due to death` = paste0(sum(`Withdrew due to death`, na.rm = TRUE), " (", 
+                                       round(sum(`Withdrew due to death`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Unspecified loss to follow-up` = paste0(sum(`Unspecified loss to f/u`, na.rm = TRUE), " (", 
+                                               round(sum(`Unspecified loss to f/u`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Total N for other reasons` = paste0(sum(`Total N for other reasonsof withdrawl`, na.rm = TRUE), " (", 
+                                           round(sum(`Total N for other reasonsof withdrawl`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Discontinuation Rate` = paste0(total_withdrawals, " (", round((total_withdrawals / total_enrolled) * 100, 1), "%)"),
+      
+      # Control arm withdrawal percentages with count
+      `% withdrew from control arm due to adverse event` = paste0(sum(`Number withdrew from control arm due to adverse event`, na.rm = TRUE), " (", 
+                                                                  round(sum(`Number withdrew from control arm due to adverse event`, na.rm = TRUE) / sum(`Number randomized (or selected)  to control arm`, na.rm = TRUE) * 100, 1), "%)"),
+      `% withdrew from control arm due to progression of dz` = paste0(sum(`Number withdrew from control arm due to progression of dz`, na.rm = TRUE), " (", 
+                                                                     round(sum(`Number withdrew from control arm due to progression of dz`, na.rm = TRUE) / sum(`Number randomized (or selected)  to control arm`, na.rm = TRUE) * 100, 1), "%)"),
+      `% withdrew from control arm due patient withdrawl of consent` = paste0(sum(`Number withdrew from control arm due patient withdrawl of consent`, na.rm = TRUE), " (", 
+                                                                             round(sum(`Number withdrew from control arm due patient withdrawl of consent`, na.rm = TRUE) / sum(`Number randomized (or selected)  to control arm`, na.rm = TRUE) * 100, 1), "%)"),
+      
+      # Interventional arm withdrawal percentages with count
+      `% withdrew from interventional arm due to adverse event` = paste0(sum(`Number withdrew from treatment arm(s) due to adverse event`, na.rm = TRUE), " (", 
+                                                                        round(sum(`Number withdrew from treatment arm(s) due to adverse event`, na.rm = TRUE) / sum(`Number randomized (or selected)  to treatment arm(s)`, na.rm = TRUE) * 100, 1), "%)"),
+      `% withdrew from interventional arm due to progression of dz` = paste0(sum(`Number withdrew from treatment arm(s) due to progression of disease`, na.rm = TRUE), " (", 
+                                                                            round(sum(`Number withdrew from treatment arm(s) due to progression of disease`, na.rm = TRUE) / sum(`Number randomized (or selected)  to treatment arm(s)`, na.rm = TRUE) * 100, 1), "%)"),
+      `% withdrew from interventional arm due patient withdrawl of consent` = paste0(sum(`Number withdrew from treatment arm(s) due patient withdrawl of consent`, na.rm = TRUE), " (", 
+                                                                                     round(sum(`Number withdrew from treatment arm(s) due patient withdrawl of consent`, na.rm = TRUE) / sum(`Number randomized (or selected)  to treatment arm(s)`, na.rm = TRUE) * 100, 1), "%)")
+    )
+  
+  return(summary_table)
+}
+
+# Step 1: Perform non-subgroup analysis with discontinuation rate
+non_subgroup_summary <- calculate_withdrawal_summary(data)
+
+# Step 2: Subgroup analysis by disease status and tumor type
+subgroup_disease_status <- data %>%
+    group_by(`Disease status`) %>%
+    do(calculate_withdrawal_summary(.)) %>%
+    ungroup()
+
+subgroup_tumor_type <- data %>%
+    group_by(`Subtype`) %>%
+    do(calculate_withdrawal_summary(.)) %>%
+    ungroup()
+
+# Export all summaries to Excel
+write_xlsx(list(
+  "Non-subgroup Summary" = non_subgroup_summary,
+  "By Disease Status" = subgroup_disease_status,
+  "By Tumor Type (Subtype)" = subgroup_tumor_type
+), path = "Withdrawal_Summary_with_Discontinuation_Rate.xlsx")
+
+
+```
+
+
+```{r}
+
+#Descriptive analysis for mitigation practices
+
+# Load necessary libraries
+library(dplyr)
+library(writexl)
+
+
+# Define the specified columns
+specified_columns <- c(
+  "contact patients lost to f/u", "encouragement", "home nursing", 
+  "no mitigation stratigies", "patient education", "protocol amendments", 
+  "supportive care", "telemedicine", "Non-specific effort", 
+  "Unblinding or cross-over", "Dosing or schedule adjustments", 
+  "Continued tx after withdrawl or re-challenge"
+)
+
+# Calculate count and percentage for each specified column
+summary_table <- data %>%
+  summarize(across(all_of(specified_columns), ~ sum(.x, na.rm = TRUE))) %>%
+  pivot_longer(cols = everything(), names_to = "Reason", values_to = "Count")
+
+# Calculate total count to use for percentage calculation
+total_count <- sum(summary_table$Count, na.rm = TRUE)
+
+# Add percentage and format the output as "count (percentage%)"
+summary_table <- summary_table %>%
+  mutate(Percentage = round((Count / total_count) * 100, 1),
+         Value = paste0(Count, " (", Percentage, "%)")) %>%
+  select(Reason, Value)
+
+# Display the summary table for verification
+print("Summary table for specified columns:")
+print(summary_table)
+
+# Export to Excel
+write_xlsx(summary_table, "Specified_Columns_Summary.xlsx")
+
+```
+
+```{r}
+
+
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(writexl)
+library(ggplot2)
+
+# Define the specified columns
+specified_columns <- c(
+  "contact patients lost to f/u", "encouragement", "home nursing", 
+  "no mitigation stratigies", "patient education", "protocol amendments", 
+  "supportive care", "telemedicine", "Non-specific effort", 
+  "Unblinding or cross-over", "Dosing or schedule adjustments", 
+  "Continued tx after withdrawl or re-challenge"
+)
+
+# Calculate count and percentage for each specified column
+summary_table <- data %>%
+  summarize(across(all_of(specified_columns), ~ sum(.x, na.rm = TRUE))) %>%
+  pivot_longer(cols = everything(), names_to = "Reason", values_to = "Count")
+
+# Calculate total count to use for percentage calculation
+total_count <- sum(summary_table$Count, na.rm = TRUE)
+
+# Add percentage and confidence intervals
+summary_table <- summary_table %>%
+  mutate(
+    Percentage = round((Count / total_count) * 100, 1),
+    Lower_CI = pmax(0, round(((Count / total_count) - 1.96 * sqrt((Count / total_count) * (1 - (Count / total_count)) / total_count)) * 100, 1)),
+    Upper_CI = pmin(100, round(((Count / total_count) + 1.96 * sqrt((Count / total_count) * (1 - (Count / total_count)) / total_count)) * 100, 1))
+  )
+
+# Combine rows with percentages less than 3% into "Other"
+summary_table <- summary_table %>%
+  mutate(
+    Reason = ifelse(Percentage < 3, "Other", Reason)
+  ) %>%
+  group_by(Reason) %>%
+  summarise(
+    Count = sum(Count, na.rm = TRUE),
+    Percentage = round((Count / total_count) * 100, 1),
+    Lower_CI = pmax(0, round(((Count / total_count) - 1.96 * sqrt((Count / total_count) * (1 - (Count / total_count)) / total_count)) * 100, 1)),
+    Upper_CI = pmin(100, round(((Count / total_count) + 1.96 * sqrt((Count / total_count) * (1 - (Count / total_count)) / total_count)) * 100, 1))
+  ) %>%
+  arrange(desc(Percentage))
+
+# Export the updated summary table to Excel
+write_xlsx(summary_table, "Specified_Columns_Summary_Updated_with_CI.xlsx")
+
+# Plot a bar chart with 95% confidence intervals
+# Plot a bar chart with 95% confidence intervals
+ggplot(summary_table, aes(x = reorder(Reason, -Percentage), y = Percentage, fill = Reason)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_errorbar(aes(ymin = Lower_CI, ymax = Upper_CI), width = 0.2) +
+  labs(
+    title = "Mitigation Practices as Percentage of Total (95% CI)",
+    x = "Mitigation Practice",
+    y = "Percentage (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"  # Remove legend
+  )
+ 
+```
+
+
+```{r}
+
+
+#Data availability after withdrawl
+#Need for clear reasons for withdrawl
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(writexl)
+
+# Define columns to summarize
+columns_to_summarize <- c("Did trial state need for clearly documented reasons for withdrawal", 
+                          "Data availability after withdrawl?")
+
+# Calculate counts and percentages for each column
+summary_table <- lapply(columns_to_summarize, function(column) {
+  # Count each unique value and calculate percentage
+  data %>%
+    count(!!sym(column)) %>%
+    rename(Response = !!sym(column), Count = n) %>%
+    mutate(
+      Percentage = round((Count / sum(Count)) * 100, 1),
+      Lower_CI = pmax(0, round(((Count / sum(Count)) - 1.96 * sqrt((Count / sum(Count)) * (1 - (Count / sum(Count))) / sum(Count))) * 100, 1)),
+      Upper_CI = pmin(100, round(((Count / sum(Count)) + 1.96 * sqrt((Count / sum(Count)) * (1 - (Count / sum(Count))) / sum(Count))) * 100, 1))
+    ) %>%
+    mutate(Variable = column) %>%
+    select(Variable, Response, Count, Percentage, Lower_CI, Upper_CI)
+}) %>%
+  bind_rows()  # Combine results into a single data frame
+
+# Export the summary to an Excel file
+write_xlsx(list("Counts_and_Percentages" = summary_table), path = "Counts_and_Percentages_Summary_with_CI.xlsx")
+
+# Add an additional variable for titles at the bottom
+summary_table <- summary_table %>%
+  mutate(
+    Facet_Title = case_when(
+      Variable == "Did trial state need for clearly documented reasons for withdrawal" ~ "Did trial state need for clearly documented reasons?",
+      Variable == "Data availability after withdrawl?" ~ "Data availability after withdrawal?"
+    )
+  )
+
+# Plot a bar chart with error bars
+ggplot(summary_table, aes(x = Response, y = Percentage, fill = Response)) +
+  geom_bar(stat = "identity", color = "black", width = 0.7) +
+  geom_errorbar(aes(ymin = Lower_CI, ymax = Upper_CI), width = 0.2) +
+  facet_wrap(~Facet_Title, scales = "free_x", strip.position = "bottom") +
+  labs(
+    x = NULL,  # Remove default x-axis label
+    y = "Percentage (%)",
+    title = NULL  # Remove default title
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 12, face = "bold"),
+    strip.placement = "bottom",  # Place facet titles at the bottom
+    panel.spacing = unit(2, "lines"),
+    legend.position = "none"  # Remove legend
+  )
+```
+
+
+```{r}
+
+#Regression mitigation
+
+# Load the data
+file_path <- "Cleaned_Clinical_Trial_Data.xlsx"
+Cleaned_Clinical_Trial_Data <- read_excel(file_path)
+
+library(openxlsx)  # For writing to Excel
+
+fit_gam_and_summarize <- function(outcome_column_name, dataset, output_file = NULL) {
+  # Verify if the outcome column exists
+  if (!(outcome_column_name %in% colnames(dataset))) {
+    stop(paste("The outcome column", outcome_column_name, "is not found in the dataset."))
+  }
+  
+  # Select relevant columns dynamically
+  regression_data <- dataset %>%
+    select(
+      all_of(outcome_column_name),
+      Contact_Patients_Lost_To_FU,
+      Encouragement,
+      No_Mitigation_Stratigies,
+      Patient_Education,
+      Protocol_Amendments,
+      Supportive_Care,
+      Non_Specific_Effort,
+      Unblinding_Or_Cross_Over,
+      Dosing_Or_Schedule_Adjustments,
+      Continued_Tx_After_Withdrawl_Or_Re_Challenge
+    ) %>%
+    drop_na()  # Remove rows with NA
+  
+  # Fit the GAM model for binary data
+  gam_model <- gam(
+    formula = as.formula(paste(outcome_column_name, "~ 
+                                Contact_Patients_Lost_To_FU + 
+                                Encouragement + 
+                                No_Mitigation_Stratigies + 
+                                Patient_Education + 
+                                Protocol_Amendments + 
+                                Supportive_Care + 
+                                Non_Specific_Effort + 
+                                Unblinding_Or_Cross_Over + 
+                                Dosing_Or_Schedule_Adjustments + 
+                                Continued_Tx_After_Withdrawl_Or_Re_Challenge")),
+    data = regression_data,
+    family = binomial()
+  )
+  
+  # Summarize the model
+  summary_df <- as.data.frame(summary(gam_model)$p.table)
+  summary_df <- cbind(term = rownames(summary_df), summary_df)
+  rownames(summary_df) <- NULL  # Reset row names
+  summary_df <- summary_df %>% mutate(across(where(is.numeric), round, 3))  # Round numeric columns to 3 decimal places
+  
+  # Export results to Excel if output_file is provided
+  if (!is.null(output_file)) {
+    wb <- createWorkbook()
+    addWorksheet(wb, "GAM_Summary")
+    writeData(wb, "GAM_Summary", summary_df)
+    saveWorkbook(wb, output_file, overwrite = TRUE)
+  }
+  
+  # Return summary and coefficients
+  list(
+    summary = summary_df,
+    coefficients = data.frame(
+      term = names(coef(gam_model)),
+      estimate = round(coef(gam_model), 3)  # Round coefficients to 3 decimal places
+    )
+  )
+}
+
+# Re-run the model and export results to Excel
+output_file <- "GAM_Model_Summary.xlsx"
+results_total <- fit_gam_and_summarize("Total_Withdrawl_Rate_Without_Clear_Reason", Cleaned_Clinical_Trial_Data, output_file)
+
+# Print success message and preview summary
+cat("GAM model summary exported to:", output_file, "\n")
+print(results_total$summary)
+
+
+
+
+```
+
+```{r}
+#Proof of non-linear model above. Outcome 44=total w/drawl
+# Fit the linear model
+linear_model <- lm(outcome_44 ~ `contact patients lost to f/u` + encouragement + `home nursing` +
+                       `no mitigation stratigies` + `patient education` + `protocol amendments` +
+                       `supportive care` + telemedicine + `Non-specific effort` +
+                       `Unblinding or cross-over` + `Dosing or schedule adjustments` +
+                       `Continued tx after withdrawl or re-challenge`, 
+                   data = regression_data_44)
+
+# Load the car package
+library(car)
+
+# Generate partial residual plots
+avPlots(linear_model)
+```
+
+
+
+```{r}
+#Check general linear regression assumptions for withdrawl
+
+# Load necessary libraries
+library(dplyr)
+library(car)
+library(ggplot2)
+library(GGally)
+
+# Define the dataset and specify the predictor and outcome variables
+outcome_var <- "Withdrawl rate without clear reason interventional arm"
+predictor_vars <- c("Follow up period (years)", "Randomized? (y/n)", "Study type", "Control group", 
+                    "Type of drug control", "Mono or combo therapy in control arm", 
+                    "Mono or combo therapy in interventional arm", "Type of drug interventional", 
+                    "Subtype", "Blinding practice", "Lines of treatment", "Disease status", 
+                    "Sponser", "Location of trial", "Single site or multi site", 
+                    "Number enrolled in trial", "Treatment related disconintuation rate in interventional arm")
+
+# Convert categorical variables to factors
+data <- data %>%
+  mutate(across(where(is.character), as.factor))
+
+# Update outcome variable to handle spaces by surrounding it with backticks
+outcome_var <- "`Withdrawl rate without clear reason interventional arm`"
+
+# Fit the linear regression model, directly including backticks around the outcome variable
+model <- lm(`Withdrawl rate without clear reason interventional arm` ~ 
+             `Follow up period (years)` + `Randomized? (y/n)` + `Study type` + `Control group` + 
+             `Type of drug control` + `Mono or combo therapy in control arm` + 
+             `Mono or combo therapy in interventional arm` + `Type of drug interventional` + 
+             `Subtype` + `Blinding practice` + `Lines of treatment` + `Disease status` + 
+             `Sponser` + `Location of trial` + `Single site or multi site` + 
+             `Number enrolled in trial` + `Treatment related disconintuation rate in interventional arm`, 
+           data = data)
+
+
+# Define the numeric predictors and ensure no aliased predictors are included
+numeric_predictor_vars <- predictor_vars[sapply(data[predictor_vars], is.numeric)]
+
+# Include the outcome variable for correlation analysis
+numerical_vars <- data %>%
+  select(`Withdrawl rate without clear reason interventional arm`, all_of(numeric_predictor_vars))
+
+# Plot the correlation matrix for numerical predictors
+ggcorr(numerical_vars, label = TRUE) + ggtitle("Correlation Matrix for Numerical Predictors")
+
+# Step 2: Check for Multicollinearity Using VIF
+vif_results <- vif(model)  # car::vif
+print(vif_results)
+
+# Step 3: Check Residuals for Normality
+# Extract residuals from the model
+residuals <- residuals(model)
+
+# Histogram of residuals
+ggplot(data.frame(residuals), aes(x = residuals)) +
+  geom_histogram(bins = 30, fill = "blue", color = "white") +
+  ggtitle("Histogram of Residuals") +
+  theme_minimal()
+
+# Q-Q plot for residuals
+qqnorm(residuals)
+qqline(residuals, col = "red")
+
+# Step 4: Check Homoscedasticity (Constant Variance)
+# Plot residuals vs fitted values
+ggplot(data.frame(fitted = fitted(model), residuals = residuals), aes(x = fitted, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  ggtitle("Residuals vs Fitted Values") +
+  xlab("Fitted Values") +
+  ylab("Residuals") +
+  theme_minimal()
+
+# Step 5: Check Linearity
+# Partial residual plots for numeric predictors
+numeric_predictor_vars <- predictor_vars[sapply(data[predictor_vars], is.numeric)]
+if (length(numeric_predictor_vars) > 0) {
+  library(car)
+  crPlots(model, terms = numeric_predictor_vars)
+}
+
+# Step 3: Residual Plots
+# Residuals vs Fitted values plot to check for homoscedasticity and linearity
+ggplot(data = data.frame(Fitted = fitted(model), Residuals = resid(model)), 
+       aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  geom_smooth(method = "loess", col = "blue") +
+  labs(title = "Residuals vs Fitted", x = "Fitted values", y = "Residuals") +
+  theme_minimal()
+
+# Normal Q-Q plot to check for normality of residuals
+ggplot(data = data.frame(Residuals = resid(model)), aes(sample = Residuals)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(title = "Normal Q-Q Plot", x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  theme_minimal()
+
+# Scale-Location plot to check for homoscedasticity
+ggplot(data = data.frame(Fitted = fitted(model), Residuals = sqrt(abs(resid(model)))), 
+       aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  geom_smooth(method = "loess", col = "blue") +
+  labs(title = "Scale-Location Plot", x = "Fitted values", y = "√|Residuals|") +
+  theme_minimal()
+
+###Data is non-linear, multi-colinerity and homodescaity is present
+
+
+
+
+```
+
+
+
+
+
+```{r}
+#Regression w/ interaction terms and test/validation sets
+
+
+
+# Load necessary libraries
+library(dplyr)
+library(caret)
+library(mgcv)
+library(ggplot2)
+
+# Step 1: Rename target column to `outcome` if needed
+if ("Total withdrawl rate without clear reason" %in% colnames(data)) {
+  data <- data %>%
+    rename(outcome = `Total withdrawl rate without clear reason`)
+} else if (!"outcome" %in% colnames(data)) {
+  stop("The target variable `outcome` or `Total withdrawl rate without clear reason` is not found in the dataset.")
+}
+
+# Step 2: Preprocess the dataset
+# Handle missing values
+if (any(is.na(data$outcome))) {
+  cat("Removing rows with missing `outcome` values.\n")
+  data <- data %>%
+    filter(!is.na(outcome))
+}
+
+# Ensure `outcome` is numeric
+if (!is.numeric(data$outcome)) {
+  cat("Converting `outcome` to numeric.\n")
+  data$outcome <- as.numeric(data$outcome)
+}
+
+# Check for sufficient data points
+if (length(unique(data$outcome)) < 2) {
+  stop("The target variable `outcome` must have at least two distinct data points.")
+}
+
+# Ensure sufficient dataset size
+if (nrow(data) < 10) {
+  stop("The dataset does not contain enough rows for partitioning.")
+}
+
+# Step 3: Split dataset into training (70%), validation (15%), and test (15%) sets
+set.seed(123)
+trainIndex <- createDataPartition(data$outcome, p = 0.7, list = FALSE)
+train_data <- data[trainIndex, ]
+remaining_data <- data[-trainIndex, ]
+
+set.seed(123)
+valIndex <- createDataPartition(remaining_data$outcome, p = 0.5, list = FALSE)
+validation_data <- remaining_data[valIndex, ]
+test_data <- remaining_data[-valIndex, ]
+
+cat("Training set size:", nrow(train_data), "\n")
+cat("Validation set size:", nrow(validation_data), "\n")
+cat("Test set size:", nrow(test_data), "\n")
+
+
+
+
+
+
+# Step 3: Separate predictors and outcome
+train_outcome <- train_data$outcome
+validation_outcome <- validation_data$outcome
+test_outcome <- test_data$outcome
+
+train_data <- train_data %>% select(-outcome)
+validation_data <- validation_data %>% select(-outcome)
+test_data <- test_data %>% select(-outcome)
+
+# Impute missing values in the training set
+library(caret)
+preProc <- preProcess(train_data, method = "medianImpute")
+train_data_imputed <- predict(preProc, train_data)
+
+# Repeat for validation and test sets
+validation_data_imputed <- predict(preProc, validation_data)
+test_data_imputed <- predict(preProc, test_data)
+
+# Convert to matrices for glmnet
+train_matrix <- as.matrix(train_data_imputed)
+validation_matrix <- as.matrix(validation_data_imputed)
+test_matrix <- as.matrix(test_data_imputed)
+
+
+
+
+
+# Step 4: Fit the model on the training set using cross-validation to tune lambda
+set.seed(123)
+cv_ridge <- cv.glmnet(
+    train_matrix, train_outcome,
+    alpha = 0,  # Ridge regression
+    lambda = 10^seq(10, -2, length = 100),
+    standardize = TRUE,
+    nfolds = 10
+)
+
+# Optimal lambda
+best_lambda <- cv_ridge$lambda.min
+cat("Best lambda for ridge regularization:", best_lambda, "\n")
+
+# Final model with best lambda
+final_model <- glmnet(
+    train_matrix, train_outcome,
+    alpha = 0,
+    lambda = best_lambda,
+    standardize = TRUE
+)
+
+# Step 5: Make predictions and evaluate performance on each set
+
+# Training set performance
+train_predictions <- predict(final_model, s = best_lambda, newx = train_matrix)
+train_rss <- sum((train_outcome - train_predictions)^2)
+train_tss <- sum((train_outcome - mean(train_outcome))^2)
+train_r_squared <- 1 - train_rss / train_tss
+cat("Training R-squared:", train_r_squared, "\n")
+
+# Validation set performance
+validation_predictions <- predict(final_model, s = best_lambda, newx = validation_matrix)
+validation_rss <- sum((validation_outcome - validation_predictions)^2)
+validation_tss <- sum((validation_outcome - mean(validation_outcome))^2)
+validation_r_squared <- 1 - validation_rss / validation_tss
+cat("Validation R-squared:", validation_r_squared, "\n")
+
+# Test set performance
+test_predictions <- predict(final_model, s = best_lambda, newx = test_matrix)
+test_rss <- sum((test_outcome - test_predictions)^2)
+test_tss <- sum((test_outcome - mean(test_outcome))^2)
+test_r_squared <- 1 - test_rss / test_tss
+cat("Test R-squared:", test_r_squared, "\n")
+
+
+
+
+# Step 6: Ensure test_predictions is a vector
+test_predictions <- as.vector(test_predictions)  # Convert predictions to a vector if necessary
+
+# Now create the data frame and plot
+test_results <- data.frame(Observed = test_outcome, Predicted = test_predictions)
+
+# Plot observed vs predicted values for the test set
+library(ggplot2)
+ggplot(test_results, aes(x = Predicted, y = Observed)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+    labs(title = "Observed vs Predicted Plot - Test Set",
+         x = "Predicted Values",
+         y = "Observed Values") +
+    theme_minimal()
+```
+
+```{r}
+
+#Regression attempt part 2
+# Step 1: Read and Preprocess the Data
+data <- read_excel(file_path, sheet = "Sheet1")
+
+
+# Load necessary libraries
+library(dplyr)
+library(caret)
+library(glmnet)
+library(ggplot2)
+
+# Step 1: Rename target column to `outcome` if needed
+if ("Total withdrawl rate without clear reason" %in% colnames(data)) {
+  data <- data %>%
+    rename(outcome = `Total withdrawl rate without clear reason`)
+} else if (!"outcome" %in% colnames(data)) {
+  stop("The target variable `outcome` or `Total withdrawl rate without clear reason` is not found in the dataset.")
+}
+
+# Step 2: Preprocess the dataset
+# Handle missing values
+if (any(is.na(data$outcome))) {
+  cat("Removing rows with missing `outcome` values.\n")
+  data <- data %>%
+    filter(!is.na(outcome))
+}
+
+# Ensure `outcome` is numeric
+if (!is.numeric(data$outcome)) {
+  cat("Converting `outcome` to numeric.\n")
+  data$outcome <- as.numeric(data$outcome)
+}
+
+# Check for sufficient data points
+if (length(unique(data$outcome)) < 2) {
+  stop("The target variable `outcome` must have at least two distinct data points.")
+}
+
+# Ensure sufficient dataset size
+if (nrow(data) < 10) {
+  stop("The dataset does not contain enough rows for partitioning.")
+}
+
+# Step 3: Split dataset into training (80%), validation (10%), and test (10%) sets
+set.seed(123)
+trainIndex <- createDataPartition(data$outcome, p = 0.8, list = FALSE)
+train_data <- data[trainIndex, ]
+remaining_data <- data[-trainIndex, ]
+
+set.seed(123)
+valIndex <- createDataPartition(remaining_data$outcome, p = 0.5, list = FALSE)
+validation_data <- remaining_data[valIndex, ]
+test_data <- remaining_data[-valIndex, ]
+
+cat("Training set size:", nrow(train_data), "\n")
+cat("Validation set size:", nrow(validation_data), "\n")
+cat("Test set size:", nrow(test_data), "\n")
+
+# Separate predictors and outcome
+train_outcome <- train_data$outcome
+validation_outcome <- validation_data$outcome
+test_outcome <- test_data$outcome
+
+train_data <- train_data %>% select(-outcome)
+validation_data <- validation_data %>% select(-outcome)
+test_data <- test_data %>% select(-outcome)
+
+# Step 4: Convert factor columns to dummy variables
+dummy <- dummyVars(" ~ .", data = train_data)
+train_data_numeric <- as.data.frame(predict(dummy, newdata = train_data))
+validation_data_numeric <- as.data.frame(predict(dummy, newdata = validation_data))
+test_data_numeric <- as.data.frame(predict(dummy, newdata = test_data))
+
+# Step 5: Impute missing values
+preProc <- preProcess(train_data_numeric, method = "medianImpute")
+train_data_imputed <- predict(preProc, train_data_numeric)
+validation_data_imputed <- predict(preProc, validation_data_numeric)
+test_data_imputed <- predict(preProc, test_data_numeric)
+
+# Convert to matrices for glmnet
+train_matrix <- as.matrix(train_data_imputed)
+validation_matrix <- as.matrix(validation_data_imputed)
+test_matrix <- as.matrix(test_data_imputed)
+
+# Step 6: Fit Ridge regression model with cross-validation
+set.seed(123)
+cv_ridge <- cv.glmnet(
+    train_matrix, train_outcome,
+    alpha = 0,  # Ridge regression
+    lambda = 10^seq(10, -2, length = 100),
+    standardize = TRUE,
+    nfolds = 10
+)
+
+# Optimal lambda
+best_lambda <- cv_ridge$lambda.min
+cat("Best lambda for ridge regularization:", best_lambda, "\n")
+
+# Final Ridge regression model
+ridge_model <- glmnet(
+    train_matrix, train_outcome,
+    alpha = 0,
+    lambda = best_lambda,
+    standardize = TRUE
+)
+
+# Step 7: Evaluate the model
+# Training set performance
+train_predictions <- predict(ridge_model, s = best_lambda, newx = train_matrix)
+train_rss <- sum((train_outcome - train_predictions)^2)
+train_tss <- sum((train_outcome - mean(train_outcome))^2)
+train_r_squared <- 1 - train_rss / train_tss
+cat("Training R-squared:", train_r_squared, "\n")
+
+# Validation set performance
+validation_predictions <- predict(ridge_model, s = best_lambda, newx = validation_matrix)
+validation_rss <- sum((validation_outcome - validation_predictions)^2)
+validation_tss <- sum((validation_outcome - mean(validation_outcome))^2)
+validation_r_squared <- 1 - validation_rss / validation_tss
+cat("Validation R-squared:", validation_r_squared, "\n")
+
+# Test set performance
+test_predictions <- predict(ridge_model, s = best_lambda, newx = test_matrix)
+test_rss <- sum((test_outcome - test_predictions)^2)
+test_tss <- sum((test_outcome - mean(test_outcome))^2)
+test_r_squared <- 1 - test_rss / test_tss
+cat("Test R-squared:", test_r_squared, "\n")
+
+# Step 8: Visualize observed vs predicted values for the test set
+test_predictions <- as.vector(test_predictions)
+test_results <- data.frame(Observed = test_outcome, Predicted = test_predictions)
+ggplot(test_results, aes(x = Predicted, y = Observed)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+    labs(title = "Observed vs Predicted Plot - Test Set",
+         x = "Predicted Values",
+         y = "Observed Values") +
+    theme_minimal()
+
+```
+```{r}
+#removal variables, 1st approach
+# Load necessary libraries
+library(readxl)
+library(dplyr)
+library(caret)
+library(glmnet)
+
+
+# Step 1: Read and Preprocess the Data
+data <- read_excel(file_path, sheet = "Sheet1")
+
+# Rename the target column
+if ("Total withdrawl rate without clear reason" %in% colnames(data)) {
+  data <- data %>% rename(outcome = `Total withdrawl rate without clear reason`)
+} else if (!"outcome" %in% colnames(data)) {
+  stop("The target variable `outcome` is not found in the dataset.")
+}
+
+# Handle missing values and ensure `outcome` is numeric
+if (any(is.na(data$outcome))) {
+  cat("Removing rows with missing `outcome` values.\n")
+  data <- data %>% filter(!is.na(outcome))
+}
+data$outcome <- as.numeric(data$outcome)
+
+# Ensure sufficient data points and dataset size
+if (length(unique(data$outcome)) < 2) {
+  stop("The target variable `outcome` must have at least two distinct data points.")
+}
+if (nrow(data) < 10) {
+  stop("The dataset does not contain enough rows for partitioning.")
+}
+
+# Step 2: Exclude specified columns (known outcomes)
+columns_to_remove <- c(18:37, 40:42)
+# Ensure correct dplyr usage
+library(dplyr)
+
+# Validate that column indices are within range
+if (max(columns_to_remove) > ncol(data)) {
+    stop("Indices in columns_to_remove exceed the number of columns in the dataset.")
+}
+
+# Get the column names to remove
+columns_to_remove_names <- colnames(data)[columns_to_remove]
+
+# Remove the specified columns using dplyr::select
+data <- data %>% dplyr::select(-dplyr::all_of(columns_to_remove_names))
+# Step 3: Split dataset into training (80%), validation (10%), and test (10%) sets
+set.seed(123)
+trainIndex <- createDataPartition(data$outcome, p = 0.8, list = FALSE)
+train_data <- data[trainIndex, ]
+remaining_data <- data[-trainIndex, ]
+
+set.seed(123)
+valIndex <- createDataPartition(remaining_data$outcome, p = 0.5, list = FALSE)
+validation_data <- remaining_data[valIndex, ]
+test_data <- remaining_data[-valIndex, ]
+
+cat("Training set size:", nrow(train_data), "\n")
+cat("Validation set size:", nrow(validation_data), "\n")
+cat("Test set size:", nrow(test_data), "\n")
+
+# Separate predictors and outcome
+train_outcome <- train_data$outcome
+validation_outcome <- validation_data$outcome
+test_outcome <- test_data$outcome
+
+# Ensure the use of dplyr namespace explicitly
+train_data <- train_data %>% dplyr::select(-dplyr::all_of("outcome"))
+validation_data <- validation_data %>% dplyr::select(-dplyr::all_of("outcome"))
+test_data <- test_data %>% dplyr::select(-dplyr::all_of("outcome"))
+
+# Ensure 'Follow up period' is numeric
+
+# Ensure 'Follow up period (years)' is numeric in all datasets
+train_data$`Follow up period (years)` <- as.numeric(as.character(train_data$`Follow up period (years)`))
+validation_data$`Follow up period (years)` <- as.numeric(as.character(validation_data$`Follow up period (years)`))
+test_data$`Follow up period (years)` <- as.numeric(as.character(test_data$`Follow up period (years)`))
+
+# Impute missing values with the median if any
+if (any(is.na(train_data$`Follow up period (years)`))) {
+    train_data$`Follow up period (years)`[is.na(train_data$`Follow up period (years)`)] <- 
+        median(train_data$`Follow up period (years)`, na.rm = TRUE)
+}
+if (any(is.na(validation_data$`Follow up period (years)`))) {
+    validation_data$`Follow up period (years)`[is.na(validation_data$`Follow up period (years)`)] <- 
+        median(validation_data$`Follow up period (years)`, na.rm = TRUE)
+}
+if (any(is.na(test_data$`Follow up period (years)`))) {
+    test_data$`Follow up period (years)`[is.na(test_data$`Follow up period (years)`)] <- 
+        median(test_data$`Follow up period (years)`, na.rm = TRUE)
+}
+
+# Create dummy variables excluding `Follow up period (years)`
+dummy <- dummyVars(" ~ . - `Follow up period (years)`", data = train_data)
+train_data_dummy <- as.data.frame(predict(dummy, newdata = train_data))
+validation_data_dummy <- as.data.frame(predict(dummy, newdata = validation_data))
+test_data_dummy <- as.data.frame(predict(dummy, newdata = test_data))
+
+# Add `Follow up period (years)` back to the datasets as a numeric column
+train_data_numeric <- cbind(train_data_dummy, `Follow up period (years)` = train_data$`Follow up period (years)`)
+validation_data_numeric <- cbind(validation_data_dummy, `Follow up period (years)` = validation_data$`Follow up period (years)`)
+test_data_numeric <- cbind(test_data_dummy, `Follow up period (years)` = test_data$`Follow up period (years)`)
+
+# Verify `Follow up period (years)` is numeric
+if (!is.numeric(train_data_numeric$`Follow up period (years)`)) {
+    train_data_numeric$`Follow up period (years)` <- as.numeric(as.character(train_data_numeric$`Follow up period (years)`))
+}
+if (!is.numeric(validation_data_numeric$`Follow up period (years)`)) {
+    validation_data_numeric$`Follow up period (years)` <- as.numeric(as.character(validation_data_numeric$`Follow up period (years)`))
+}
+if (!is.numeric(test_data_numeric$`Follow up period (years)`)) {
+    test_data_numeric$`Follow up period (years)` <- as.numeric(as.character(test_data_numeric$`Follow up period (years)`))
+}
+
+# Final checks to ensure consistency before converting to matrices
+str(train_data_numeric)
+str(validation_data_numeric)
+str(test_data_numeric)
+
+# Convert to matrices for glmnet
+train_matrix <- as.matrix(train_data_numeric)
+validation_matrix <- as.matrix(validation_data_numeric)
+test_matrix <- as.matrix(test_data_numeric)
+
+# Verify no missing values
+cat("Missing values in train_matrix:", sum(is.na(train_matrix)), "\n")
+cat("Missing values in validation_matrix:", sum(is.na(validation_matrix)), "\n")
+cat("Missing values in test_matrix:", sum(is.na(test_matrix)), "\n")
+
+# Ensure all matrices are numeric
+if (any(!is.numeric(train_matrix))) stop("Train matrix contains non-numeric values.")
+if (any(!is.numeric(validation_matrix))) stop("Validation matrix contains non-numeric values.")
+if (any(!is.numeric(test_matrix))) stop("Test matrix contains non-numeric values.")
+
+# Step 1: Impute missing values in train, validation, and test datasets
+impute_missing <- function(data_frame) {
+  for (col in colnames(data_frame)) {
+    if (is.numeric(data_frame[[col]])) {
+      if (any(is.na(data_frame[[col]]))) {
+        # Impute missing values with median
+        data_frame[[col]][is.na(data_frame[[col]])] <- median(data_frame[[col]], na.rm = TRUE)
+      }
+    } else {
+      # Handle non-numeric columns if necessary
+      warning(paste("Column", col, "is not numeric and will be skipped for imputation."))
+    }
+  }
+  return(data_frame)
+}
+
+# Apply imputation to train, validation, and test datasets
+train_data_numeric <- impute_missing(train_data_numeric)
+validation_data_numeric <- impute_missing(validation_data_numeric)
+test_data_numeric <- impute_missing(test_data_numeric)
+
+# Step 2: Convert to matrices for glmnet
+train_matrix <- as.matrix(train_data_numeric)
+validation_matrix <- as.matrix(validation_data_numeric)
+test_matrix <- as.matrix(test_data_numeric)
+
+# Step 3: Verify no missing values remain
+cat("Missing values in train_matrix:", sum(is.na(train_matrix)), "\n")
+cat("Missing values in validation_matrix:", sum(is.na(validation_matrix)), "\n")
+cat("Missing values in test_matrix:", sum(is.na(test_matrix)), "\n")
+
+# Step 4: Ensure all matrices are numeric
+if (any(!is.numeric(train_matrix))) stop("Train matrix contains non-numeric values.")
+if (any(!is.numeric(validation_matrix))) stop("Validation matrix contains non-numeric values.")
+if (any(!is.numeric(test_matrix))) stop("Test matrix contains non-numeric values.")
+
+# Step 5: Fit Ridge regression model with cross-validation
+set.seed(123)
+cv_ridge <- cv.glmnet(
+  train_matrix, train_outcome,
+  alpha = 0,  # Ridge regression
+  lambda = 10^seq(10, -2, length = 100),
+  standardize = TRUE,
+  nfolds = 10
+)
+
+
+
+
+# Optimal lambda
+best_lambda <- cv_ridge$lambda.min
+cat("Best lambda for ridge regularization:", best_lambda, "\n")
+
+# Final Ridge regression model
+ridge_model <- glmnet(
+  train_matrix, train_outcome,
+  alpha = 0,
+  lambda = best_lambda,
+  standardize = TRUE
+)
+
+# Step 8: Compute R-Squared for Training, Validation, and Test Sets
+compute_r_squared <- function(predictions, actuals) {
+  rss <- sum((actuals - predictions)^2)
+  tss <- sum((actuals - mean(actuals))^2)
+  return(1 - rss / tss)
+}
+
+train_predictions <- predict(ridge_model, s = best_lambda, newx = train_matrix)
+validation_predictions <- predict(ridge_model, s = best_lambda, newx = validation_matrix)
+test_predictions <- predict(ridge_model, s = best_lambda, newx = test_matrix)
+
+train_r_squared <- compute_r_squared(train_predictions, train_outcome)
+validation_r_squared <- compute_r_squared(validation_predictions, validation_outcome)
+test_r_squared <- compute_r_squared(test_predictions, test_outcome)
+
+cat("Training R-squared:", train_r_squared, "\n")
+cat("Validation R-squared:", validation_r_squared, "\n")
+cat("Test R-squared:", test_r_squared, "\n")
+
+
+
+
+
+```
+
+```{r}
+ridge_coefficients <- coef(ridge_model, s = best_lambda)
+retained_variables <- as.data.frame(as.matrix(ridge_coefficients))
+colnames(retained_variables) <- c("Coefficient")
+retained_variables <- retained_variables[retained_variables$Coefficient != 0, , drop = FALSE]
+print(retained_variables)
+```
+

@@ -1,0 +1,195 @@
+---
+title: "ctDNA — sample size estimation 10_8_25"
+output: html_document
+runtime: shiny
+---
+
+
+```{r, echo=FALSE}
+library(shiny)
+library(DT)
+
+## ----- Exact binomial helpers -----
+crit_k <- function(n, p0, alpha = 0.05) {
+  for (k in 0:n) if (1 - pbinom(k - 1, n, p0) <= alpha) return(k)
+  n + 1
+}
+power_at <- function(n, p_true, k) 1 - pbinom(k - 1, n, p_true)
+
+min_detectable <- function(n, p0, alpha = 0.05, target_power = 0.80) {
+  if (is.na(n) || n <= 0) return(list(p1 = NA_real_, k = NA_integer_))
+  k <- crit_k(n, p0, alpha)
+  if (k > n) return(list(p1 = NA_real_, k = k))
+  f <- function(p) power_at(n, p, k) - target_power
+  if (f(p0) >= 0) return(list(p1 = p0, k = k))
+  p1 <- try(uniroot(f, c(min(1-1e-9, max(p0 + 1e-9, 0)), 1), tol = 1e-9)$root, silent = TRUE)
+  if (inherits(p1, "try-error")) {
+    grid <- seq(p0, 1, length.out = 10001)
+    ok <- which(power_at(n, grid, k) >= target_power)
+    p1 <- if (length(ok)) grid[min(ok)] else NA_real_
+  }
+  p1 <- max(0, min(1, p1))
+  list(p1 = p1, k = k)
+}
+
+## ----- NPV constraint (Bayes) -----
+constraint_K <- function(prev, npv_target) (npv_target * prev) / ((1 - prev) * (1 - npv_target))
+clamp01 <- function(x) pmin(pmax(x, 0), 1)
+
+## ----- UI -----
+ui <- fluidPage(
+  tags$h3("Sample size estimation"),
+  fluidRow(
+    column(4,
+      sliderInput("prev", "Prevalence of distant metastatic relapse at 1 year",
+                  min = 0.05, max = 0.50, value = 0.20, step = 0.01),
+      sliderInput("npv_t", "Target NPV (constraint)", 0.70, 0.99, value = 0.90, step = 0.01),
+      radioButtons("lock_mode", "Tie nulls by fixing:", choices = c("Null SE" = "se", "Null SP" = "sp"), inline = TRUE),
+      uiOutput("lock_slider"),
+      uiOutput("feasible_hint")
+    ),
+    column(4,
+      numericInput("power", "Target power (one-sided)", value = 0.80, min = 0.50, max = 0.99, step = 0.01),
+      numericInput("alpha", "Alpha (one-sided)", value = 0.05, min = 0.001, max = 0.10, step = 0.001),
+      verbatimTextOutput("nulls_used"),
+      tags$em("Bayes NPV constraint enforced internally; partner null derived by equality and clamped to [0,1].")
+    ),
+    column(4,
+      textInput("Ns_csv", "Sample sizes (comma-separated)", value = "80,100,120,140,160"),
+      DTOutput("tbl_out"),
+      downloadButton("download_csv", "Download CSV")
+    )
+  ),
+  hr(),
+  tags$h4("Definitions used for SE, SP, and Prevalence"),
+  tags$ul(
+    tags$li(HTML("<b>SE</b> = P(ctDNA <b>+</b> within 12 months of T0 | Imaging <b>+</b> within 6 months of the latest available ctDNA within 12 months of T0)")),
+    tags$li(HTML("<b>SP</b> = P(ctDNA <b>–</b> throughout 12 months of T0 | Imaging <b>–</b> within 6 months of the latest available ctDNA within 12 months of T0)")),
+    tags$li(HTML("<b>Prevalence</b> = prevalence of distant metastatic relapse at 1 year (assumed equal to Imaging+ proportion).")),
+    tags$li(HTML("<b>T0</b> = time of initial post-op ctDNA assessment")),
+    tags$li(HTML("<b>Imaging +</b> = imaging detected distant metastatic relapse"))
+  )
+)
+
+## ----- SERVER -----
+server <- function(input, output, session) {
+
+  Kreact <- reactive(constraint_K(input$prev, input$npv_t))
+
+  output$lock_slider <- renderUI({
+    K <- Kreact()
+    if (input$lock_mode == "se") {
+      lo <- if (is.finite(K) && K > 0) max(0, 1 - 1/K) else 1
+      hi <- 1
+      sliderInput("H0_lock",
+                  sprintf("Set Null SE (H0) — feasible [%0.2f, 1.00]", lo),
+                  min = lo, max = hi, value = max(lo, 0.75), step = 0.01)
+    } else {
+      hi <- if (is.finite(K)) min(1, K) else 1
+      lo <- 0
+      sliderInput("H0_lock",
+                  sprintf("Set Null SP (H0) — feasible [0.00, %0.2f]", hi),
+                  min = lo, max = hi, value = min(0.75, hi), step = 0.01)
+    }
+  })
+
+  output$feasible_hint <- renderUI({
+    K <- Kreact()
+    if (input$lock_mode == "se") {
+      lo <- if (is.finite(K) && K > 0) max(0, 1 - 1/K) else 1
+      HTML(sprintf("<small>Because Sp ≤ 1, feasible Se must be ≥ %0.3f.</small>", lo))
+    } else {
+      hi <- if (is.finite(K)) min(1, K) else 1
+      HTML(sprintf("<small>Because Se ∈ [0,1], feasible Sp must be ≤ %0.3f.</small>", hi))
+    }
+  })
+
+  clamp_feasible_pair <- function(se0, sp0, K) {
+    se <- clamp01(se0); sp <- clamp01(sp0)
+    need <- K * (1 - se)
+    if (sp + 1e-12 < need) {
+      sp_new <- min(1, need)
+      if (sp_new + 1e-12 < need) {
+        sp <- 1
+        if (K > 0) se <- max(se, 1 - 1/K)
+      } else {
+        sp <- sp_new
+      }
+    }
+    list(se = clamp01(se), sp = clamp01(sp))
+  }
+
+  nulls <- reactive({
+    K <- Kreact()
+    if (input$lock_mode == "se") {
+      se0 <- input$H0_lock
+      sp0 <- K * (1 - se0)
+      adj <- clamp_feasible_pair(se0, sp0, K)
+      list(H0_Se = adj$se, H0_Sp = adj$sp, locked = "SE")
+    } else {
+      sp0 <- input$H0_lock
+      se0 <- 1 - sp0 / K
+      adj <- clamp_feasible_pair(se0, sp0, K)
+      list(H0_Se = adj$se, H0_Sp = adj$sp, locked = "SP")
+    }
+  })
+
+  output$nulls_used <- renderText({
+    n <- nulls()
+    paste0("Nulls used:  H0(Se) = ", sprintf("%.2f", n$H0_Se),
+           ",  H0(Sp) = ", sprintf("%.2f", n$H0_Sp),
+           "   [locked: ", n$locked, "]")
+  })
+
+  parse_Ns <- reactive({
+    x <- gsub("[^0-9,]", "", input$Ns_csv)
+    parts <- unlist(strsplit(x, ","))
+    Ns <- suppressWarnings(as.integer(parts))
+    Ns <- Ns[!is.na(Ns) & Ns > 0]
+    unique(Ns)
+  })
+
+  computed_table <- reactive({
+    Ns <- parse_Ns()
+    if (length(Ns) == 0) return(data.frame())
+    n <- nulls()
+    H0_Se <- n$H0_Se; H0_Sp <- n$H0_Sp
+    alpha <- input$alpha; target_power <- input$power
+    prev <- input$prev
+
+    out <- lapply(Ns, function(N) {
+      n_pos <- round(N * prev)
+      n_neg <- N - n_pos
+      se_md <- min_detectable(n_pos, p0 = H0_Se, alpha = alpha, target_power = target_power)
+      sp_md <- min_detectable(n_neg, p0 = H0_Sp, alpha = alpha, target_power = target_power)
+      se_str <- if (is.na(se_md$p1)) NA_character_ else sprintf("%.2f (%d)", se_md$p1, se_md$k)
+      sp_str <- if (is.na(sp_md$p1)) NA_character_ else sprintf("%.2f (%d)", sp_md$p1, sp_md$k)
+      data.frame(
+        "Sample Size" = as.integer(N),
+        "# Patients with Imaging confirmed relapse" = as.integer(n_pos),
+        "# Patients without Imaging confirmed relapse -" = as.integer(n_neg),
+        "Minimum Detectable SE (estimted # of patients with a ctDNA + within 12 month follow-up needed)" = se_str,
+        "Minimum Detectable SP (estimated # of patients with persistant ctDNA - throughout follow-up needed)" = sp_str,
+        check.names = FALSE
+      )
+    })
+    do.call(rbind, out)
+  })
+
+  output$tbl_out <- renderDT({
+    disp <- computed_table()
+    datatable(
+      disp, rownames = FALSE, selection = "none",
+      options = list(paging = FALSE, searching = FALSE, info = FALSE, ordering = FALSE, autoWidth = TRUE)
+    ) %>% formatRound(columns = c("# Patients with Imaging +", "# Patients with Imaging -"), digits = 0)
+  }, server = TRUE)
+
+  output$download_csv <- downloadHandler(
+    filename = function() sprintf("ctDNA_min_detectable_constrained_%s.csv", Sys.Date()),
+    content = function(file) write.csv(computed_table(), file, row.names = FALSE)
+  )
+}
+
+shinyApp(ui, server)
+```
+

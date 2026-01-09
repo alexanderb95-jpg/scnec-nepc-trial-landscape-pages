@@ -1,0 +1,46 @@
+# Git attributes for R project
+# ============================================================================
+
+# R scripts - treat as text, normalize line endings
+*.R text eol=lf
+*.Rmd text eol=lf
+*.r text eol=lf
+
+# Markdown files
+*.md text eol=lf
+
+# Python scripts
+*.py text eol=lf
+
+# Data files - treat as binary to avoid line ending issues
+*.csv text diff
+*.tsv text diff
+*.xlsx binary
+*.xls binary
+*.rds binary
+*.rda binary
+
+# Image files - binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.svg binary
+*.eps binary
+*.pdf binary
+
+# Document files - binary
+*.docx binary
+*.pptx binary
+*.doc binary
+*.ppt binary
+
+# JSON files - text
+*.json text eol=lf
+
+# Text files
+*.txt text eol=lf
+*.log text eol=lf
+
+# Ensure shell scripts use LF
+*.sh text eol=lf

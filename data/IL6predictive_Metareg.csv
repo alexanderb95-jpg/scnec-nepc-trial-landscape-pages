@@ -1,0 +1,16 @@
+﻿Study_ID,"Cytokine (if multiple, each row gets it's own cytokine)",Type of Biomarker,LogHR_OS,SE_OS,IL6_Cutoff_pgmL,Time of cytokine assesment
+Carril-Ajuria 2022-1,IL-6,Predictive,-1.483874689,0.639082129,3.8,baseline (prior to first dose)
+Carril-Ajuria 2022-3,IL-6,Predictive,-0.928219303,0.170400772,3.8,baseline (prior to first dose)
+Laino 2020-1,IL-6,Predictive,-2.239645293,0.685569111,13.3,baseline
+Laino 2020-2,IL-6,Predictive,-0.165514438,0.424102206,13.3,baseline
+Laino 2020-3,IL-6,Predictive,-0.488580015,0.228794042,6,baseline
+Laino 2020-4,IL-6,Predictive,-1.098612289,0.260114603,11,baseline
+Laino 2020-5,IL-6,Predictive,-1.172482137,0.241004583,11,baseline
+Laino 2020-6,IL-6,Predictive,-1.124929597,0.263053829,11,baseline
+Laino 2020-10,IL-6,Predictive,-1.108232532,0.275639779,13.3,baseline
+Rossi 2022,IL-6,Predictive,-0.867100488,0.343978339,0.9,prior to tx
+Shi 2021-1,IL-6,Predictive,-0.749999992,0.386277626,13.8,within 7 days of therapy initiation
+Shi 2021-2,IL-6,Predictive,-0.030529205,1.285036658,11.3,within 7 days of therapy initiation
+Shi 2021-4,IL-6,Predictive,-0.538246219,0.523520637,11.85,within 7 days of therapy initiation
+Shi 2021-5,IL-6,Predictive,-0.856116009,0.661445082,11.3,within 7 days of therapy initiation
+Shi 2021-7,IL-6,Predictive,-0.633927821,0.474315719,13.8,0-7d prior to first dose and during treatment 

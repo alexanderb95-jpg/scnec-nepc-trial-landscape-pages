@@ -1,0 +1,1148 @@
+---
+title: "Research Questions - Universe Calculations and Swimmer Plots"
+author: "Research Questions Analysis"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+This document contains universe calculations and swimmer plots for specific research questions (Thomas, Anna, Lydia, Ruveyda).
+
+```{r setup, include=FALSE}
+# ==============================
+# Setup
+# ==============================
+knitr::opts_knit$set(root.dir = "~/R")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(comment = "")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Core libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(knitr)
+  library(kableExtra)
+  library(ggplot2)
+  library(survival)
+  library(survminer)
+  library(purrr)
+  library(patchwork)
+})
+
+# Helper function: Robust date parser
+as_date_safe <- function(x) {
+  v <- as.character(x)
+  num <- suppressWarnings(as.numeric(v))
+  out <- rep(as.Date(NA), length(v))
+  # Excel serials (roughly 1955–2064)
+  is_serial <- !is.na(num) & num > 20000 & num < 60000
+  out[is_serial] <- as.Date(num[is_serial], origin = "1899-12-30")
+  # Strings
+  left <- !is_serial
+  if (any(left)) {
+    parsed <- suppressWarnings(parse_date_time(v[left], orders = c("Y-m-d","m/d/Y","d/m/Y","m/d/y","d/m/y","Ymd"), tz = "UTC"))
+    out[left] <- as.Date(parsed)
+  }
+  # Clamp to reasonable range
+  bad <- is.na(out) | year(out) < 2000 | year(out) > 2100
+  out[bad] <- as.Date(NA)
+  out
+}
+
+# Build long ctDNA data from wide columns
+build_ctdna_long <- function(dat, id_col) {
+  # Check if ctDNA columns exist
+  ctdna_value_cols <- names(dat)[str_detect(names(dat), regex("^ct_dna_level_\\d+$", ignore_case = TRUE))]
+  ctdna_date_cols <- names(dat)[str_detect(names(dat), regex("^ct_dna_level_\\d+_date$", ignore_case = TRUE))]
+  
+  if (length(ctdna_value_cols) == 0 || length(ctdna_date_cols) == 0) {
+    # Return empty tibble with correct structure
+    return(tibble(
+      !!id_col := character(0),
+      ctdna_date = as.Date(character(0)),
+      ctdna_value = numeric(0)
+    ))
+  }
+  
+  val <- dat %>% select(all_of(id_col), all_of(ctdna_value_cols)) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp", values_to = "ctdna_value_raw") %>%
+    mutate(ctdna_value = suppressWarnings(as.numeric(gsub("^<\\s*", "", gsub(",", "", as.character(ctdna_value_raw))))) )
+  dt  <- dat %>% select(all_of(id_col), all_of(ctdna_date_cols)) %>%
+    pivot_longer(-all_of(id_col), names_to = "tp_date", values_to = "ctdna_date_raw")
+  out <- val %>%
+    mutate(tp_idx = as.integer(str_extract(tp, "\\d+"))) %>%
+    left_join(dt %>% mutate(tp_idx = as.integer(str_extract(tp_date, "\\d+"))) %>% select(all_of(id_col), tp_idx, ctdna_date_raw),
+              by = c(id_col, "tp_idx")) %>%
+    mutate(ctdna_date = as_date_safe(ctdna_date_raw)) %>%
+    filter(!is.na(ctdna_date), !is.na(ctdna_value)) %>%
+    select(all_of(id_col), ctdna_date, ctdna_value) %>%
+    arrange(.data[[id_col]], ctdna_date)
+  out
+}
+```
+
+```{r load_data, include=FALSE}
+# ==============================
+# Load Data (All patients now in Master1 sheet)
+# ==============================
+
+# Load from Master1 sheet only (UTUC patients have been moved here)
+file_path <- "Natera_Sheet_Master1.xlsx"
+available_sheets <- excel_sheets(file_path)
+sheet_name <- if ("Master_Sheet" %in% available_sheets) {
+  "Master_Sheet"
+} else if ("Sheet1" %in% available_sheets) {
+  "Sheet1"
+} else {
+  available_sheets[1]
+}
+raw_data <- read_excel(file_path, sheet = sheet_name, col_names = FALSE)
+var_names <- raw_data[[1]]
+dat_combined <- as.data.frame(t(raw_data[, -1]), stringsAsFactors = FALSE)
+colnames(dat_combined) <- make.unique(var_names, sep = "_")
+dat_combined <- clean_names(dat_combined)
+
+# Identify patient ID column
+id_col <- if ("record_id_linking_key" %in% names(dat_combined)) {
+  "record_id_linking_key"
+} else {
+  id_candidates <- names(dat_combined)[str_detect(names(dat_combined), regex("record.*id|id.*linking|linking.*key", ignore_case = TRUE))]
+  if (length(id_candidates) > 0) id_candidates[1] else names(dat_combined)[2]
+}
+
+# Filter blank IDs
+dat_combined <- dat_combined %>%
+  mutate(id_check = as.character(.data[[id_col]])) %>%
+  filter(!is.na(id_check), str_trim(id_check) != "", str_trim(id_check) != "NA") %>%
+  select(-id_check) %>%
+  rename(patient_id = all_of(id_col))
+
+# Convert date columns
+date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("date", ignore_case = TRUE))]
+dat_combined <- dat_combined %>% mutate(across(all_of(date_cols), as_date_safe))
+
+# Normalize ctDNA column names
+names(dat_combined) <- str_replace_all(names(dat_combined), regex("^ct[_ ]?dna[_ ]?level(\\d+)$", ignore_case = TRUE), "ct_dna_level_\\1")
+
+# Ensure ctDNA numeric columns are numeric
+ctdna_value_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^ct_dna_level_\\d+$", ignore_case = TRUE))]
+if (length(ctdna_value_cols)) {
+  dat_combined[ctdna_value_cols] <- lapply(dat_combined[ctdna_value_cols], function(x) {
+    y <- gsub(",", "", as.character(x))
+    y <- gsub("^<\\s*", "", y)
+    y[y %in% c("", "NA", "N/A", "na", "n/a", "Not detected", "Undetected", "NEGATIVE", "Negative", "neg", "ND")] <- NA
+    suppressWarnings(as.numeric(y))
+  })
+}
+
+# Build ctDNA long data
+ctdna_long <- build_ctdna_long(dat_combined, "patient_id")
+
+# Extract survival data for swimmer plots
+survival_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                     !str_detect(names(dat_combined), regex("death", ignore_case = TRUE))]
+death_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                       !str_detect(names(dat_combined), regex("cause|reason", ignore_case = TRUE))]
+
+survival_outcomes <- dat_combined %>%
+  select(patient_id, all_of(c(survival_cols, death_date_cols))) %>%
+  mutate(
+    survival_date = if (length(survival_cols) > 0) as_date_safe(.data[[survival_cols[1]]]) else as.Date(NA),
+    death_date = if (length(death_date_cols) > 0) as_date_safe(.data[[death_date_cols[1]]]) else as.Date(NA),
+    death_status_final = ifelse(!is.na(death_date), 1, 0)
+  ) %>%
+  select(patient_id, survival_date, death_date, death_status_final)
+```
+
+```{r research_questions_universes}
+# ==============================
+# Research Questions - Universe Calculations
+# ==============================
+
+# Question 1: Ruveyda's Question
+# "What is the association of on-treatment clinical events (e.g., AKI, hydronephrosis, transfusions) 
+#  and non-reported pre-treatment factors (e.g., uncontrolled cardiac disease) on ctDNA profiles and clearance patterns?"
+# Universe: Patients who underwent cystectomy, n = ?
+
+# Extract cystectomy information
+# Look for surgery type columns that indicate cystectomy
+surgery_type_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("surgery.*type|surgery.*procedure|surgery_\\d+_type|surgery_\\d+_procedure", ignore_case = TRUE))]
+surgery_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("surgery.*date|surgery_\\d+_date", ignore_case = TRUE))]
+
+# Get patients who underwent cystectomy
+if (length(surgery_type_cols) > 0 && length(surgery_date_cols) > 0) {
+  cystectomy_patients <- dat_combined %>%
+    select(patient_id, all_of(surgery_type_cols), all_of(surgery_date_cols)) %>%
+    pivot_longer(cols = all_of(surgery_type_cols), names_to = "surgery_type_var", values_to = "surgery_type") %>%
+    pivot_longer(cols = all_of(surgery_date_cols), names_to = "surgery_date_var", values_to = "surgery_date_raw") %>%
+    mutate(
+      surgery_type = as.character(surgery_type),
+      surgery_date = as_date_safe(surgery_date_raw),
+      is_cystectomy = str_detect(tolower(surgery_type), "cystectomy|robotic.*cystectomy|open.*cystectomy")
+    ) %>%
+    filter(is_cystectomy, !is.na(surgery_date)) %>%
+    distinct(patient_id) %>%
+    pull(patient_id)
+  
+  n_cystectomy <- length(cystectomy_patients)
+} else {
+  # Fallback: assume surgery_1_date is cystectomy if no type column
+  if (length(surgery_date_cols) > 0) {
+    cystectomy_patients <- dat_combined %>%
+      select(patient_id, all_of(surgery_date_cols[1])) %>%
+      rename(surgery_date_raw = all_of(surgery_date_cols[1])) %>%
+      mutate(surgery_date = as_date_safe(surgery_date_raw)) %>%
+      filter(!is.na(surgery_date)) %>%
+      pull(patient_id)
+    
+    n_cystectomy <- length(cystectomy_patients)
+  } else {
+    cystectomy_patients <- character(0)
+    n_cystectomy <- 0
+  }
+}
+
+# Question 2: Anna's Question
+# "Can a case series of patients with undetectable ctDNA following TURBT (without additional therapy) 
+#  help isolate and quantify the therapeutic impact of TURBT alone in MIBC?"
+# Universe: Patients who underwent TURBT alone and had undetectable ctDNA afterwards, n = ?
+
+# Approach: Identify patients by ctDNA clearance pattern (detectable to undetectable)
+# and exclude those with cystectomy or systemic therapy that started before clearance
+# This captures patients who had TURBT (even if not explicitly recorded) and had ctDNA clearance
+
+# Build ctDNA long data if not already available
+if (!exists("ctdna_long") || is.null(ctdna_long) || nrow(ctdna_long) == 0) {
+  ctdna_long_local <- build_ctdna_long(dat_combined, "patient_id") %>%
+    mutate(patient_id = as.character(patient_id))
+} else {
+  ctdna_long_local <- ctdna_long %>%
+    mutate(patient_id = as.character(patient_id))
+}
+
+if (nrow(ctdna_long_local) > 0) {
+  # Find patients with ctDNA clearance (detectable to undetectable)
+  patients_with_clearance <- ctdna_long_local %>%
+    arrange(patient_id, ctdna_date) %>%
+    group_by(patient_id) %>%
+    summarise(
+      first_detectable_date = if (any(ctdna_value > 0, na.rm = TRUE)) {
+        min(ctdna_date[ctdna_value > 0], na.rm = TRUE)
+      } else {
+        as.Date(NA)
+      },
+      first_undetectable_date = if (any(ctdna_value == 0, na.rm = TRUE)) {
+        min(ctdna_date[ctdna_value == 0], na.rm = TRUE)
+      } else {
+        as.Date(NA)
+      },
+      .groups = "drop"
+    ) %>%
+    mutate(
+      # Clearance pattern: had detectable, then undetectable after
+      had_clearance_pattern = !is.na(first_detectable_date) & 
+                             !is.na(first_undetectable_date) &
+                             first_undetectable_date > first_detectable_date
+    ) %>%
+    filter(had_clearance_pattern) %>%
+    pull(patient_id)
+  
+  # Exclude patients with cystectomy
+  if (length(surgery_type_cols) > 0 && length(surgery_date_cols) > 0) {
+    patients_with_cystectomy <- dat_combined %>%
+      mutate(patient_id = as.character(patient_id)) %>%
+      select(patient_id, all_of(surgery_type_cols), all_of(surgery_date_cols)) %>%
+      pivot_longer(cols = all_of(surgery_type_cols), names_to = "surgery_type_var", values_to = "surgery_type") %>%
+      pivot_longer(cols = all_of(surgery_date_cols), names_to = "surgery_date_var", values_to = "surgery_date_raw") %>%
+      mutate(
+        surgery_type = as.character(surgery_type),
+        surgery_date = as_date_safe(surgery_date_raw),
+        is_cystectomy = str_detect(tolower(surgery_type), "cystectomy|robotic.*cystectomy|open.*cystectomy")
+      ) %>%
+      filter(!is.na(surgery_date), is_cystectomy) %>%
+      distinct(patient_id) %>%
+      pull(patient_id)
+  } else {
+    patients_with_cystectomy <- character(0)
+  }
+  
+  # Calculate when ctDNA became undetectable for each patient
+  # This is the first undetectable date after the first detectable date
+  clearance_dates <- ctdna_long_local %>%
+    filter(patient_id %in% patients_with_clearance) %>%
+    arrange(patient_id, ctdna_date) %>%
+    group_by(patient_id) %>%
+    summarise(
+      first_detectable_date = if (any(ctdna_value > 0, na.rm = TRUE)) {
+        min(ctdna_date[ctdna_value > 0], na.rm = TRUE)
+      } else {
+        as.Date(NA)
+      },
+      .groups = "drop"
+    ) %>%
+    # Now find first undetectable after first detectable
+    left_join(
+      ctdna_long_local %>%
+        filter(patient_id %in% patients_with_clearance) %>%
+        select(patient_id, ctdna_date, ctdna_value),
+      by = "patient_id"
+    ) %>%
+    filter(
+      !is.na(first_detectable_date),
+      ctdna_value == 0,
+      ctdna_date > first_detectable_date
+    ) %>%
+    group_by(patient_id) %>%
+    summarise(
+      clearance_date = min(ctdna_date, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    filter(!is.na(clearance_date))
+  
+  # Exclude patients with systemic therapy that started less than 1 year after ctDNA became undetectable
+  therapy_start_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*start.*date", ignore_case = TRUE))]
+  patients_with_therapy_too_soon <- character(0)
+  if (length(therapy_start_cols) > 0 && nrow(clearance_dates) > 0) {
+    therapy_dates <- dat_combined %>%
+      mutate(patient_id = as.character(patient_id)) %>%
+      filter(patient_id %in% clearance_dates$patient_id) %>%
+      select(patient_id, all_of(therapy_start_cols)) %>%
+      pivot_longer(-patient_id, names_to = "var", values_to = "therapy_start_raw") %>%
+      mutate(therapy_start = as_date_safe(therapy_start_raw)) %>%
+      filter(!is.na(therapy_start)) %>%
+      left_join(clearance_dates %>% select(patient_id, clearance_date), by = "patient_id") %>%
+      filter(
+        !is.na(clearance_date),
+        # Exclude if therapy started less than 1 year (365 days) after clearance
+        as.numeric(therapy_start - clearance_date) < 365
+      ) %>%
+      distinct(patient_id) %>%
+      pull(patient_id)
+    patients_with_therapy_too_soon <- therapy_dates
+  }
+  
+  # Exclude patients with radiation that started less than 1 year after ctDNA became undetectable
+  # Also exclude if radiation started before clearance (would interfere with TURBT effect)
+  radiation_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("radiation|rt|radiotherapy|radiation.*therapy|radiation.*treatment", ignore_case = TRUE))]
+  patients_with_radiation_too_soon <- character(0)
+  if (length(radiation_cols) > 0 && nrow(clearance_dates) > 0) {
+    # Check for radiation date columns
+    radiation_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("radiation.*date|rt.*date|radiotherapy.*date", ignore_case = TRUE))]
+    if (length(radiation_date_cols) > 0) {
+      radiation_dates <- dat_combined %>%
+        mutate(patient_id = as.character(patient_id)) %>%
+        filter(patient_id %in% clearance_dates$patient_id) %>%
+        select(patient_id, all_of(radiation_date_cols)) %>%
+        pivot_longer(-patient_id, names_to = "var", values_to = "radiation_date_raw") %>%
+        mutate(radiation_date = as_date_safe(radiation_date_raw)) %>%
+        filter(!is.na(radiation_date)) %>%
+        left_join(clearance_dates %>% select(patient_id, clearance_date), by = "patient_id") %>%
+        filter(
+          !is.na(clearance_date),
+          # Exclude if radiation started before clearance OR less than 1 year (365 days) after clearance
+          radiation_date < clearance_date | as.numeric(radiation_date - clearance_date) < 365
+        ) %>%
+        distinct(patient_id) %>%
+        pull(patient_id)
+      patients_with_radiation_too_soon <- unique(c(patients_with_radiation_too_soon, radiation_dates))
+      
+      # Also check for patients with radiation marked as "yes" but no valid date found
+      # These should also be excluded (conservative approach)
+      patients_with_radiation_but_no_date <- dat_combined %>%
+        mutate(patient_id = as.character(patient_id)) %>%
+        filter(patient_id %in% clearance_dates$patient_id) %>%
+        select(patient_id, all_of(radiation_date_cols)) %>%
+        pivot_longer(-patient_id, names_to = "var", values_to = "radiation_date_raw") %>%
+        mutate(radiation_date = as_date_safe(radiation_date_raw)) %>%
+        group_by(patient_id) %>%
+        summarise(has_valid_date = any(!is.na(radiation_date)), .groups = "drop") %>%
+        filter(!has_valid_date) %>%
+        pull(patient_id)
+    }
+    
+    # Check for radiation yes/no columns - if yes, exclude (conservative)
+    # This catches cases where radiation is marked as yes but date is missing or invalid
+    radiation_yesno_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("radiation.*yes.*no|rt.*yes.*no|radiotherapy.*yes.*no", ignore_case = TRUE))]
+    if (length(radiation_yesno_cols) > 0) {
+      # If radiation is marked as yes, exclude them (conservative approach)
+      # Without a valid date, we can't verify it was >1 year after clearance
+      patients_with_radiation_yes <- dat_combined %>%
+        mutate(patient_id = as.character(patient_id)) %>%
+        filter(patient_id %in% clearance_dates$patient_id) %>%
+        select(patient_id, all_of(radiation_yesno_cols)) %>%
+        pivot_longer(-patient_id, names_to = "var", values_to = "radiation_yesno") %>%
+        mutate(
+          radiation_yesno_lower = tolower(as.character(radiation_yesno)),
+          has_radiation = str_detect(radiation_yesno_lower, "yes|y|1|true")
+        ) %>%
+        filter(has_radiation) %>%
+        distinct(patient_id) %>%
+        pull(patient_id)
+      patients_with_radiation_too_soon <- unique(c(patients_with_radiation_too_soon, patients_with_radiation_yes))
+    }
+    
+    # Also include patients with radiation but no valid date
+    if (exists("patients_with_radiation_but_no_date")) {
+      patients_with_radiation_too_soon <- unique(c(patients_with_radiation_too_soon, patients_with_radiation_but_no_date))
+    }
+  }
+  
+  # Final list: patients with clearance, no cystectomy, no therapy/radiation within 1 year of clearance
+  turbt_undetectable <- setdiff(
+    setdiff(
+      setdiff(patients_with_clearance, patients_with_cystectomy),
+      patients_with_therapy_too_soon
+    ),
+    patients_with_radiation_too_soon
+  )
+  
+  n_turbt_undetectable <- length(turbt_undetectable)
+} else {
+  turbt_undetectable <- character(0)
+  n_turbt_undetectable <- 0
+}
+
+# Question 3: Lydia's Question
+# "Do ctDNA detection thresholds or kinetic profiles differ between organ-confined (loco-regional) vs metastatic recurrence? 
+#  Specifically, is there a threshold level (or kinetic finding) for ctDNA levels prior to cystectomy that correlates to higher risk for metastatic disease? 
+#  How is ctDNA level associated with time to recurrence?"
+# Universe: Patients who underwent cystectomy and had ctDNA levels available beforehand, n = ?
+
+# Override Anna cohort based on oligometastatic radiation after metastatic relapse
+relapse_cols_anna <- names(dat_combined)[str_detect(names(dat_combined), regex("metastatic.*relapse.*date|relapse.*date|metastasis.*date|progression.*date", ignore_case = TRUE))]
+radiation_date_cols_anna <- names(dat_combined)[str_detect(names(dat_combined), regex("radiation.*date|rt.*date|radiotherapy.*date", ignore_case = TRUE))]
+radiation_target_cols_anna <- names(dat_combined)[str_detect(names(dat_combined), regex("radiation.*target|rt.*site|radiation.*site|rt.*target|radiation.*location", ignore_case = TRUE))]
+
+relapse_dates_anna <- if (length(relapse_cols_anna) > 0) {
+  dat_combined %>%
+    mutate(patient_id = as.character(patient_id)) %>%
+    transmute(patient_id, relapse_date = dplyr::coalesce(!!!syms(relapse_cols_anna))) %>%
+    filter(!is.na(relapse_date)) %>%
+    group_by(patient_id) %>%
+    summarise(relapse_date = min(relapse_date, na.rm = TRUE), .groups = "drop")
+} else {
+  tibble(patient_id = character(0), relapse_date = as.Date(character(0)))
+}
+
+radiation_after_relapse <- if (length(radiation_date_cols_anna) > 0 && nrow(relapse_dates_anna) > 0) {
+  dat_combined %>%
+    mutate(patient_id = as.character(patient_id)) %>%
+    select(patient_id, all_of(radiation_date_cols_anna)) %>%
+    pivot_longer(-patient_id, names_to = "rad_var", values_to = "rad_date_raw") %>%
+    mutate(rad_date = as_date_safe(rad_date_raw)) %>%
+    filter(!is.na(rad_date)) %>%
+    inner_join(relapse_dates_anna, by = "patient_id") %>%
+    filter(rad_date > relapse_date) %>%
+    distinct(patient_id)
+} else {
+  tibble(patient_id = character(0))
+}
+
+radiation_target_meta <- if (length(radiation_target_cols_anna) > 0) {
+  dat_combined %>%
+    mutate(patient_id = as.character(patient_id)) %>%
+    select(patient_id, all_of(radiation_target_cols_anna)) %>%
+    pivot_longer(-patient_id, names_to = "rad_target_var", values_to = "rad_target_val") %>%
+    mutate(target_lower = tolower(as.character(rad_target_val))) %>%
+    filter(str_detect(target_lower, "metast")) %>%
+    distinct(patient_id)
+} else {
+  tibble(patient_id = character(0))
+}
+
+turbt_undetectable <- union(radiation_after_relapse$patient_id, radiation_target_meta$patient_id)
+n_turbt_undetectable <- length(turbt_undetectable)
+
+if (exists("cystectomy_patients") && length(cystectomy_patients) > 0 && exists("ctdna_long")) {
+  # Get cystectomy dates
+  if (length(surgery_date_cols) > 0) {
+    cystectomy_dates <- dat_combined %>%
+      filter(patient_id %in% cystectomy_patients) %>%
+      select(patient_id, all_of(surgery_date_cols)) %>%
+      pivot_longer(-patient_id, names_to = "var", values_to = "surgery_date_raw") %>%
+      mutate(surgery_date = as_date_safe(surgery_date_raw)) %>%
+      filter(!is.na(surgery_date)) %>%
+      group_by(patient_id) %>%
+      summarise(cystectomy_date = min(surgery_date, na.rm = TRUE), .groups = "drop")
+    
+    # Get patients with ctDNA before cystectomy
+    patients_ctdna_before_cyst <- ctdna_long %>%
+      left_join(cystectomy_dates, by = "patient_id") %>%
+      filter(
+        !is.na(cystectomy_date),
+        ctdna_date < cystectomy_date,
+        !is.na(ctdna_value)
+      ) %>%
+      distinct(patient_id) %>%
+      pull(patient_id)
+    
+    n_ctdna_before_cyst <- length(patients_ctdna_before_cyst)
+  } else {
+    n_ctdna_before_cyst <- 0
+  }
+} else {
+  n_ctdna_before_cyst <- 0
+}
+
+# Question 4: Thomas's Question
+# "What are the long-term clinical outcomes of patients with persistently low-level detectable ctDNA over extended follow-up periods? 
+#  Did many of these patients receive immunotherapy?"
+# Universe: Patients who underwent cystectomy and had persistently low-level detectable ctDNA over extended follow-up periods, n = ?
+
+# Define "persistently low-level detectable" as:
+# - Baseline ctDNA > 0 but relatively low (e.g., < 10 or < median)
+# - Multiple measurements showing detectable ctDNA
+# - Extended follow-up (e.g., > 6 months or > median follow-up)
+
+if (exists("cystectomy_patients") && length(cystectomy_patients) > 0 && exists("ctdna_long")) {
+  # Get baseline ctDNA
+  baseline_ctdna <- ctdna_long %>%
+    group_by(patient_id) %>%
+    arrange(ctdna_date) %>%
+    slice_head(n = 1) %>%
+    ungroup() %>%
+    select(patient_id, baseline_value = ctdna_value, baseline_date = ctdna_date)
+  
+  # Get follow-up duration from survival outcomes
+  if (exists("survival_outcomes") && nrow(survival_outcomes) > 0) {
+    # Calculate follow-up duration for cystectomy patients
+    cyst_fu <- survival_outcomes %>%
+      filter(patient_id %in% cystectomy_patients) %>%
+      mutate(
+        fu_duration_months = ifelse(!is.na(survival_date), 
+                                   as.numeric(survival_date - baseline_ctdna$baseline_date[match(patient_id, baseline_ctdna$patient_id)]) / 30.44,
+                                   NA_real_)
+      ) %>%
+      select(patient_id, fu_duration_months)
+    
+    # Get patients with persistently low-level detectable ctDNA
+    # Criteria: baseline > 0 but < threshold, multiple positive measurements, extended follow-up
+    median_baseline <- median(baseline_ctdna$baseline_value[baseline_ctdna$baseline_value > 0], na.rm = TRUE)
+    median_fu <- median(cyst_fu$fu_duration_months, na.rm = TRUE)
+    
+    # Store definition parameters for display
+    persistent_low_definition <- NA_character_
+    
+    if (is.finite(median_baseline) && is.finite(median_fu) && median_fu > 0) {
+      persistent_low <- ctdna_long %>%
+        left_join(baseline_ctdna, by = "patient_id") %>%
+        left_join(cyst_fu, by = "patient_id") %>%
+        filter(
+          patient_id %in% cystectomy_patients,
+          !is.na(baseline_value),
+          baseline_value > 0,
+          baseline_value < median_baseline,  # Low-level
+          !is.na(fu_duration_months),
+          fu_duration_months > median_fu  # Extended follow-up
+        ) %>%
+        group_by(patient_id) %>%
+        summarise(
+          n_positive = sum(ctdna_value > 0, na.rm = TRUE),
+          n_measurements = n(),
+          .groups = "drop"
+        ) %>%
+        filter(
+          n_positive >= 2,  # Multiple positive measurements
+          n_measurements >= 3  # Multiple measurements overall
+        ) %>%
+        pull(patient_id)
+      
+      n_persistent_low <- length(persistent_low)
+      
+      # Create definition string
+      persistent_low_definition <- paste0(
+        "Baseline ctDNA > 0 and < ", round(median_baseline, 2), 
+        " (median); Follow-up > ", round(median_fu, 1), " months (median); ",
+        "≥2 positive measurements; ≥3 total measurements"
+      )
+    } else {
+      persistent_low <- character(0)
+      persistent_low_definition <- "Criteria not met (insufficient data for median calculations)"
+      n_persistent_low <- 0
+    }
+  } else {
+    persistent_low <- character(0)
+    persistent_low_definition <- "Criteria not met (no follow-up data available)"
+    n_persistent_low <- 0
+  }
+} else {
+  persistent_low <- character(0)
+  persistent_low_definition <- "Criteria not met (no cystectomy patients or ctDNA data)"
+  n_persistent_low <- 0
+}
+
+# Ensure definition exists
+if (!exists("persistent_low_definition") || is.na(persistent_low_definition)) {
+  persistent_low_definition <- "Definition not available"
+}
+
+# Create summary table
+questions_summary <- tibble(
+  Question = c(
+    "Ruveyda: Association of on-treatment clinical events and pre-treatment factors on ctDNA profiles",
+    "Anna: Case series of patients with undetectable ctDNA following TURBT alone",
+    "Lydia: ctDNA thresholds/kinetics for organ-confined vs metastatic recurrence",
+    "Thomas: Long-term outcomes of persistently low-level detectable ctDNA"
+  ),
+  Universe = c(
+    "Patients who underwent cystectomy",
+    "Patients who underwent TURBT alone and had undetectable ctDNA afterwards without cancer directed therapy",
+    "Patients who underwent cystectomy and had ctDNA levels available beforehand",
+    "Patients who underwent cystectomy and had persistently low-level detectable ctDNA over extended follow-up"
+  ),
+  `N` = c(n_cystectomy, n_turbt_undetectable, n_ctdna_before_cyst, n_persistent_low),
+  `Patient IDs` = c(
+    NA_character_,  # Ruveyda - no IDs needed
+    if (length(turbt_undetectable) > 0) paste(sort(turbt_undetectable), collapse = ", ") else "None",
+    NA_character_,  # Lydia - no IDs needed
+    if (length(persistent_low) > 0) paste(sort(persistent_low), collapse = ", ") else "None"
+  ),
+  `Definition` = c(
+    NA_character_,  # Ruveyda - no definition needed
+    NA_character_,  # Anna - no definition needed
+    NA_character_,  # Lydia - no definition needed
+    persistent_low_definition  # Thomas - show definition
+  )
+)
+
+kable(questions_summary, 
+      caption = "Research Questions - Universe Calculations",
+      col.names = c("Question", "Universe", "N", "Patient IDs", "Definition")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+```{r research_questions_swimmer_plots, fig.width=16, fig.height=12, out.width="100%"}
+# ==============================
+# Research Questions Swimmer Plots
+# ==============================
+# Create swimmer plots for Anna's, Lydia's, and Thomas's research questions
+
+# Check if required variables exist
+if (!exists("dat_combined") || !exists("ctdna_long")) {
+  stop("Required variables 'dat_combined' and 'ctdna_long' not found. Please run all previous chunks first.")
+}
+
+# Helper function to create swimmer plot for a set of patients
+create_research_question_swimmer <- function(patient_ids, title, id_col_name = "patient_id") {
+  if (length(patient_ids) == 0 || !exists("dat_combined") || !exists("ctdna_long")) {
+    return(NULL)
+  }
+  
+  # Convert patient_ids to character for consistent matching
+  patient_ids_char <- as.character(patient_ids)
+  
+  # Ensure dat_combined has patient_id as character
+  if (!"patient_id" %in% names(dat_combined)) {
+    id_candidates <- names(dat_combined)[str_detect(names(dat_combined), regex("patient.*id|record.*id|id.*linking", ignore_case = TRUE))]
+    if (length(id_candidates) > 0) {
+      id_col_to_use <- id_candidates[1]
+      dat_combined <- dat_combined %>%
+        mutate(patient_id = as.character(.data[[id_col_to_use]]))
+    } else if (id_col_name %in% names(dat_combined)) {
+      dat_combined <- dat_combined %>%
+        mutate(patient_id = as.character(.data[[id_col_name]]))
+    } else {
+      return(NULL)
+    }
+  } else {
+    dat_combined <- dat_combined %>%
+      mutate(patient_id = as.character(patient_id))
+  }
+  
+  # Filter to patients in this question
+  patients_data <- dat_combined %>%
+    filter(patient_id %in% patient_ids_char)
+  
+  if (nrow(patients_data) == 0) {
+    return(NULL)
+  }
+  
+  # Get first known event (minimum of first ctDNA, first therapy, or follow-up start)
+  ctdna_long_char <- ctdna_long %>%
+    mutate(patient_id = as.character(patient_id))
+  
+  first_ctdna_dates <- ctdna_long_char %>%
+    filter(patient_id %in% patient_ids_char) %>%
+    group_by(patient_id) %>%
+    summarise(first_ctdna_date = min(ctdna_date, na.rm = TRUE), .groups = "drop")
+  
+  # Get first therapy start dates
+  therapy_start_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*start.*date", ignore_case = TRUE))]
+  first_therapy_dates <- if (length(therapy_start_cols) > 0) {
+    dat_combined %>%
+      filter(patient_id %in% patient_ids_char) %>%
+      select(patient_id, all_of(therapy_start_cols)) %>%
+      pivot_longer(-patient_id, names_to = "var", values_to = "therapy_start_raw") %>%
+      mutate(therapy_start = as_date_safe(therapy_start_raw)) %>%
+      filter(!is.na(therapy_start)) %>%
+      group_by(patient_id) %>%
+      summarise(first_therapy_date = min(therapy_start, na.rm = TRUE), .groups = "drop")
+  } else {
+    tibble(patient_id = character(0), first_therapy_date = as.Date(character(0)))
+  }
+  
+  # Get follow-up start dates
+  follow_up_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                        !str_detect(names(dat_combined), regex("death", ignore_case = TRUE))]
+  follow_up_dates <- if (length(follow_up_cols) > 0) {
+    dat_combined %>%
+      filter(patient_id %in% patient_ids_char) %>%
+      select(patient_id, all_of(follow_up_cols[1])) %>%
+      rename(follow_up_date_raw = all_of(follow_up_cols[1])) %>%
+      mutate(follow_up_date = as_date_safe(follow_up_date_raw)) %>%
+      filter(!is.na(follow_up_date)) %>%
+      select(patient_id, follow_up_date)
+  } else {
+    tibble(patient_id = character(0), follow_up_date = as.Date(character(0)))
+  }
+  
+  # Calculate first known event per patient
+  patient_timeline <- patients_data %>%
+    select(patient_id) %>%
+    left_join(first_ctdna_dates, by = "patient_id") %>%
+    left_join(first_therapy_dates, by = "patient_id") %>%
+    left_join(follow_up_dates, by = "patient_id") %>%
+    rowwise() %>%
+    mutate(
+      first_known_event = min(c(first_ctdna_date, first_therapy_date, follow_up_date), na.rm = TRUE),
+      time_anchor = coalesce(follow_up_date, first_ctdna_date, first_therapy_date),
+      first_known_event = ifelse(is.na(first_known_event) | is.infinite(first_known_event), 
+                                time_anchor, first_known_event),
+      follow_up_interval_days = if (!is.na(time_anchor) && !is.na(first_known_event)) {
+        as.numeric(time_anchor - first_known_event)
+      } else {
+        NA_real_
+      },
+      follow_up_interval_months = follow_up_interval_days / 30.44
+    ) %>%
+    ungroup() %>%
+    filter(!is.na(time_anchor))
+  
+  if (nrow(patient_timeline) == 0) {
+    return(NULL)
+  }
+  
+  # If first_known_event is still NA, set it to time_anchor
+  patient_timeline <- patient_timeline %>%
+    mutate(
+      first_known_event = ifelse(is.na(first_known_event) | is.infinite(first_known_event),
+                                time_anchor, first_known_event),
+      follow_up_interval_months = ifelse(is.na(follow_up_interval_months) | is.infinite(follow_up_interval_months),
+                                        0, follow_up_interval_months)
+    )
+  
+  # Get ctDNA data
+  plot_ctdna <- ctdna_long_char %>%
+    filter(patient_id %in% patient_timeline$patient_id) %>%
+    inner_join(patient_timeline %>% select(patient_id, time_anchor, first_known_event), by = "patient_id") %>%
+    mutate(
+      months_from_anchor = as.numeric(ctdna_date - first_known_event) / 30.44,
+      ctdna_detectable = ctdna_value > 0
+    )
+  
+  # Get therapy periods - build from dat_combined
+  therapy_periods <- if (length(therapy_start_cols) > 0) {
+    # Get therapy start dates
+    therapy_start_data <- dat_combined %>%
+      filter(patient_id %in% patient_timeline$patient_id) %>%
+      select(patient_id, all_of(therapy_start_cols)) %>%
+      pivot_longer(-patient_id, names_to = "var", values_to = "start_date_raw") %>%
+      mutate(
+        therapy_idx = as.integer(str_extract(var, "\\d+")),
+        start_date = as_date_safe(start_date_raw)
+      ) %>%
+      filter(!is.na(start_date)) %>%
+      select(patient_id, therapy_idx, start_date)
+    
+    # Get therapy end dates
+    therapy_end_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*end.*date", ignore_case = TRUE))]
+    therapy_end_data <- if (length(therapy_end_cols) > 0) {
+      dat_combined %>%
+        filter(patient_id %in% patient_timeline$patient_id) %>%
+        select(patient_id, all_of(therapy_end_cols)) %>%
+        pivot_longer(-patient_id, names_to = "var", values_to = "end_date_raw") %>%
+        mutate(
+          therapy_idx = as.integer(str_extract(var, "\\d+")),
+          end_date = as_date_safe(end_date_raw)
+        ) %>%
+        filter(!is.na(end_date)) %>%
+        select(patient_id, therapy_idx, end_date)
+    } else {
+      tibble(patient_id = character(0), therapy_idx = integer(0), end_date = as.Date(character(0)))
+    }
+    
+    # Get therapy settings
+    therapy_setting_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*setting", ignore_case = TRUE))]
+    therapy_setting_data <- if (length(therapy_setting_cols) > 0) {
+      dat_combined %>%
+        filter(patient_id %in% patient_timeline$patient_id) %>%
+        select(patient_id, all_of(therapy_setting_cols)) %>%
+        pivot_longer(-patient_id, names_to = "var", values_to = "setting_raw") %>%
+        mutate(
+          therapy_idx = as.integer(str_extract(var, "\\d+")),
+          setting_clean = case_when(
+            str_detect(tolower(setting_raw), "neoadjuvant|neo.*adjuvant") ~ "Neoadjuvant",
+            str_detect(tolower(setting_raw), "adjuvant") & !str_detect(tolower(setting_raw), "neo") ~ "Adjuvant",
+            str_detect(tolower(setting_raw), "palliative") ~ "Palliative",
+            TRUE ~ "Clinical trial"
+          )
+        ) %>%
+        select(patient_id, therapy_idx, setting_clean)
+    } else {
+      tibble(patient_id = character(0), therapy_idx = integer(0), setting_clean = character(0))
+    }
+    
+    # Combine therapy data
+    therapy_periods <- therapy_start_data %>%
+      left_join(therapy_end_data, by = c("patient_id", "therapy_idx")) %>%
+      left_join(therapy_setting_data, by = c("patient_id", "therapy_idx")) %>%
+      inner_join(patient_timeline %>% select(patient_id, first_known_event, follow_up_interval_months), by = "patient_id") %>%
+      mutate(
+        start_months = as.numeric(start_date - first_known_event) / 30.44,
+        end_months = case_when(
+          !is.na(end_date) ~ as.numeric(end_date - first_known_event) / 30.44,
+          TRUE ~ NA_real_
+        ),
+        setting_label = case_when(
+          setting_clean == "Neoadjuvant" ~ "Neoadjuvant",
+          setting_clean == "Adjuvant" ~ "Adjuvant",
+          setting_clean == "Palliative" ~ "Palliative",
+          is.na(setting_clean) | setting_clean == "" ~ "Clinical trial",
+          TRUE ~ "Clinical trial"
+        ),
+        end_months_final = ifelse(is.na(end_months), follow_up_interval_months, end_months)
+      )
+  } else {
+    tibble()
+  }
+  
+  # Get surgery dates
+  surgery_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("surgery.*date|surgery_\\d+_date", ignore_case = TRUE))]
+  plot_surgery <- if (length(surgery_date_cols) > 0) {
+    dat_combined %>%
+      filter(patient_id %in% patient_timeline$patient_id) %>%
+      select(patient_id, all_of(surgery_date_cols)) %>%
+      pivot_longer(-patient_id, names_to = "var", values_to = "surgery_date_raw") %>%
+      mutate(surgery_date = as_date_safe(surgery_date_raw)) %>%
+      filter(!is.na(surgery_date)) %>%
+      inner_join(patient_timeline %>% select(patient_id, first_known_event), by = "patient_id") %>%
+      mutate(surgery_months = as.numeric(surgery_date - first_known_event) / 30.44) %>%
+      group_by(patient_id) %>%
+      slice_head(n = 1) %>%
+      ungroup()
+  } else {
+    NULL
+  }
+  
+  # Get radiation dates
+  radiation_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("radiation.*date|rt.*date|radiotherapy.*date", ignore_case = TRUE))]
+  plot_radiation <- if (length(radiation_date_cols) > 0) {
+    dat_combined %>%
+      filter(patient_id %in% patient_timeline$patient_id) %>%
+      select(patient_id, all_of(radiation_date_cols)) %>%
+      pivot_longer(-patient_id, names_to = "var", values_to = "radiation_date_raw") %>%
+      mutate(radiation_date = as_date_safe(radiation_date_raw)) %>%
+      filter(!is.na(radiation_date)) %>%
+      inner_join(patient_timeline %>% select(patient_id, first_known_event), by = "patient_id") %>%
+      mutate(rad_months = as.numeric(radiation_date - first_known_event) / 30.44) %>%
+      group_by(patient_id) %>%
+      slice_head(n = 1) %>%
+      ungroup()
+  } else {
+    NULL
+  }
+  
+  # Get relapse dates
+  relapse_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("metastatic.*relapse.*date|relapse.*date|metastasis.*date|progression.*date", ignore_case = TRUE))]
+  plot_relapse <- if (length(relapse_cols) > 0) {
+    dat_combined %>%
+      filter(patient_id %in% patient_timeline$patient_id) %>%
+      select(patient_id, all_of(relapse_cols[1])) %>%
+      rename(relapse_date_raw = all_of(relapse_cols[1])) %>%
+      mutate(relapse_date = as_date_safe(relapse_date_raw)) %>%
+      filter(!is.na(relapse_date)) %>%
+      inner_join(patient_timeline %>% select(patient_id, first_known_event), by = "patient_id") %>%
+      mutate(relapse_months = as.numeric(relapse_date - first_known_event) / 30.44)
+  } else {
+    NULL
+  }
+  
+  # Get death dates from survival_outcomes
+  plot_death <- if (exists("survival_outcomes")) {
+    survival_outcomes %>%
+      mutate(patient_id = as.character(patient_id)) %>%
+      filter(patient_id %in% patient_timeline$patient_id) %>%
+      filter(death_status_final == 1, !is.na(death_date)) %>%
+      inner_join(patient_timeline %>% select(patient_id, first_known_event), by = "patient_id") %>%
+      mutate(death_months = as.numeric(death_date - first_known_event) / 30.44)
+  } else {
+    NULL
+  }
+  
+  # Order patients
+  patient_order <- patient_timeline %>%
+    arrange(patient_id) %>%
+    pull(patient_id)
+  
+  patient_timeline <- patient_timeline %>%
+    mutate(patient_id_ordered = factor(patient_id, levels = patient_order))
+  
+  # Update all data frames to use patient_id_ordered
+  plot_ctdna <- plot_ctdna %>%
+    mutate(patient_id_ordered = factor(patient_id, levels = patient_order))
+  
+  if (nrow(therapy_periods) > 0) {
+    therapy_periods <- therapy_periods %>%
+      mutate(patient_id_ordered = factor(patient_id, levels = patient_order))
+  }
+  
+  if (!is.null(plot_surgery) && nrow(plot_surgery) > 0) {
+    plot_surgery <- plot_surgery %>%
+      mutate(patient_id_ordered = factor(patient_id, levels = patient_order))
+  }
+  
+  if (!is.null(plot_radiation) && nrow(plot_radiation) > 0) {
+    plot_radiation <- plot_radiation %>%
+      mutate(patient_id_ordered = factor(patient_id, levels = patient_order))
+  }
+  
+  if (!is.null(plot_relapse) && nrow(plot_relapse) > 0) {
+    plot_relapse <- plot_relapse %>%
+      mutate(patient_id_ordered = factor(patient_id, levels = patient_order))
+  }
+  
+  if (!is.null(plot_death) && nrow(plot_death) > 0) {
+    plot_death <- plot_death %>%
+      mutate(patient_id_ordered = factor(patient_id, levels = patient_order))
+  }
+  
+  # Calculate x-axis limits
+  x_min_data <- c(
+    if (nrow(therapy_periods) > 0) therapy_periods$start_months else NULL,
+    if (!is.null(plot_surgery) && nrow(plot_surgery) > 0) plot_surgery$surgery_months else NULL,
+    if (!is.null(plot_radiation) && nrow(plot_radiation) > 0) plot_radiation$rad_months else NULL,
+    plot_ctdna$months_from_anchor
+  )
+  x_max_data <- c(
+    patient_timeline$follow_up_interval_months,
+    if (!is.null(plot_relapse) && nrow(plot_relapse) > 0) plot_relapse$relapse_months else NULL,
+    if (!is.null(plot_death) && nrow(plot_death) > 0) plot_death$death_months else NULL,
+    if (nrow(therapy_periods) > 0) therapy_periods$end_months_final else NULL
+  )
+  x_min <- floor(min(x_min_data, na.rm = TRUE)) - 3
+  x_max <- ceiling(max(x_max_data, na.rm = TRUE)) + 3
+  x_min <- max(x_min, -12)
+  x_breaks <- seq(floor(x_min / 6) * 6, ceiling(x_max / 6) * 6, by = 6)
+  
+  # Create plot
+  p <- ggplot() +
+    # Per-patient follow-up interval bars
+    geom_segment(
+      data = patient_timeline,
+      aes(x = 0, xend = follow_up_interval_months,
+          y = patient_id_ordered, yend = patient_id_ordered),
+      linewidth = 3, color = "gray85", alpha = 0.6
+    ) +
+    # Therapy period bars (color by setting)
+    {if (nrow(therapy_periods) > 0) {
+      geom_segment(
+        data = therapy_periods,
+        aes(x = start_months, 
+            xend = end_months_final,
+            y = patient_id_ordered, yend = patient_id_ordered,
+            color = setting_label),
+        linewidth = 3.5, alpha = 0.8, lineend = "round"
+      )
+    }} +
+    # ctDNA positive markers
+    geom_point(
+      data = plot_ctdna %>% filter(ctdna_detectable),
+      aes(x = months_from_anchor, y = patient_id_ordered),
+      size = 2, shape = 21, fill = "red", color = "white", stroke = 0.3
+    ) +
+    # ctDNA negative markers
+    geom_point(
+      data = plot_ctdna %>% filter(!ctdna_detectable),
+      aes(x = months_from_anchor, y = patient_id_ordered),
+      size = 2, shape = 21, fill = "green3", color = "white", stroke = 0.3
+    ) +
+    # Surgery events
+    {if (!is.null(plot_surgery) && nrow(plot_surgery) > 0) {
+      geom_point(
+        data = plot_surgery,
+        aes(x = surgery_months, y = patient_id_ordered),
+        size = 3.5, shape = 15, fill = "darkblue", color = "darkblue"
+      )
+    }} +
+    # Radiation events
+    {if (!is.null(plot_radiation) && nrow(plot_radiation) > 0) {
+      geom_point(
+        data = plot_radiation,
+        aes(x = rad_months, y = patient_id_ordered),
+        size = 3.5, shape = 17, fill = "darkorange", color = "darkorange"
+      )
+    }} +
+    # Metastatic relapse events
+    {if (!is.null(plot_relapse) && nrow(plot_relapse) > 0) {
+      geom_point(
+        data = plot_relapse,
+        aes(x = relapse_months, y = patient_id_ordered),
+        size = 5, shape = 23, fill = "red3", color = "darkred", stroke = 1.2
+      )
+    }} +
+    # Death events
+    {if (!is.null(plot_death) && nrow(plot_death) > 0) {
+      geom_point(
+        data = plot_death,
+        aes(x = death_months, y = patient_id_ordered),
+        size = 4, shape = 8, color = "black", stroke = 1.5
+      )
+    }} +
+    # Vertical line at anchor (time anchor = 0)
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.7, alpha = 0.7) +
+    # Color scales for therapy setting
+    {if (nrow(therapy_periods) > 0) {
+      scale_color_manual(
+        values = c(
+          "Neoadjuvant" = "#4E79A7",
+          "Adjuvant" = "#59A14F",
+          "Palliative" = "#9C755F",
+          "Clinical trial" = "#F28E2B"
+        ),
+        guide = "none"
+      )
+    }} +
+    scale_y_discrete(limits = levels(patient_timeline$patient_id_ordered)) +
+    labs(
+      title = title,
+      x = "Time from First Known Event (months)",
+      y = "Patient ID"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5, margin = margin(b = 5)),
+      axis.text.y = element_text(size = 7, color = "black"),
+      axis.text.x = element_text(size = 9, color = "black"),
+      axis.title = element_text(size = 10, face = "bold"),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.major.x = element_line(color = "gray92", linewidth = 0.5),
+      plot.margin = margin(l = 10, r = 8, t = 8, b = 8)
+    ) +
+    scale_x_continuous(breaks = x_breaks, limits = c(x_min, x_max), expand = c(0.02, 0))
+  
+  return(p)
+}
+
+# Plot 1: Anna's Question - TURBT alone with undetectable ctDNA
+p_anna <- NULL
+if (exists("turbt_undetectable") && length(turbt_undetectable) > 0) {
+  anna_patients <- as.character(turbt_undetectable)
+  cat("Anna's question: Found", length(anna_patients), "patients\n")
+  p_anna <- create_research_question_swimmer(
+    anna_patients,
+    paste0("Anna's Question: TURBT Alone with Undetectable ctDNA (n = ", length(anna_patients), ")")
+  )
+  if (is.null(p_anna)) {
+    cat("Plot creation returned NULL for Anna's question.\n")
+  }
+} else {
+  cat("No patients found for Anna's question.\n")
+}
+
+# Plot 2: Lydia's Question - Cystectomy with ctDNA before
+p_lydia <- NULL
+if (exists("patients_ctdna_before_cyst") && length(patients_ctdna_before_cyst) > 0) {
+  lydia_patients <- as.character(patients_ctdna_before_cyst)
+  cat("Lydia's question: Found", length(lydia_patients), "patients\n")
+  p_lydia <- create_research_question_swimmer(
+    lydia_patients,
+    paste0("Lydia's Question: Cystectomy with ctDNA Before (n = ", length(lydia_patients), ")")
+  )
+  if (is.null(p_lydia)) {
+    cat("Plot creation returned NULL for Lydia's question.\n")
+  }
+} else {
+  cat("No patients found for Lydia's question.\n")
+}
+
+# Plot 3: Thomas's Question - Persistently low-level detectable ctDNA
+p_thomas <- NULL
+if (exists("persistent_low") && length(persistent_low) > 0) {
+  thomas_patients <- as.character(persistent_low)
+  cat("Thomas's question: Found", length(thomas_patients), "patients\n")
+  p_thomas <- create_research_question_swimmer(
+    thomas_patients,
+    paste0("Thomas's Question: Persistently Low-Level Detectable ctDNA (n = ", length(thomas_patients), ")")
+  )
+  if (is.null(p_thomas)) {
+    cat("Plot creation returned NULL for Thomas's question.\n")
+  }
+} else {
+  cat("No patients found for Thomas's question.\n")
+}
+
+# Create legend plot
+legend_plot_research <- ggplot() +
+  # ctDNA positive
+  annotate("point", x = 0.1, y = 0.9, size = 3.5, shape = 21, fill = "red", color = "white", stroke = 0.3) +
+  annotate("text", x = 0.25, y = 0.9, label = "ctDNA+", hjust = 0, size = 3.5, vjust = 0.5) +
+  # ctDNA negative
+  annotate("point", x = 0.1, y = 0.8, size = 3.5, shape = 21, fill = "green3", color = "white", stroke = 0.3) +
+  annotate("text", x = 0.25, y = 0.8, label = "ctDNA-", hjust = 0, size = 3.5, vjust = 0.5) +
+  # Surgery
+  annotate("point", x = 0.1, y = 0.7, size = 4, shape = 15, fill = "darkblue", color = "darkblue") +
+  annotate("text", x = 0.25, y = 0.7, label = "Surgery", hjust = 0, size = 3.5, vjust = 0.5) +
+  # Radiation
+  annotate("point", x = 0.1, y = 0.6, size = 4, shape = 17, fill = "darkorange", color = "darkorange") +
+  annotate("text", x = 0.25, y = 0.6, label = "Radiation", hjust = 0, size = 3.5, vjust = 0.5) +
+  # Relapse
+  annotate("point", x = 0.1, y = 0.5, size = 5, shape = 23, fill = "red3", color = "darkred", stroke = 1.2) +
+  annotate("text", x = 0.25, y = 0.5, label = "Metastatic relapse", hjust = 0, size = 3.5, vjust = 0.5) +
+  # Death
+  annotate("point", x = 0.1, y = 0.4, size = 4, shape = 8, color = "black", stroke = 1.5) +
+  annotate("text", x = 0.25, y = 0.4, label = "Death", hjust = 0, size = 3.5, vjust = 0.5) +
+  # Therapy settings - Neoadjuvant
+  annotate("segment", x = 0.05, xend = 0.2, y = 0.3, yend = 0.3, linewidth = 4, color = "#4E79A7", alpha = 0.8) +
+  annotate("text", x = 0.25, y = 0.3, label = "Neoadjuvant", hjust = 0, size = 3.5, vjust = 0.5) +
+  # Therapy settings - Adjuvant
+  annotate("segment", x = 0.05, xend = 0.2, y = 0.2, yend = 0.2, linewidth = 4, color = "#59A14F", alpha = 0.8) +
+  annotate("text", x = 0.25, y = 0.2, label = "Adjuvant", hjust = 0, size = 3.5, vjust = 0.5) +
+  # Therapy settings - Palliative
+  annotate("segment", x = 0.05, xend = 0.2, y = 0.1, yend = 0.1, linewidth = 4, color = "#9C755F", alpha = 0.8) +
+  annotate("text", x = 0.25, y = 0.1, label = "Palliative", hjust = 0, size = 3.5, vjust = 0.5) +
+  # Therapy settings - Clinical trial
+  annotate("segment", x = 0.05, xend = 0.2, y = 0.0, yend = 0.0, linewidth = 4, color = "#F28E2B", alpha = 0.8) +
+  annotate("text", x = 0.25, y = 0.0, label = "Clinical trial", hjust = 0, size = 3.5, vjust = 0.5) +
+  xlim(0, 1) +
+  ylim(0, 1) +
+  theme_void() +
+  theme(
+    plot.margin = margin(20, 20, 20, 20),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+# Combine plots with legend
+plots_list_research <- list()
+if (!is.null(p_anna)) plots_list_research[["Anna"]] <- p_anna
+if (!is.null(p_lydia)) plots_list_research[["Lydia"]] <- p_lydia
+if (!is.null(p_thomas)) plots_list_research[["Thomas"]] <- p_thomas
+
+if (length(plots_list_research) > 0) {
+  # Arrange plots in grid using wrap_plots
+  combined_plots_research <- patchwork::wrap_plots(plots_list_research, ncol = 2)
+  
+  # Combine with legend on the right
+  final_plot_research <- combined_plots_research | legend_plot_research
+  final_plot_research <- final_plot_research + plot_layout(widths = c(4, 1))
+  
+  print(final_plot_research)
+} else {
+  cat("No plots were created for research questions.\n")
+}
+```
+

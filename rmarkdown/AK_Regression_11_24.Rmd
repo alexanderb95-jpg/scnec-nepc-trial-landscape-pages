@@ -1,0 +1,267 @@
+---
+title: "AK_Regression_11_24"
+author: "Alex Karol"
+date: "2024-11-24"
+output: html_document
+---
+
+
+
+
+```{r}
+# Set the file path
+
+setwd("~/R")
+
+# Load necessary libraries
+library(readxl)     # To read Excel files
+library(dplyr)      # For data manipulation
+library(mgcv)       # For GAM modeling
+library(caret)      # For splitting data
+library(ggplot2)    # For data visualization
+
+# Step 1: Read the data and remove missing values
+file_path <- "Rodrigo_Clean_data.xlsx"  # File path
+data <- read_excel(file_path, sheet = "Sheet1") %>%
+  na.omit()  # Remove rows with missing values
+
+# Step 2: Convert categorical variables to factors
+data_cleaned <- data %>%
+  mutate(
+    treatment_lines = as.factor(treatment_lines),
+    tx_group_drug = as.factor(tx_group_drug),
+    sponsors = as.factor(sponsors)
+  )
+
+# Step 3: Create derived variables (`non_compliance` and `death_rate`)
+if (all(c("total_withdrew_noreason", "total_withdrew_because_noncompliance", "lost_fu", "total_number_enrolled") %in% colnames(data_cleaned))) {
+  data_cleaned <- data_cleaned %>%
+    mutate(
+      non_compliance = ifelse(
+        total_number_enrolled > 0,
+        (total_withdrew_noreason + total_withdrew_because_noncompliance + lost_fu) / total_number_enrolled,
+        NA
+      )
+    )
+}
+
+if (all(c("total_withdrew_because_death", "total_number_enrolled") %in% colnames(data_cleaned))) {
+  data_cleaned <- data_cleaned %>%
+    mutate(
+      death_rate = ifelse(
+        total_number_enrolled > 0,
+        total_withdrew_because_death / total_number_enrolled,
+        NA
+      )
+    )
+}
+
+# Calculate TRAE_rate as the ratio of total_withdrew_because_ae to total_number_withdrew
+data_cleaned <- data_cleaned %>%
+  mutate(TRAE_rate = ifelse(total_number_withdrew > 0, 
+                            total_withdrew_because_ae / total_number_withdrew, 
+                            NA))  # Handle cases where denominator is zero
+
+# Remove rows with missing `non_compliance` or `death_rate`
+data_cleaned <- data_cleaned %>%
+  filter(!is.na(non_compliance), !is.na(death_rate)) %>%
+  rename(outcome = non_compliance)  # Rename `non_compliance` to `outcome`
+
+# Step 4: Split data into training, validation, and test sets
+set.seed(123)
+train_index <- createDataPartition(data_cleaned$outcome, p = 0.8, list = FALSE)
+train_data <- data_cleaned[train_index, ]
+remaining_data <- data_cleaned[-train_index, ]
+
+validation_index <- createDataPartition(remaining_data$outcome, p = 0.5, list = FALSE)
+validation_data <- remaining_data[validation_index, ]
+test_data <- remaining_data[-validation_index, ]
+
+# Check for missing values in the data
+sum(is.na(data_cleaned))
+sum(is.na(train_data$outcome))
+sum(is.na(validation_data$outcome))
+sum(is.na(test_data$outcome))
+
+# Remove rows with NA outcomes or predictors using filter()
+train_data <- train_data %>% filter(complete.cases(.))
+validation_data <- validation_data %>% filter(complete.cases(.))
+test_data <- test_data %>% filter(complete.cases(.))
+
+# Step 5: Visualize relationships between predictors and `outcome`
+numeric_vars <- c("follow_up_period", "TRAE_rate", "death_rate")
+
+for (var in numeric_vars) {
+  p <- ggplot(data_cleaned, aes(x = .data[[var]], y = outcome)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "lm", color = "blue") +  # Linear fit
+    geom_smooth(method = "gam", formula = y ~ s(x, bs = "tp"), color = "red") +  # GAM fit
+    labs(title = paste("Relationship between", var, "and Outcome"),
+         x = var, y = "Outcome") +
+    theme_minimal()
+  print(p)
+}
+
+# Step 6: Fit the GAM model
+gam_model <- gam(
+  formula = outcome ~ 
+     randomization+ s(follow_up_period, bs = "tp", sp = 0.5)+s(TRAE_rate, bs = "tp", sp = 0.5)+
+    s(death_rate, bs = "tp", sp = 0.5),  # Add penalties to prevent overfitting
+  data = train_data,
+  family = gaussian(link = "log")  # Log link for nonlinear relationship
+)
+
+# Step 7: Evaluate the model
+# Generate predictions
+train_data$predicted_outcome <- predict(gam_model, newdata = train_data)
+validation_data$predicted_outcome <- predict(gam_model, newdata = validation_data)
+test_data$predicted_outcome <- predict(gam_model, newdata = test_data)
+
+# Define RMSE function
+calculate_rmse <- function(observed, predicted) {
+  sqrt(mean((observed - predicted)^2))
+}
+
+# Calculate RMSE (back-transform predictions for log link)
+train_rmse <- calculate_rmse(train_data$outcome, exp(train_data$predicted_outcome))
+validation_rmse <- calculate_rmse(validation_data$outcome, exp(validation_data$predicted_outcome))
+test_rmse <- calculate_rmse(test_data$outcome, exp(test_data$predicted_outcome))
+
+# Calculate baseline RMSE
+baseline_prediction <- mean(data_cleaned$outcome)
+baseline_rmse <- calculate_rmse(test_data$outcome, baseline_prediction)
+
+# Step 8: Compare RMSE to baseline and variance
+outcome_sd <- sd(data_cleaned$outcome)
+outcome_range <- max(data_cleaned$outcome) - min(data_cleaned$outcome)
+
+cat("Baseline RMSE:", baseline_rmse, "\n")
+cat("Outcome Standard Deviation (SD):", outcome_sd, "\n")
+cat("Outcome Range:", outcome_range, "\n")
+
+# Relative RMSE
+train_rrmse <- train_rmse / mean(train_data$outcome)
+validation_rrmse <- validation_rmse / mean(validation_data$outcome)
+test_rrmse <- test_rmse / mean(test_data$outcome)
+
+results <- data.frame(
+  Metric = c("RMSE", "RRMSE"),
+  Train = c(train_rmse, train_rrmse),
+  Validation = c(validation_rmse, validation_rrmse),
+  Test = c(test_rmse, test_rrmse),
+  Baseline = c(baseline_rmse, baseline_rmse / mean(data_cleaned$outcome))
+)
+print(results)
+
+# Step 9: Visualize Observed vs Predicted for Test Set
+ggplot(test_data, aes(x = exp(predicted_outcome), y = outcome)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Observed vs Predicted Outcomes - Test Set",
+    x = "Predicted Outcome",
+    y = "Observed Outcome"
+  ) +
+  theme_minimal()
+
+# Summary of GAM model
+summary(gam_model)
+```
+
+
+```{r}
+
+#Descriptive analysis for sig predictors
+
+# Load required libraries
+library(dplyr)
+library(ggpubr)
+
+# Ensure non_compliance is calculated
+data_cleaned <- data_cleaned %>%
+    mutate(
+        non_compliance = ifelse(
+            total_number_enrolled > 0,
+            (total_withdrew_noreason + total_withdrew_because_noncompliance + lost_fu) / total_number_enrolled,
+            NA
+        )
+    )
+
+# Define thresholds and prepare data
+data_cleaned <- data_cleaned %>%
+    mutate(
+        unclear_follow_up_boolean = ifelse(non_compliance > 0.15, "Above 15%", "15% or Below")
+    )
+
+# Define thresholds and prepare data
+data_cleaned <- data_cleaned %>%
+  mutate(
+    unclear_follow_up_boolean = ifelse(non_compliance > 0.15, "Above 15%", "15% or Below")
+  )
+
+# Wilcoxon Rank-Sum Tests
+wilcox_follow_up <- wilcox.test(follow_up_period ~ unclear_follow_up_boolean, data = data_cleaned)
+wilcox_TEAEs <- wilcox.test(TRAE_rate ~ unclear_follow_up_boolean, data = data_cleaned)
+wilcox_deaths <- wilcox.test(death_rate ~ unclear_follow_up_boolean, data = data_cleaned)
+
+# Correlation Analysis
+correlation_non_compliance_TEAEs <- cor.test(data_cleaned$non_compliance, data_cleaned$TRAE_rate)
+correlation_non_compliance_deaths <- cor.test(data_cleaned$non_compliance, data_cleaned$death_rate)
+correlation_non_compliance_follow_up <- cor.test(data_cleaned$non_compliance, data_cleaned$follow_up_period)
+
+# Create boxplots for distributions
+follow_up_boxplot <- ggboxplot(data_cleaned, x = "unclear_follow_up_boolean", y = "follow_up_period",
+                               color = "unclear_follow_up_boolean",
+                               title = "Follow-Up Period by Unclear Follow-Up Status",
+                               ylab = "Follow-Up Period",
+                               xlab = "Unclear Follow-Up Status")
+
+TEAEs_boxplot <- ggboxplot(data_cleaned, x = "unclear_follow_up_boolean", y = "TRAE_rate",
+                           color = "unclear_follow_up_boolean",
+                           title = "TEAEs by Unclear Follow-Up Status",
+                           ylab = "TEAEs Rate",
+                           xlab = "Unclear Follow-Up Status")
+
+deaths_boxplot <- ggboxplot(data_cleaned, x = "unclear_follow_up_boolean", y = "death_rate",
+                            color = "unclear_follow_up_boolean",
+                            title = "Death Rate by Unclear Follow-Up Status",
+                            ylab = "Death Rate",
+                            xlab = "Unclear Follow-Up Status")
+
+# Print results
+print(wilcox_follow_up)
+print(wilcox_TEAEs)
+print(wilcox_deaths)
+print(correlation_non_compliance_TEAEs)
+print(correlation_non_compliance_deaths)
+print(correlation_non_compliance_follow_up)
+
+# Display boxplots
+print(follow_up_boxplot)
+print(TEAEs_boxplot)
+print(deaths_boxplot)
+
+```
+
+```{r}
+#Assessment for TRAE confounding Check Raw Data Trend
+
+
+ggplot(data_cleaned, aes(x = non_compliance, y = TRAE_rate)) +
+    geom_point() +
+    geom_smooth(method = "lm", color = "blue") +
+    labs(title = "TRAEs vs Non-Compliance", x = "Non-Compliance", y = "TRAE Rate")
+
+data_cleaned$predicted_outcome <- predict(gam_model, newdata = data_cleaned)
+
+data_cleaned$predicted_outcome <- exp(data_cleaned$predicted_outcome)
+
+#Compare predictions from the regression model with actual data trends
+ggplot(data_cleaned, aes(x = predicted_outcome, y = TRAE_rate)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+    labs(title = "Predicted vs Observed TEAEs", x = "Predicted TEAEs", y = "Observed TEAEs")
+
+```
+
+

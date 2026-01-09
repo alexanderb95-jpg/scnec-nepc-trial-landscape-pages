@@ -1,0 +1,425 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+
+#Packages load
+
+install.packages("readxl")
+install.packages("writexl")
+install.packages("kableExtra")
+install.packages("tidyr")
+library(tidyr)
+
+
+
+# Load the readxl library
+library(readxl)
+# Load required libraries
+library(dplyr)
+library(kableExtra)
+
+# Set the file path
+file_path <- "Withdawl_final.xlsx"
+
+setwd("/Users/Alex/R")
+
+
+
+
+```
+
+```{r}
+
+#Load data
+
+# Read the Excel file from the specified path
+data <- read_excel(file_path, sheet = "Sheet1")
+
+# View the first few rows of the data to confirm it's loaded correctly
+head(data)
+```
+
+```{r}
+
+#Load Data for Table 1. Trial demographics
+
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(writexl)
+
+# Continuous variables: Convert Follow up period (years) to months
+# Convert `Follow up period (years)` to numeric, handling non-numeric values
+data <- data %>%
+  mutate(`Follow up period (years)` = as.numeric(gsub("[^0-9.]", "", `Follow up period (years)`)))
+
+# Re-run your summary calculations
+continuous_summary <- data %>%
+  mutate(`Follow up period (months)` = `Follow up period (years)` * 12) %>%
+  summarize(
+    `Follow up period (months)` = paste0(median(`Follow up period (months)`, na.rm = TRUE), " (", 
+                                         IQR(`Follow up period (months)`, na.rm = TRUE), ")"),
+    `Number enrolled in trial` = paste0(median(`Number enrolled in trial`, na.rm = TRUE), " (", 
+                                        IQR(`Number enrolled in trial`, na.rm = TRUE), ")")
+  ) %>%
+  pivot_longer(cols = everything(), names_to = "Characteristic", values_to = "Value")
+
+# Categorical variables (with new column names)
+# Update categorical columns to match the actual data
+categorical_columns <- c(
+  "Randomized? (y/n)", 
+  "Study type", 
+  "Control group", 
+  "Type of drug control group", 
+  "Mono or combo therapy in control arm", 
+  "Type of drug interventional", 
+  "Mono or combo therapy in interventional arm", 
+  "Cancer type", 
+  "Blinding practice", 
+  "Lines of treatment", 
+  "Disease status", 
+  "Sponser", 
+  "Location of trial", 
+  "Primary endpoint of trials"
+)
+
+
+# Generate a summary for each categorical column
+# Filter only columns that exist in `data`
+categorical_columns <- categorical_columns[categorical_columns %in% colnames(data)]
+
+# Generate a summary for each categorical column with error handling
+categorical_summary <- lapply(categorical_columns, function(column) {
+  if (!is.null(data[[column]]) && length(unique(data[[column]])) > 0) {
+    # Create the summary table
+    df <- as.data.frame(table(data[[column]]))
+    colnames(df) <- c("Category", "Count")
+    df$Percentage <- round((df$Count / sum(df$Count)) * 100, 1)
+    df$Characteristic <- column
+    df$Value <- paste0(df$Category, ": ", df$Count, " (", df$Percentage, "%)")
+    return(df[, c("Characteristic", "Value")])
+  } else {
+    # Return empty data frame if the column is missing or empty
+    return(data.frame(Characteristic = column, Value = "No data available"))
+  }
+})
+
+# Combine into a single data frame
+categorical_summary <- do.call(rbind, categorical_summary)
+
+
+
+# Combine continuous and categorical summaries
+table_1_df <- bind_rows(continuous_summary, categorical_summary_df)
+
+# Export combined summary to Excel
+write_xlsx(list(
+  "Table 1" = table_1_df
+), path = "Table_1_Characteristics.xlsx")
+
+# After running this code, the file "Table_1_Characteristics.xlsx" will be saved in your working directory
+
+
+
+
+```
+
+
+```{r}
+#Table 2 withdrawal reasons
+
+# Load necessary libraries
+library(dplyr)
+library(writexl)
+
+# Define the columns representing different withdrawal reasons, based on actual column names
+withdrawal_columns <- c(
+  "Total withdrawl of patient consent w/o clear reasons",
+  "Total withdrawl due to TRAE (tx adverse effects",
+  "Total withdrew due to progression of dz",
+  "Total withdrawl due to complicating medical disease",
+  "Total withdrawl  to seek alternative tx",
+  "Total investigator initated withdrawl due to no longer meeting study eligibility criteria",
+  "Withdrew by sponser due to non-compliance",
+  "Withdrew due to death",
+  "Unspecified loss to f/u",
+  "Total N for other reasonsof withdrawl"
+)
+
+# Convert withdrawal columns to numeric, replacing non-numeric values with NA
+data[withdrawal_columns] <- lapply(data[withdrawal_columns], function(x) as.numeric(as.character(x)))
+
+# Calculate the sum for each reason and create a summary table
+withdrawal_summary <- data %>%
+  summarize(across(all_of(withdrawal_columns), sum, na.rm = TRUE)) %>%
+  pivot_longer(cols = everything(), names_to = "Attrition reasons", values_to = "Count")
+
+# Calculate the total withdrawals to use for percentage calculations
+total_withdrawals <- sum(withdrawal_summary$Count, na.rm = TRUE)
+
+# Add percentages and format the Value column
+withdrawal_summary <- withdrawal_summary %>%
+  mutate(Percentage = round((Count / total_withdrawals) * 100, 1),
+         Value = paste0(Count, " (", Percentage, "%)")) %>%
+  select(`Attrition reasons`, Value)
+
+# Display the result to check the output
+print("Table 2: Withdrawal Reasons Summary")
+print(withdrawal_summary)
+
+# Optionally, write to Excel
+write_xlsx(withdrawal_summary, "Withdrawal_Reason_Summary.xlsx")
+
+
+```
+
+```{r}
+#Reasons for attirtion with subgroup analysis by tumor type and dz status
+
+# Load necessary libraries
+library(dplyr)
+library(writexl)
+
+# Define the specified columns for conversion
+columns_to_convert <- c(
+  "Total withdrawl of patient consent w/o clear reasons",
+  "Total withdrawl due to TRAE (tx adverse effects",
+  "Total withdrew due to progression of dz",
+  "Total withdrawl due to complicating medical disease",
+  "Total investigator initated withdrawl due to no longer meeting study eligibility criteria",
+  "Withdrew by sponser due to non-compliance",
+  "Withdrew due to death",
+  "Unspecified loss to f/u",
+  "Total N for other reasonsof withdrawl",
+  "Number withdrew from control arm due to adverse event",
+  "Number withdrew from control arm due to progression of dz",
+  "Number withdrew from control arm due patient withdrawl of consent",
+  "Number randomized (or selected)  to control arm",
+  "Number withdrew from treatment arm(s) due to adverse event",
+  "Number withdrew from treatment arm(s) due to progression of disease",
+  "Number withdrew from treatment arm(s) due patient withdrawl of consent",
+  "Number randomized (or selected)  to treatment arm(s)"
+)
+
+# Convert columns to numeric if they exist in data
+columns_to_convert <- columns_to_convert[columns_to_convert %in% colnames(data)]
+data[columns_to_convert] <- lapply(data[columns_to_convert], function(x) as.numeric(as.character(x)))
+
+# Function to calculate withdrawal summary with count and percentage
+calculate_withdrawal_summary <- function(data) {
+  # Total withdrawals and enrolled
+  total_withdrawals <- sum(data$`Total withdrawl/discontinuation`, na.rm = TRUE)
+  total_enrolled <- sum(data$`Number enrolled in trial`, na.rm = TRUE)
+  
+  # Summarize each reason for withdrawal with counts and percentages
+  summary_table <- data %>%
+    summarize(
+      `Total Withdrawl consent` = paste0(sum(`Total withdrawl of patient consent w/o clear reasons`, na.rm = TRUE), " (", 
+                                         round(sum(`Total withdrawl of patient consent w/o clear reasons`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Total withdrawl due to TRAE` = paste0(sum(`Total withdrawl due to TRAE (tx adverse effects`, na.rm = TRUE), " (", 
+                                                 round(sum(`Total withdrawl due to TRAE (tx adverse effects`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Total withdrew due to progression of dz` = paste0(sum(`Total withdrew due to progression of dz`, na.rm = TRUE), " (", 
+                                                        round(sum(`Total withdrew due to progression of dz`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Total withdrawl due to complicating medical disease` = paste0(sum(`Total withdrawl due to complicating medical disease`, na.rm = TRUE), " (", 
+                                                                     round(sum(`Total withdrawl due to complicating medical disease`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Total investigator initiated withdrawl` = paste0(sum(`Total investigator initated withdrawl due to no longer meeting study eligibility criteria`, na.rm = TRUE), " (", 
+                                                       round(sum(`Total investigator initated withdrawl due to no longer meeting study eligibility criteria`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Withdrew by sponsor due to non-compliance` = paste0(sum(`Withdrew by sponser due to non-compliance`, na.rm = TRUE), " (", 
+                                                          round(sum(`Withdrew by sponser due to non-compliance`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Withdrew due to death` = paste0(sum(`Withdrew due to death`, na.rm = TRUE), " (", 
+                                       round(sum(`Withdrew due to death`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Unspecified loss to follow-up` = paste0(sum(`Unspecified loss to f/u`, na.rm = TRUE), " (", 
+                                               round(sum(`Unspecified loss to f/u`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Total N for other reasons` = paste0(sum(`Total N for other reasonsof withdrawl`, na.rm = TRUE), " (", 
+                                           round(sum(`Total N for other reasonsof withdrawl`, na.rm = TRUE) / total_withdrawals * 100, 1), "%)"),
+      `Discontinuation Rate` = paste0(total_withdrawals, " (", round((total_withdrawals / total_enrolled) * 100, 1), "%)"),
+      
+      # Control arm withdrawal percentages with count
+      `% withdrew from control arm due to adverse event` = paste0(sum(`Number withdrew from control arm due to adverse event`, na.rm = TRUE), " (", 
+                                                                  round(sum(`Number withdrew from control arm due to adverse event`, na.rm = TRUE) / sum(`Number randomized (or selected)  to control arm`, na.rm = TRUE) * 100, 1), "%)"),
+      `% withdrew from control arm due to progression of dz` = paste0(sum(`Number withdrew from control arm due to progression of dz`, na.rm = TRUE), " (", 
+                                                                     round(sum(`Number withdrew from control arm due to progression of dz`, na.rm = TRUE) / sum(`Number randomized (or selected)  to control arm`, na.rm = TRUE) * 100, 1), "%)"),
+      `% withdrew from control arm due patient withdrawl of consent` = paste0(sum(`Number withdrew from control arm due patient withdrawl of consent`, na.rm = TRUE), " (", 
+                                                                             round(sum(`Number withdrew from control arm due patient withdrawl of consent`, na.rm = TRUE) / sum(`Number randomized (or selected)  to control arm`, na.rm = TRUE) * 100, 1), "%)"),
+      
+      # Interventional arm withdrawal percentages with count
+      `% withdrew from interventional arm due to adverse event` = paste0(sum(`Number withdrew from treatment arm(s) due to adverse event`, na.rm = TRUE), " (", 
+                                                                        round(sum(`Number withdrew from treatment arm(s) due to adverse event`, na.rm = TRUE) / sum(`Number randomized (or selected)  to treatment arm(s)`, na.rm = TRUE) * 100, 1), "%)"),
+      `% withdrew from interventional arm due to progression of dz` = paste0(sum(`Number withdrew from treatment arm(s) due to progression of disease`, na.rm = TRUE), " (", 
+                                                                            round(sum(`Number withdrew from treatment arm(s) due to progression of disease`, na.rm = TRUE) / sum(`Number randomized (or selected)  to treatment arm(s)`, na.rm = TRUE) * 100, 1), "%)"),
+      `% withdrew from interventional arm due patient withdrawl of consent` = paste0(sum(`Number withdrew from treatment arm(s) due patient withdrawl of consent`, na.rm = TRUE), " (", 
+                                                                                     round(sum(`Number withdrew from treatment arm(s) due patient withdrawl of consent`, na.rm = TRUE) / sum(`Number randomized (or selected)  to treatment arm(s)`, na.rm = TRUE) * 100, 1), "%)")
+    )
+  
+  return(summary_table)
+}
+
+# Step 1: Perform non-subgroup analysis with discontinuation rate
+non_subgroup_summary <- calculate_withdrawal_summary(data)
+
+# Step 2: Subgroup analysis by disease status and tumor type
+subgroup_disease_status <- data %>%
+    group_by(`Disease status`) %>%
+    do(calculate_withdrawal_summary(.)) %>%
+    ungroup()
+
+subgroup_tumor_type <- data %>%
+    group_by(`Subtype`) %>%
+    do(calculate_withdrawal_summary(.)) %>%
+    ungroup()
+
+# Export all summaries to Excel
+write_xlsx(list(
+  "Non-subgroup Summary" = non_subgroup_summary,
+  "By Disease Status" = subgroup_disease_status,
+  "By Tumor Type (Subtype)" = subgroup_tumor_type
+), path = "Withdrawal_Summary_with_Discontinuation_Rate.xlsx")
+
+
+```
+
+
+```{r}
+
+#Descriptive analysis for mitigation practices
+
+# Load necessary libraries
+library(dplyr)
+library(writexl)
+
+# Define the specified columns
+specified_columns <- c(
+  "contact patients lost to f/u", "encouragement", "home nursing", 
+  "no mitigation stratigies", "patient education", "protocol amendments", 
+  "supportive care", "telemedicine", "Non-specific effort", 
+  "Unblinding or cross-over", "Dosing or schedule adjustments", 
+  "Continued tx after withdrawl or re-challenge"
+)
+
+# Calculate count and percentage for each specified column
+summary_table <- data %>%
+  summarize(across(all_of(specified_columns), ~ sum(.x, na.rm = TRUE))) %>%
+  pivot_longer(cols = everything(), names_to = "Reason", values_to = "Count")
+
+# Calculate total count to use for percentage calculation
+total_count <- sum(summary_table$Count, na.rm = TRUE)
+
+# Add percentage and format the output as "count (percentage%)"
+summary_table <- summary_table %>%
+  mutate(Percentage = round((Count / total_count) * 100, 1),
+         Value = paste0(Count, " (", Percentage, "%)")) %>%
+  select(Reason, Value)
+
+# Display the summary table for verification
+print("Summary table for specified columns:")
+print(summary_table)
+
+# Export to Excel
+write_xlsx(summary_table, "Specified_Columns_Summary.xlsx")
+
+```
+
+
+```{r}
+
+#P-values for attrition reasons in control vs interventional arm
+
+# Load necessary libraries
+library(dplyr)
+library(writexl)
+
+# Define a function to calculate chi-squared p-values for given columns
+calculate_chi_squared_p <- function(data, control_col, interventional_col, total_control_col, total_interventional_col) {
+  # Extract counts for control and interventional arms
+  control_counts <- sum(data[[control_col]], na.rm = TRUE)
+  interventional_counts <- sum(data[[interventional_col]], na.rm = TRUE)
+  total_control <- sum(data[[total_control_col]], na.rm = TRUE)
+  total_interventional <- sum(data[[total_interventional_col]], na.rm = TRUE)
+  
+  # Create a contingency table
+  contingency_table <- matrix(c(control_counts, total_control - control_counts, 
+                                interventional_counts, total_interventional - interventional_counts), 
+                              nrow = 2, byrow = TRUE)
+  
+  # Perform chi-squared test
+  test_result <- chisq.test(contingency_table)
+  
+  # Extract and return p-value
+  return(test_result$p.value)
+}
+
+# Define columns for comparison
+columns_comparison <- list(
+  list(control_col = "Number withdrew from control arm due to adverse event",
+       interventional_col = "Number withdrew from treatment arm(s) due to adverse event",
+       total_control_col = "Number randomized (or selected)  to control arm",
+       total_interventional_col = "Number randomized (or selected)  to treatment arm(s)",
+       comparison_name = "% withdrew due to adverse event"),
+  
+  list(control_col = "Number withdrew from control arm due to progression of dz",
+       interventional_col = "Number withdrew from treatment arm(s) due to progression of disease",
+       total_control_col = "Number randomized (or selected)  to control arm",
+       total_interventional_col = "Number randomized (or selected)  to treatment arm(s)",
+       comparison_name = "% withdrew due to progression of disease"),
+  
+  list(control_col = "Number withdrew from control arm due patient withdrawl of consent",
+       interventional_col = "Number withdrew from treatment arm(s) due patient withdrawl of consent",
+       total_control_col = "Number randomized (or selected)  to control arm",
+       total_interventional_col = "Number randomized (or selected)  to treatment arm(s)",
+       comparison_name = "% withdrew due to patient withdrawal of consent")
+)
+
+# Calculate p-values for each comparison
+chi_squared_results <- lapply(columns_comparison, function(comp) {
+  p_value <- calculate_chi_squared_p(data, comp$control_col, comp$interventional_col, comp$total_control_col, comp$total_interventional_col)
+  return(data.frame(Comparison = comp$comparison_name, P_Value = p_value))
+})
+
+# Combine results into a single data frame
+chi_squared_summary <- do.call(rbind, chi_squared_results)
+
+# Export the p-values to an Excel file
+write_xlsx(list("Chi-Squared P-Values" = chi_squared_summary), path = "Chi_Squared_P_Values.xlsx")
+```
+
+
+
+```{r}
+
+
+#Data availability after withdrawl
+#Need for clear reasons for withdrawl
+
+
+# Load necessary libraries
+library(dplyr)
+library(writexl)
+
+# Define columns to summarize
+columns_to_summarize <- c("Did trial state need for clearly documented reasons for withdrawal", 
+                          "Data availability after withdrawl?")
+
+# Calculate counts and percentages for each column
+summary_table <- lapply(columns_to_summarize, function(column) {
+  # Count each unique value and calculate percentage
+  data %>%
+    count(!!sym(column)) %>%
+    rename(Response = !!sym(column), Count = n) %>%
+    mutate(Percentage = round((Count / sum(Count)) * 100, 1)) %>%
+    mutate(Variable = column) %>%
+    select(Variable, Response, Count, Percentage)
+}) %>%
+  bind_rows()  # Combine results into a single data frame
+
+# Export the summary to an Excel file
+write_xlsx(list("Counts_and_Percentages" = summary_table), path = "Counts_and_Percentages_Summary.xlsx")
+```
+
+

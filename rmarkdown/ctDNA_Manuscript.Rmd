@@ -1,0 +1,1062 @@
+---
+title: "ctDNA Manuscript: Validating ctDNA as a Prognostic Biomarker and Pharmacodynamic Surrogate Endpoint in Metastatic Bladder Cancer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, comment = "")
+knitr::opts_knit$set(root.dir = "~/R")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load shared setup
+source("ctDNA_Research_Questions_Shared_Setup.R")
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(ggplot2)
+  library(survival)
+  library(survminer)
+  library(knitr)
+  library(kableExtra)
+  library(lmtest)  # For likelihood ratio tests
+})
+```
+
+```{r load_data, include=FALSE}
+# Load minimal data
+data_list <- load_minimal_data(include_survival = TRUE)
+dat_combined <- data_list$dat_combined
+ctdna_long <- data_list$ctdna_long
+survival_data <- data_list$survival_data
+```
+
+```{r load_bajorin_data, include=FALSE}
+# ====================================================================================
+# Load Bajorin Risk Factors Data (KPS and Visceral Metastases)
+# ====================================================================================
+# Load data from ctDNA_Bajorin_Lexi.xlsx
+# KPS: >=80% = 1, <80% = 0
+# Visceral Mets: Yes/No
+
+bajorin_data <- tryCatch({
+  # Read Excel file - skip first row which is header
+  bajorin_raw <- read_excel("ctDNA_Bajorin_Lexi.xlsx", sheet = 1, skip = 1)
+  
+  # Based on structure: Screener, Patient_ID, MRN, Therapy_Line, KPS, Visceral_Mets, Column7
+  # Use column positions
+  if (nrow(bajorin_raw) > 0 && ncol(bajorin_raw) >= 6) {
+    # Extract columns by position
+    bajorin_clean <- tibble(
+      patient_id_raw = as.character(bajorin_raw[[2]]),  # Column 2: Patient ID
+      therapy_line_raw = as.character(bajorin_raw[[4]]),  # Column 4: Therapy Line
+      kps_raw = as.character(bajorin_raw[[5]]),  # Column 5: KPS (not column 6!)
+      visceral_mets_raw = as.character(bajorin_raw[[6]])  # Column 6: Visceral Mets (not column 7!)
+    ) %>%
+      # Remove header rows (rows that contain "Patient", "ID", "Screener", etc.)
+      filter(!str_detect(tolower(patient_id_raw), "patient|id|screener|mrn|therapy")) %>%
+      filter(!is.na(patient_id_raw), patient_id_raw != "", patient_id_raw != "NA") %>%
+      # Convert patient_id - may be numeric or character
+      mutate(
+        patient_id = as.character(patient_id_raw),
+        # Convert therapy line: "1L" -> 1, "2L" -> 2, "3L" -> 3, "4L+" -> 4
+        therapy_line = case_when(
+          str_detect(toupper(therapy_line_raw), "^1L$") ~ 1,
+          str_detect(toupper(therapy_line_raw), "^2L$") ~ 2,
+          str_detect(toupper(therapy_line_raw), "^3L$") ~ 3,
+          str_detect(toupper(therapy_line_raw), "^4L\\+") ~ 4,
+          str_detect(therapy_line_raw, "^\\d+") ~ as.numeric(str_extract(therapy_line_raw, "^\\d+")),
+          TRUE ~ NA_real_
+        ),
+        # KPS: 1 = >=80%, 0 = <80%
+        kps_binary = case_when(
+          kps_raw == "1" | kps_raw == 1 ~ 1,
+          kps_raw == "0" | kps_raw == 0 ~ 0,
+          TRUE ~ NA_real_
+        ),
+        # Visceral metastases: Yes = 1, No = 0
+        visceral_mets_binary = case_when(
+          str_detect(tolower(visceral_mets_raw), "^yes$|^y$") ~ 1,
+          str_detect(tolower(visceral_mets_raw), "^no$|^n$") ~ 0,
+          TRUE ~ NA_real_
+        )
+      ) %>%
+      filter(!is.na(patient_id), !is.na(therapy_line), patient_id != "") %>%
+      select(patient_id, therapy_line, kps_binary, visceral_mets_binary)
+    
+    bajorin_data <- bajorin_clean
+  } else {
+    bajorin_data <- tibble(patient_id = character(0), therapy_line = integer(0), 
+                          kps_binary = numeric(0), visceral_mets_binary = numeric(0))
+  }
+}, error = function(e) {
+  cat("Warning: Could not load Bajorin data from ctDNA_Bajorin_Lexi.xlsx\n")
+  tibble(patient_id = character(0), therapy_line = integer(0), 
+         kps_binary = numeric(0), visceral_mets_binary = numeric(0))
+})
+
+# Join Bajorin data with universe if available
+if (nrow(bajorin_data) > 0 && exists("universe") && nrow(universe) > 0) {
+  sample_outcome_ids <- head(unique(universe$patient_id), 5)
+}
+```
+
+# Research Questions
+
+This retrospective analysis aims to:
+
+1. **Validate quantitative ctDNA as a prognostic biomarker** across lines of therapy, histologies, and relative to qualitative thresholds in metastatic bladder cancer.
+
+2. **Validate on-treatment ctDNA changes as an intermediate pharmacodynamic surrogate endpoint** in metastatic bladder cancer.
+
+---
+
+## Research Question 1: Baseline ctDNA as a Prognostic Biomarker
+
+**What is the association between baseline ctDNA level before starting a new line of therapy and overall survival?**
+
+This analysis examines whether baseline ctDNA levels (measured within 21 days before starting therapy) are prognostic for overall survival in patients with metastatic urothelial carcinoma. The analysis includes all lines of therapy (1L, 2L, 3L+, not limited to first-line), with each line of therapy as a separate observation and time 0 defined as the start of each new line of therapy.
+
+```{r load_chunk_extractor, include=FALSE}
+# Load helper function to extract chunks from Rmd files
+source("extract_rmd_chunk.R")
+```
+
+```{r source_q1_universe, include=FALSE}
+# Source universe definition from Question 1
+extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "define_universe")
+```
+
+```{r source_q1_outcomes, include=FALSE}
+# Source outcomes extraction from Question 1 (creates 'outcomes' object needed for OS analysis)
+# This also defines death_date_cols, alive_cols, survival_cols, imaging_cols
+extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "extract_outcomes")
+
+# Ensure column name variables are defined (they should be from extract_outcomes, but ensure they exist)
+if (!exists("death_date_cols")) {
+  death_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                         !str_detect(names(dat_combined), regex("cause|reason", ignore_case = TRUE))]
+}
+if (!exists("alive_cols")) {
+  alive_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^alive_yes_no$|alive.*yes.*no", ignore_case = TRUE))]
+}
+if (!exists("survival_cols")) {
+  survival_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                       !str_detect(names(dat_combined), regex("death", ignore_case = TRUE))]
+}
+if (!exists("imaging_cols")) {
+  imaging_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("obvious.*disease.*imaging|disease.*present.*imaging", ignore_case = TRUE))]
+}
+```
+
+```{r population_description_q1, results='asis'}
+# Source population description from Question 1
+extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "population_description")
+```
+<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
+grep
+
+```{r therapy_distributions_q1, results='asis'}
+# Source therapy distribution chunks from Question 1
+extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "palliative_therapy_distribution")
+```
+
+```{r histology_distribution_q1, results='asis'}
+# Source histology distribution from Question 1
+extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "histology_distribution")
+```
+
+```{r descriptive_characteristics_q1, results='asis'}
+# Descriptive characteristics table
+# This will be populated after outcomes are defined
+# Placeholder for now
+cat("**Descriptive Characteristics:**\n")
+cat("(Table will be generated after outcome data is processed)\n\n")
+```
+
+```{r os_endpoint_definition, results='asis'}
+cat("## Overall Survival Endpoint Definition\n\n")
+cat("**Endpoint:** Overall Survival (OS)\n\n")
+cat("**Definition:** Time from therapy initiation (time 0) until death.\n\n")
+cat("**Event:** Death (coded as 1)\n\n")
+cat("**Censoring:** Patients who are alive at last follow-up are censored (coded as 0). Censoring occurs when:\n")
+cat("- Patient is known to be alive at last follow-up date, OR\n")
+cat("- Patient has no recorded death date and is marked as alive\n\n")
+cat("**Ascertainment:** Death dates were obtained from medical records. Last follow-up dates were used to determine censoring for patients who were alive at the time of data collection.\n\n")
+```
+
+```{r source_q1_os_setup, include=FALSE}
+# Source OS setup from Question 1
+# Prerequisites: outcomes must exist
+if (!exists("outcomes") || nrow(outcomes) == 0) {
+  stop("Outcomes object not found. Please ensure extract_outcomes chunk ran successfully.")
+}
+
+extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "overall_survival_setup_q1")
+
+# Verify that outcomes_os_for_model was created
+if (!exists("outcomes_os_for_model")) {
+  warning("outcomes_os_for_model was not created. Attempting to create manually...")
+  # Fallback: create it from outcomes if it doesn't exist
+  if (exists("outcomes") && nrow(outcomes) > 0) {
+    # This is a simplified version - the full version is in overall_survival_setup_q1
+    death_date_cols_os <- names(dat_combined)[str_detect(names(dat_combined), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                             !str_detect(names(dat_combined), regex("cause|reason", ignore_case = TRUE))]
+    survival_cols_os <- names(dat_combined)[str_detect(names(dat_combined), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                           !str_detect(names(dat_combined), regex("death", ignore_case = TRUE))]
+    alive_cols_os <- names(dat_combined)[str_detect(names(dat_combined), regex("^alive_yes_no$|alive.*yes.*no", ignore_case = TRUE))]
+    
+    outcomes_os_q1 <- outcomes %>%
+      select(patient_id, therapy_line, time_zero_date, ctdna_before_line_value) %>%
+      left_join(
+        dat_combined %>%
+          select(patient_id, all_of(c(death_date_cols_os, survival_cols_os, alive_cols_os))),
+        by = "patient_id"
+      ) %>%
+      mutate(
+        death_date = if (length(death_date_cols_os) > 0) {
+          as_date_safe(.data[[death_date_cols_os[1]]])
+        } else {
+          as.Date(NA)
+        },
+        last_fu_date = if (length(survival_cols_os) > 0) {
+          as_date_safe(.data[[survival_cols_os[1]]])
+        } else {
+          as.Date(NA)
+        },
+        alive_status = if (length(alive_cols_os) > 0) {
+          case_when(
+            str_detect(tolower(as.character(.data[[alive_cols_os[1]]])), "yes|y|1") ~ "Yes",
+            str_detect(tolower(as.character(.data[[alive_cols_os[1]]])), "no|n|0") ~ "No",
+            TRUE ~ NA_character_
+          )
+        } else {
+          NA_character_
+        },
+        censor_date = case_when(
+          !is.na(death_date) ~ death_date,
+          !is.na(last_fu_date) ~ last_fu_date,
+          TRUE ~ as.Date(NA)
+        ),
+        os_time = as.numeric(censor_date - time_zero_date),
+        os_event = case_when(
+          !is.na(death_date) ~ 1,
+          alive_status == "No" ~ 1,
+          alive_status == "Yes" ~ 0,
+          !is.na(last_fu_date) ~ 0,
+          TRUE ~ NA_real_
+        ),
+        therapy_line_factor = factor(case_when(
+          therapy_line == 1 ~ "1L",
+          therapy_line == 2 ~ "2L",
+          therapy_line == 3 ~ "3L",
+          therapy_line >= 4 ~ "4L+",
+          TRUE ~ as.character(therapy_line)
+        ), levels = c("1L", "2L", "3L", "4L+"))
+      ) %>%
+      filter(!is.na(os_time), os_time > 0) %>%
+      left_join(bajorin_data, by = c("patient_id", "therapy_line")) %>%
+      mutate(
+        kps_factor = factor(kps_binary, levels = c(0, 1), labels = c("KPS <80%", "KPS ≥80%")),
+        visceral_mets_factor = factor(visceral_mets_binary, levels = c(0, 1), labels = c("No Visceral Mets", "Visceral Mets"))
+      )
+    
+    outcomes_os_for_model <- outcomes_os_q1 %>%
+      filter(!is.na(ctdna_before_line_value), !is.na(os_time), !is.na(os_event))
+  }
+}
+```
+
+```{r source_q1_tertiles, include=FALSE}
+# Source tertile analysis from Question 1 - need to find the right chunk
+# For now, create tertiles inline since the chunk structure may vary
+if (exists("outcomes_os_for_model") && nrow(outcomes_os_for_model) > 0) {
+  outcomes_os_tertiles <- outcomes_os_for_model %>%
+    filter(!is.na(ctdna_before_line_value)) %>%
+    mutate(
+      ctdna_tertile = ntile(ctdna_before_line_value, 3),
+      ctdna_tertile_label = case_when(
+        ctdna_tertile == 1 ~ "T1 (Lowest)",
+        ctdna_tertile == 2 ~ "T2",
+        ctdna_tertile == 3 ~ "T3 (Highest)",
+        TRUE ~ NA_character_
+      )
+    )
+}
+```
+
+```{r display_tertiles_q1, results='asis'}
+# Display tertile values
+if (exists("outcomes_os_tertiles") && nrow(outcomes_os_tertiles) > 0) {
+  tertile_table <- outcomes_os_tertiles %>%
+    group_by(ctdna_tertile_label) %>%
+    summarise(
+      N = n(),
+      `Min ctDNA` = round(min(ctdna_before_line_value, na.rm = TRUE), 2),
+      `25th Percentile` = round(quantile(ctdna_before_line_value, 0.25, na.rm = TRUE), 2),
+      `Median ctDNA` = round(median(ctdna_before_line_value, na.rm = TRUE), 2),
+      `75th Percentile` = round(quantile(ctdna_before_line_value, 0.75, na.rm = TRUE), 2),
+      `Max ctDNA` = round(max(ctdna_before_line_value, na.rm = TRUE), 2),
+      .groups = "drop"
+    ) %>%
+    rename(`Tertile` = ctdna_tertile_label)
+  
+  tertile_table %>%
+    kable(caption = "Baseline ctDNA Tertile Values (T1-T3) for Overall Survival Analysis") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+}
+```
+
+```{r censoring_rate_analysis_q1, results='asis'}
+# Censoring rate analysis by ctDNA tertile
+if (exists("outcomes_os_for_model") && nrow(outcomes_os_for_model) > 0) {
+  outcomes_os_with_tertiles <- outcomes_os_for_model %>%
+    filter(!is.na(ctdna_before_line_value)) %>%
+    mutate(
+      censored = 1 - os_event,  # 1 = censored, 0 = event
+      ctdna_tertile = ntile(ctdna_before_line_value, 3),
+      ctdna_group = case_when(
+        ctdna_tertile == 1 ~ "T1 (Lowest)",
+        ctdna_tertile == 2 ~ "T2",
+        ctdna_tertile == 3 ~ "T3 (Highest)",
+        TRUE ~ NA_character_
+      )
+    )
+  
+  all_tertiles <- c("T1 (Lowest)", "T2", "T3 (Highest)")
+  censoring_rates <- outcomes_os_with_tertiles %>%
+    group_by(ctdna_group) %>%
+    summarise(
+      n = n(),
+      n_events = sum(os_event, na.rm = TRUE),
+      n_censored = sum(censored, na.rm = TRUE),
+      censoring_rate = round(mean(censored, na.rm = TRUE), 3),
+      .groups = "drop"
+    )
+  
+  censoring_rates <- tibble(ctdna_group = all_tertiles) %>%
+    left_join(censoring_rates, by = "ctdna_group") %>%
+    mutate(
+      n = replace_na(n, 0),
+      n_events = replace_na(n_events, 0),
+      n_censored = replace_na(n_censored, 0),
+      censoring_rate = replace_na(censoring_rate, 0)
+    )
+  
+  censoring_rates %>%
+    mutate(`Censoring Rate` = paste0(round(censoring_rate * 100, 1), "%")) %>%
+    select(`ctDNA Tertile` = ctdna_group, `N` = n, `Events` = n_events, 
+           `Censored` = n_censored, `Censoring Rate`) %>%
+    kable(caption = "Censoring Rate Analysis by Baseline ctDNA Tertile") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+}
+```
+
+```{r os_cox_models_q1, include=FALSE}
+# ====================================================================================
+# OVERALL SURVIVAL ANALYSIS: Baseline ctDNA and OS
+# ====================================================================================
+# Perform Cox models for OS with baseline ctDNA as predictor
+# ====================================================================================
+
+if (exists("outcomes_os_for_model") && nrow(outcomes_os_for_model) > 0) {
+  # Model 1: Unadjusted
+  cox_os_unadj <- tryCatch({
+    coxph(Surv(os_time, os_event) ~ log10(ctdna_before_line_value + 1), 
+          data = outcomes_os_for_model)
+  }, error = function(e) NULL)
+  
+  cox_os_unadj_summary <- NULL
+  if (!is.null(cox_os_unadj)) {
+    cox_os_unadj_summary <- summary(cox_os_unadj)
+  }
+  
+  # Model 2: Adjusted for line of therapy
+  cox_os_line <- tryCatch({
+    coxph(Surv(os_time, os_event) ~ log10(ctdna_before_line_value + 1) + therapy_line_factor, 
+          data = outcomes_os_for_model)
+  }, error = function(e) NULL)
+  
+  cox_os_line_summary <- NULL
+  if (!is.null(cox_os_line)) {
+    cox_os_line_summary <- summary(cox_os_line)
+  }
+  
+  # Model 3: Multivariate (line + therapy class + KPS + visceral mets)
+  # Use flexible model building
+  has_kps_os <- sum(!is.na(outcomes_os_for_model$kps_binary)) > 0
+  has_visceral_os <- sum(!is.na(outcomes_os_for_model$visceral_mets_binary)) > 0
+  
+  # Get therapy class counts
+  therapy_class_counts_os <- if (exists("therapy_class_factor") && "therapy_class" %in% names(outcomes_os_for_model)) {
+    outcomes_os_for_model %>%
+      filter(!is.na(therapy_class)) %>%
+      count(therapy_class) %>%
+      filter(n >= 5) %>%
+      pull(therapy_class)
+  } else {
+    character(0)
+  }
+  has_therapy_class_os <- length(therapy_class_counts_os) > 0
+  
+  cox_os_adj <- NULL
+  cox_os_adj_summary <- NULL
+  outcomes_os_multiv <- outcomes_os_for_model %>% filter(FALSE)
+  n_os_adj <- 0
+  
+  if (has_kps_os && has_visceral_os) {
+    outcomes_os_multiv <- outcomes_os_for_model %>%
+      filter(!is.na(kps_binary), !is.na(visceral_mets_binary))
+    
+    if (nrow(outcomes_os_multiv) > 0) {
+      # Build formula dynamically
+      formula_parts_os <- c("log10(ctdna_before_line_value + 1)", "therapy_line_factor")
+      
+      if (has_therapy_class_os) {
+        outcomes_os_multiv <- outcomes_os_multiv %>%
+          filter(therapy_class %in% therapy_class_counts_os | is.na(therapy_class)) %>%
+          mutate(
+            therapy_class_filtered = ifelse(therapy_class %in% therapy_class_counts_os, therapy_class, "unspecified"),
+            therapy_class_factor_filtered = factor(therapy_class_filtered)
+          )
+        formula_parts_os <- c(formula_parts_os, "therapy_class_factor_filtered")
+      }
+      
+      formula_parts_os <- c(formula_parts_os, "kps_factor", "visceral_mets_factor")
+      formula_os <- as.formula(paste0("Surv(os_time, os_event) ~ ", paste(formula_parts_os, collapse = " + ")))
+      
+      cox_os_adj <- tryCatch({
+        coxph(formula_os, data = outcomes_os_multiv)
+      }, error = function(e) NULL)
+      
+      if (!is.null(cox_os_adj)) {
+        cox_os_adj_summary <- summary(cox_os_adj)
+        n_os_adj <- cox_os_adj$n
+      }
+    }
+  }
+  
+  # Create results table
+  os_table_rows <- list()
+  
+  # Model 1: Unadjusted
+  if (!is.null(cox_os_unadj) && isTRUE(cox_os_unadj$converged)) {
+    tryCatch({
+      hr_os_unadj <- cox_os_unadj_summary$conf.int[1, "exp(coef)"]
+      hr_os_unadj_lower <- cox_os_unadj_summary$conf.int[1, "lower .95"]
+      hr_os_unadj_upper <- cox_os_unadj_summary$conf.int[1, "upper .95"]
+      p_os_unadj <- cox_os_unadj_summary$coefficients[1, "Pr(>|z|)"]
+      
+      if (!is.na(hr_os_unadj) && is.finite(hr_os_unadj) && hr_os_unadj > 0) {
+        os_table_rows[[length(os_table_rows) + 1]] <- tibble(
+          `Model` = "Unadjusted",
+          `HR (95% CI)` = paste0(round(hr_os_unadj, 2), " (", round(hr_os_unadj_lower, 2), "-", round(hr_os_unadj_upper, 2), ")"),
+          `P-value` = ifelse(p_os_unadj < 0.001, "<0.001", as.character(round(p_os_unadj, 3))),
+          `N` = cox_os_unadj$n
+        )
+      }
+    }, error = function(e) {})
+  }
+  
+  # Model 2: Adjusted for line of therapy
+  if (!is.null(cox_os_line) && isTRUE(cox_os_line$converged)) {
+    tryCatch({
+      hr_os_line <- cox_os_line_summary$conf.int[1, "exp(coef)"]
+      hr_os_line_lower <- cox_os_line_summary$conf.int[1, "lower .95"]
+      hr_os_line_upper <- cox_os_line_summary$conf.int[1, "upper .95"]
+      p_os_line <- cox_os_line_summary$coefficients[1, "Pr(>|z|)"]
+      
+      if (!is.na(hr_os_line) && is.finite(hr_os_line) && hr_os_line > 0) {
+        os_table_rows[[length(os_table_rows) + 1]] <- tibble(
+          `Model` = "Adjusted for line of therapy",
+          `HR (95% CI)` = paste0(round(hr_os_line, 2), " (", round(hr_os_line_lower, 2), "-", round(hr_os_line_upper, 2), ")"),
+          `P-value` = ifelse(p_os_line < 0.001, "<0.001", as.character(round(p_os_line, 3))),
+          `N` = cox_os_line$n
+        )
+      }
+    }, error = function(e) {})
+  }
+  
+  # Model 3: Multivariate
+  if (!is.null(cox_os_adj) && isTRUE(cox_os_adj$converged)) {
+    tryCatch({
+      hr_os_adj <- cox_os_adj_summary$conf.int[1, "exp(coef)"]
+      hr_os_adj_lower <- cox_os_adj_summary$conf.int[1, "lower .95"]
+      hr_os_adj_upper <- cox_os_adj_summary$conf.int[1, "upper .95"]
+      p_os_adj <- cox_os_adj_summary$coefficients[1, "Pr(>|z|)"]
+      
+      if (!is.na(hr_os_adj) && is.finite(hr_os_adj) && hr_os_adj > 0) {
+        adj_text <- "Adjusted for line of therapy"
+        if (has_therapy_class_os) {
+          adj_text <- paste0(adj_text, ", therapy class")
+        }
+        if (has_kps_os) {
+          adj_text <- paste0(adj_text, ", KPS")
+        }
+        if (has_visceral_os) {
+          adj_text <- paste0(adj_text, ", visceral metastases")
+        }
+        
+        os_table_rows[[length(os_table_rows) + 1]] <- tibble(
+          `Model` = adj_text,
+          `HR (95% CI)` = paste0(round(hr_os_adj, 2), " (", round(hr_os_adj_lower, 2), "-", round(hr_os_adj_upper, 2), ")"),
+          `P-value` = ifelse(p_os_adj < 0.001, "<0.001", as.character(round(p_os_adj, 3))),
+          `N` = n_os_adj
+        )
+      }
+    }, error = function(e) {})
+  }
+  
+  # Create and store results table
+  if (length(os_table_rows) > 0) {
+    os_results_df <- bind_rows(os_table_rows)
+  } else {
+    os_results_df <- tibble()
+  }
+  
+  # Create tertile models for the results table
+  if (nrow(outcomes_os_for_model) >= 3) {
+    outcomes_os_for_tertiles <- outcomes_os_for_model %>%
+      filter(!is.na(ctdna_before_line_value), !is.na(os_time), !is.na(os_event)) %>%
+      mutate(
+        ctdna_tertile = ntile(ctdna_before_line_value, 3),
+        ctdna_tertile_label = case_when(
+          ctdna_tertile == 1 ~ "T1 (Lowest)",
+          ctdna_tertile == 2 ~ "T2",
+          ctdna_tertile == 3 ~ "T3 (Highest)"
+        ),
+        ctdna_tertile_factor = factor(ctdna_tertile_label, 
+                                        levels = c("T1 (Lowest)", "T2", "T3 (Highest)"))
+      )
+    
+    # Unadjusted tertile model
+    cox_os_tertiles_unadj <- tryCatch({
+      coxph(Surv(os_time, os_event) ~ ctdna_tertile_factor, data = outcomes_os_for_tertiles)
+    }, error = function(e) NULL)
+    
+    # Adjusted tertile model (for line of therapy)
+    outcomes_os_tertiles_adj <- outcomes_os_for_tertiles %>%
+      filter(!is.na(therapy_line_factor))
+    
+    cox_os_tertiles_adj <- tryCatch({
+      coxph(Surv(os_time, os_event) ~ ctdna_tertile_factor + therapy_line_factor, 
+            data = outcomes_os_tertiles_adj)
+    }, error = function(e) NULL)
+    
+    # Fully adjusted tertile model if covariates available
+    cox_os_tertiles_multiv <- NULL
+    if (has_kps_os && has_visceral_os) {
+      outcomes_os_tertiles_multiv <- outcomes_os_for_tertiles %>%
+        filter(!is.na(kps_binary), !is.na(visceral_mets_binary))
+      
+      if (nrow(outcomes_os_tertiles_multiv) > 0) {
+        formula_parts_tert <- c("ctdna_tertile_factor", "therapy_line_factor")
+        
+        if (has_therapy_class_os) {
+          outcomes_os_tertiles_multiv <- outcomes_os_tertiles_multiv %>%
+            filter(therapy_class %in% therapy_class_counts_os | is.na(therapy_class)) %>%
+            mutate(
+              therapy_class_filtered = ifelse(therapy_class %in% therapy_class_counts_os, therapy_class, "unspecified"),
+              therapy_class_factor_filtered = factor(therapy_class_filtered)
+            )
+          formula_parts_tert <- c(formula_parts_tert, "therapy_class_factor_filtered")
+        }
+        
+        formula_parts_tert <- c(formula_parts_tert, "kps_factor", "visceral_mets_factor")
+        formula_tert <- as.formula(paste0("Surv(os_time, os_event) ~ ", paste(formula_parts_tert, collapse = " + ")))
+        
+        cox_os_tertiles_multiv <- tryCatch({
+          coxph(formula_tert, data = outcomes_os_tertiles_multiv)
+        }, error = function(e) NULL)
+      }
+    }
+  }
+} else {
+  os_results_df <- tibble()
+  cox_os_unadj <- NULL
+  cox_os_line <- NULL
+  cox_os_adj <- NULL
+  cox_os_tertiles_unadj <- NULL
+  cox_os_tertiles_adj <- NULL
+  cox_os_tertiles_multiv <- NULL
+}
+```
+
+```{r os_cox_results_display_q1, results='asis'}
+# Display OS Cox model results - source from Question 1
+# First ensure optional objects exist (set to NULL if they don't)
+if (!exists("cox_os_kps")) cox_os_kps <- NULL
+if (!exists("cox_os_kps_summary")) cox_os_kps_summary <- NULL
+if (!exists("cox_os_visceral")) cox_os_visceral <- NULL
+if (!exists("cox_os_visceral_summary")) cox_os_visceral_summary <- NULL
+if (!exists("cox_os_class")) cox_os_class <- NULL
+if (!exists("cox_os_class_summary")) cox_os_class_summary <- NULL
+if (!exists("has_therapy_class_os")) has_therapy_class_os <- FALSE
+
+# Ensure Cox models exist - if not, source the model creation chunk
+if (!exists("cox_os_unadj") || is.null(cox_os_unadj)) {
+  # Models should already be created in os_cox_models_q1 chunk, but check
+  if (!exists("cox_os_unadj")) {
+    cat("Warning: Cox models not found. Attempting to create them...\n")
+  }
+}
+
+# Source the display chunk which creates and displays the table
+extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "os_results_table_q1")
+```
+
+```{r os_quantitative_vs_qualitative_comparison_q1, include=FALSE}
+# ====================================================================================
+# Comparison: Quantitative (Continuous) vs Qualitative (Binary: 0 vs >0) ctDNA Models for OS
+# ====================================================================================
+# Source the comparison analysis from Question 1
+extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "os_quantitative_vs_qualitative_comparison")
+
+# If the sourced chunk didn't create the comparison table, create it here as fallback
+if (!exists("os_comparison_table") || (exists("os_comparison_table") && nrow(os_comparison_table) == 0)) {
+  if (exists("outcomes_os_for_model") && nrow(outcomes_os_for_model) > 0) {
+  # Create binary ctDNA variable
+  outcomes_os_binary <- outcomes_os_for_model %>%
+    filter(!is.na(ctdna_before_line_value)) %>%
+    mutate(
+      ctdna_binary = ifelse(ctdna_before_line_value == 0, 0, 1),
+      ctdna_binary_factor = factor(ctdna_binary, levels = c(0, 1), labels = c("ctDNA = 0 (Negative)", "ctDNA > 0 (Positive)"))
+    )
+  
+  # Check distribution
+  ctdna_distribution_os <- outcomes_os_binary %>%
+    summarise(
+      n_total = n(),
+      n_zero = sum(ctdna_before_line_value == 0, na.rm = TRUE),
+      n_positive = sum(ctdna_before_line_value > 0, na.rm = TRUE),
+      pct_zero = round(n_zero / n_total * 100, 1),
+      pct_positive = round(n_positive / n_total * 100, 1),
+      median_positive = median(ctdna_before_line_value[ctdna_before_line_value > 0], na.rm = TRUE),
+      q25_positive = quantile(ctdna_before_line_value[ctdna_before_line_value > 0], 0.25, na.rm = TRUE),
+      q75_positive = quantile(ctdna_before_line_value[ctdna_before_line_value > 0], 0.75, na.rm = TRUE)
+    )
+  
+  # Fit binary models
+  cox_os_binary_unadj <- tryCatch({
+    coxph(Surv(os_time, os_event) ~ ctdna_binary_factor, data = outcomes_os_binary)
+  }, error = function(e) NULL)
+  
+  cox_os_binary_line <- tryCatch({
+    coxph(Surv(os_time, os_event) ~ ctdna_binary_factor + therapy_line_factor, 
+          data = outcomes_os_binary)
+  }, error = function(e) NULL)
+  
+  # Build comparison table
+  comparison_rows <- list()
+  
+  # Unadjusted models
+  if (!is.null(cox_os_unadj) && isTRUE(cox_os_unadj$converged) && 
+      !is.null(cox_os_binary_unadj) && isTRUE(cox_os_binary_unadj$converged)) {
+    quant_summary <- summary(cox_os_unadj)
+    qual_summary <- summary(cox_os_binary_unadj)
+    
+    hr_quant <- quant_summary$conf.int[1, "exp(coef)"]
+    hr_quant_lower <- quant_summary$conf.int[1, "lower .95"]
+    hr_quant_upper <- quant_summary$conf.int[1, "upper .95"]
+    p_quant <- quant_summary$coefficients[1, "Pr(>|z|)"]
+    
+    hr_qual <- qual_summary$conf.int[1, "exp(coef)"]
+    hr_qual_lower <- qual_summary$conf.int[1, "lower .95"]
+    hr_qual_upper <- qual_summary$conf.int[1, "upper .95"]
+    p_qual <- qual_summary$coefficients[1, "Pr(>|z|)"]
+    
+    # Likelihood ratio test
+    lrt_pval <- tryCatch({
+      lrtest(cox_os_binary_unadj, cox_os_unadj)$"Pr(>Chisq)"[2]
+    }, error = function(e) NA)
+    
+    comparison_rows[[length(comparison_rows) + 1]] <- tibble(
+      `Model Type` = "Unadjusted",
+      `Quantitative HR (95% CI)` = ifelse(!is.na(hr_quant) && hr_quant > 0,
+                                         paste0(round(hr_quant, 2), " (", round(hr_quant_lower, 2), "-", round(hr_quant_upper, 2), ")"),
+                                         "N/A"),
+      `Quantitative P-value` = ifelse(!is.na(p_quant), ifelse(p_quant < 0.001, "<0.001", as.character(round(p_quant, 3))), "N/A"),
+      `Qualitative HR (95% CI)` = ifelse(!is.na(hr_qual) && hr_qual > 0,
+                                        paste0(round(hr_qual, 2), " (", round(hr_qual_lower, 2), "-", round(hr_qual_upper, 2), ")"),
+                                        "N/A"),
+      `Qualitative P-value` = ifelse(!is.na(p_qual), ifelse(p_qual < 0.001, "<0.001", as.character(round(p_qual, 3))), "N/A"),
+      `P-value (Quantitative Better)` = ifelse(!is.na(lrt_pval), ifelse(lrt_pval < 0.001, "<0.001", as.character(round(lrt_pval, 3))), "N/A")
+    )
+  }
+  
+  # Adjusted for line of therapy
+  if (!is.null(cox_os_line) && isTRUE(cox_os_line$converged) && 
+      !is.null(cox_os_binary_line) && isTRUE(cox_os_binary_line$converged)) {
+    quant_summary <- summary(cox_os_line)
+    qual_summary <- summary(cox_os_binary_line)
+    
+    hr_quant <- quant_summary$conf.int[1, "exp(coef)"]
+    hr_quant_lower <- quant_summary$conf.int[1, "lower .95"]
+    hr_quant_upper <- quant_summary$conf.int[1, "upper .95"]
+    p_quant <- quant_summary$coefficients[1, "Pr(>|z|)"]
+    
+    hr_qual <- qual_summary$conf.int[1, "exp(coef)"]
+    hr_qual_lower <- qual_summary$conf.int[1, "lower .95"]
+    hr_qual_upper <- qual_summary$conf.int[1, "upper .95"]
+    p_qual <- qual_summary$coefficients[1, "Pr(>|z|)"]
+    
+    # Likelihood ratio test
+    lrt_pval <- tryCatch({
+      lrtest(cox_os_binary_line, cox_os_line)$"Pr(>Chisq)"[2]
+    }, error = function(e) NA)
+    
+    comparison_rows[[length(comparison_rows) + 1]] <- tibble(
+      `Model Type` = "Adjusted for line of therapy",
+      `Quantitative HR (95% CI)` = ifelse(!is.na(hr_quant) && hr_quant > 0,
+                                         paste0(round(hr_quant, 2), " (", round(hr_quant_lower, 2), "-", round(hr_quant_upper, 2), ")"),
+                                         "N/A"),
+      `Quantitative P-value` = ifelse(!is.na(p_quant), ifelse(p_quant < 0.001, "<0.001", as.character(round(p_quant, 3))), "N/A"),
+      `Qualitative HR (95% CI)` = ifelse(!is.na(hr_qual) && hr_qual > 0,
+                                        paste0(round(hr_qual, 2), " (", round(hr_qual_lower, 2), "-", round(hr_qual_upper, 2), ")"),
+                                        "N/A"),
+      `Qualitative P-value` = ifelse(!is.na(p_qual), ifelse(p_qual < 0.001, "<0.001", as.character(round(p_qual, 3))), "N/A"),
+      `P-value (Quantitative Better)` = ifelse(!is.na(lrt_pval), ifelse(lrt_pval < 0.001, "<0.001", as.character(round(lrt_pval, 3))), "N/A")
+    )
+  }
+  
+    if (length(comparison_rows) > 0) {
+      os_comparison_table <- bind_rows(comparison_rows)
+      os_ctdna_distribution <- ctdna_distribution_os
+    } else {
+      os_comparison_table <- tibble()
+      os_ctdna_distribution <- NULL
+    }
+  } else {
+    os_comparison_table <- tibble()
+    os_ctdna_distribution <- NULL
+  }
+}  # End of fallback comparison creation
+```
+
+```{r quantitative_vs_qualitative_display_q1, results='asis'}
+# Display ctDNA distribution and comparison table
+# Try to source the display chunk from Question 1 first
+tryCatch({
+  extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "os_quantitative_vs_qualitative_display")
+}, error = function(e) {
+  # Fallback: display manually if sourcing fails
+  if (exists("os_ctdna_distribution") && !is.null(os_ctdna_distribution)) {
+    os_ctdna_dist_table <- tibble(
+      `Category` = c("Total observations", "ctDNA = 0 (Negative)", "ctDNA > 0 (Positive)"),
+      `N` = c(os_ctdna_distribution$n_total, os_ctdna_distribution$n_zero, os_ctdna_distribution$n_positive),
+      `%` = c("100.0", paste0(os_ctdna_distribution$pct_zero, "%"), paste0(os_ctdna_distribution$pct_positive, "%"))
+    )
+    
+    os_ctdna_dist_table %>%
+      kable(caption = "Distribution of Baseline ctDNA Values for Overall Survival Analysis (Qualitative Threshold Analysis)") %>%
+      kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+    
+    cat("\n")
+    if (os_ctdna_distribution$n_positive > 0) {
+      cat("**Among ctDNA > 0 (Positive):** median =", round(os_ctdna_distribution$median_positive, 2), 
+          ", IQR = [", round(os_ctdna_distribution$q25_positive, 2), ", ", 
+          round(os_ctdna_distribution$q75_positive, 2), "]\n\n")
+    }
+  }
+  
+  # Display comparison table
+  if (exists("os_comparison_table") && nrow(os_comparison_table) > 0) {
+    os_comparison_table %>%
+      kable(caption = "Comparison: Quantitative vs Qualitative Models for Overall Survival. P-value (Quantitative Better) from likelihood ratio test - p < 0.05 indicates quantitative model performs significantly better than qualitative model.") %>%
+      kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+  }
+})
+```
+
+```{r os_sensitivity_histology_q1, results='asis'}
+# Sensitivity analysis by histology - source from Question 1
+tryCatch({
+  extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "os_histology_sensitivity_table")
+}, error = function(e) {
+  cat("Sensitivity analysis by histology not available.\n")
+})
+```
+
+```{r os_sensitivity_censored_deaths_q1, results='asis'}
+# Sensitivity analysis assuming censored events are deaths - source from Question 1
+# First ensure required objects exist - use OS models instead of MFS
+if (!exists("hr_value") && exists("cox_os_line") && !is.null(cox_os_line)) {
+  cox_os_line_summary_temp <- summary(cox_os_line)
+  hr_value <- cox_os_line_summary_temp$conf.int[1, "exp(coef)"]
+  hr_lower <- cox_os_line_summary_temp$conf.int[1, "lower .95"]
+  hr_upper <- cox_os_line_summary_temp$conf.int[1, "upper .95"]
+  cox_summary <- cox_os_line_summary_temp
+} else if (!exists("hr_value") && exists("cox_os_unadj") && !is.null(cox_os_unadj)) {
+  cox_os_unadj_summary_temp <- summary(cox_os_unadj)
+  hr_value <- cox_os_unadj_summary_temp$conf.int[1, "exp(coef)"]
+  hr_lower <- cox_os_unadj_summary_temp$conf.int[1, "lower .95"]
+  hr_upper <- cox_os_unadj_summary_temp$conf.int[1, "upper .95"]
+  cox_summary <- cox_os_unadj_summary_temp
+}
+
+# Create OS-specific sensitivity analysis (treating censored as deaths)
+if (exists("outcomes_os_for_model") && nrow(outcomes_os_for_model) > 0) {
+  outcomes_os_sensitivity <- outcomes_os_for_model %>%
+    mutate(
+      os_event_sensitivity = 1,  # Treat all as events
+      os_time_sensitivity = os_time  # Keep same time
+    )
+  
+  # Cox model treating all censored as events
+  cox_os_sensitivity <- tryCatch({
+    coxph(Surv(os_time_sensitivity, os_event_sensitivity) ~ log10(ctdna_before_line_value + 1) + therapy_line_factor,
+          data = outcomes_os_sensitivity)
+  }, error = function(e) NULL)
+  
+  if (!is.null(cox_os_sensitivity)) {
+    cox_os_sensitivity_summary <- summary(cox_os_sensitivity)
+    
+    # Extract HR and CI for sensitivity analysis
+    hr_os_sens_value <- exp(cox_os_sensitivity_summary$coefficients[1, "coef"])
+    hr_os_sens_lower <- cox_os_sensitivity_summary$conf.int[1, "lower .95"]
+    hr_os_sens_upper <- cox_os_sensitivity_summary$conf.int[1, "upper .95"]
+    
+    # Compare results
+    os_censored_as_events_table <- tibble(
+      `Analysis` = c("Standard (Censored)", "Sensitivity (All Events)"),
+      `HR (95% CI)` = c(
+        if (exists("hr_value")) {
+          paste0(round(hr_value, 2), " (", round(hr_lower, 2), "-", round(hr_upper, 2), ")")
+        } else {
+          "N/A"
+        },
+        paste0(round(hr_os_sens_value, 2), " (", round(hr_os_sens_lower, 2), "-", round(hr_os_sens_upper, 2), ")")
+      ),
+      `P-value` = c(
+        if (exists("cox_summary")) {
+          p_val <- cox_summary$coefficients[1, "Pr(>|z|)"]
+          ifelse(p_val < 0.001, "<0.001", as.character(round(p_val, 3)))
+        } else {
+          "N/A"
+        },
+        ifelse(cox_os_sensitivity_summary$coefficients[1, "Pr(>|z|)"] < 0.001, 
+               "<0.001", 
+               round(cox_os_sensitivity_summary$coefficients[1, "Pr(>|z|)"], 3))
+      ),
+      `N Events` = c(
+        sum(outcomes_os_for_model$os_event, na.rm = TRUE),
+        nrow(outcomes_os_sensitivity)
+      )
+    ) %>%
+      kable(caption = "Sensitivity Analysis: Treating Censored Observations as Events (Worst-Case Scenario)") %>%
+      kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+    
+    print(os_censored_as_events_table)
+    cat("\n**Note:** This sensitivity analysis assumes all censored patients had events at their censoring time.\n")
+    cat("This provides a worst-case scenario to assess robustness of findings.\n")
+  } else {
+    cat("Sensitivity analysis (censored as deaths) could not be performed - model did not converge.\n")
+  }
+} else {
+  cat("Sensitivity analysis (censored as deaths) not available - OS data not found.\n")
+}
+```
+<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
+read_file
+
+```{r os_km_curve_q1}
+# Source OS KM curve from Question 1 with risk table
+# The original chunk already has risk.table = TRUE, but we need to ensure it displays properly
+if (exists("outcomes_os_q1") && nrow(outcomes_os_q1) >= 3) {
+  outcomes_os_tertiles <- outcomes_os_q1 %>%
+    filter(!is.na(ctdna_before_line_value)) %>%
+    mutate(
+      os_time_months = os_time / 30.44,
+      ctdna_tertile = ntile(ctdna_before_line_value, 3),
+      ctdna_tertile_label = case_when(
+        ctdna_tertile == 1 ~ "T1 (Lowest)",
+        ctdna_tertile == 2 ~ "T2",
+        ctdna_tertile == 3 ~ "T3 (Highest)"
+      )
+    )
+  
+  events_per_tertile_os <- outcomes_os_tertiles %>%
+    group_by(ctdna_tertile_label) %>%
+    summarise(n_events = sum(os_event, na.rm = TRUE), .groups = "drop")
+  
+  if (all(events_per_tertile_os$n_events > 0) && nrow(events_per_tertile_os) > 1) {
+    surv_fit_os <- survfit(Surv(os_time_months, os_event) ~ ctdna_tertile_label, 
+                            data = outcomes_os_tertiles)
+    
+    logrank_test_os <- survdiff(Surv(os_time_months, os_event) ~ ctdna_tertile_label, 
+                                 data = outcomes_os_tertiles)
+    logrank_pvalue_os <- 1 - pchisq(logrank_test_os$chisq, length(logrank_test_os$n) - 1)
+    pval_text_os <- ifelse(logrank_pvalue_os < 0.001, "<0.001", 
+                            as.character(round(logrank_pvalue_os, 3)))
+    
+    p_os <- ggsurvplot(
+      surv_fit_os,
+      data = outcomes_os_tertiles,
+      pval = paste0("p = ", pval_text_os),
+      conf.int = TRUE,
+      conf.int.style = "ribbon",
+      risk.table = TRUE,
+      risk.table.position = "bottom",
+      risk.table.height = 0.25,
+      risk.table.y.text.col = TRUE,
+      xlab = "Time (months)",
+      ylab = "Overall Survival Probability",
+      title = "Overall Survival by Baseline ctDNA Tertile",
+      legend.title = "ctDNA Tertile",
+      legend.labs = c("T1 (Lowest)", "T2", "T3 (Highest)"),
+      xlim = c(0, 36)
+    )
+    
+    # Print both plot and risk table
+    print(p_os)
+  } else {
+    cat("Insufficient events for tertile analysis.\n")
+  }
+} else {
+  cat("Insufficient sample size (n < 3) for OS tertile analysis.\n")
+}
+```
+
+```{r os_scatterplot_q1}
+# Source scatterplot from Question 1
+extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "continuous_association_plot_os")
+```
+
+---
+
+## Research Question 2: On-Treatment ctDNA Changes as a Pharmacodynamic Surrogate Endpoint
+
+**What is the association between on-treatment ctDNA clearance at landmark and overall survival?**
+
+This analysis examines whether on-treatment ctDNA clearance (measured within 6-24 weeks after therapy initiation) is associated with overall survival. The landmark analysis uses the latest ctDNA measurement available within the 6-24 week window after therapy initiation to assess response status, and analyzes clinical outcomes from that landmark time point forward.
+
+```{r source_q2_landmark_setup, include=FALSE}
+# Source landmark analysis setup from Question 2
+# Prerequisites: universe, outcomes, and column name variables must exist from Q1
+# Ensure death_date_cols, alive_cols, etc. are defined (from extract_outcomes)
+if (!exists("death_date_cols")) {
+  death_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^death_date$|death.*date$", ignore_case = TRUE)) & 
+                                         !str_detect(names(dat_combined), regex("cause|reason", ignore_case = TRUE))]
+}
+if (!exists("alive_cols")) {
+  alive_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^alive_yes_no$|alive.*yes.*no", ignore_case = TRUE))]
+}
+if (!exists("survival_cols")) {
+  survival_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("last.*follow.*up.*date|follow.*up.*date", ignore_case = TRUE)) & 
+                                       !str_detect(names(dat_combined), regex("death", ignore_case = TRUE))]
+}
+
+# Check that prerequisites exist
+if (!exists("universe") || nrow(universe) == 0) {
+  warning("Universe not defined. Attempting to create from Question 1...")
+  extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "define_universe")
+}
+if (!exists("outcomes") || nrow(outcomes) == 0) {
+  warning("Outcomes not defined. Attempting to create from Question 1...")
+  extract_and_run_chunk("Question1_Baseline_ctDNA_Prognosis.Rmd", "extract_outcomes")
+}
+
+# Source landmark analysis
+extract_and_run_chunk("Question2_Landmark_Analysis.Rmd", "landmark_analysis_early_response")
+```
+<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
+read_file
+
+```{r landmark_population_q2, results='asis'}
+cat("## Landmark Analysis Population\n\n")
+cat("**Landmark Window:** 6-24 weeks after therapy initiation\n\n")
+if (exists("landmark_outcomes") && nrow(landmark_outcomes) > 0) {
+  landmark_n <- nrow(landmark_outcomes)
+  landmark_unique_n <- length(unique(landmark_outcomes$patient_id))
+  cat("**N =", landmark_n, " patient-line observations (", landmark_unique_n, " unique patients)\n\n", sep="")
+  cat("**Inclusion Criteria:**\n")
+  cat("- Confirmed metastatic disease\n")
+  cat("- Starting a new line of palliative/metastatic therapy\n")
+  cat("- Had on-treatment ctDNA measurement within 6-24 weeks after starting that line of therapy\n")
+  cat("- Landmark time = ctDNA measurement date within 6-24 week window\n")
+  cat("- Time 0 for landmark analysis = landmark time (ctDNA measurement date)\n\n")
+} else {
+  cat("Landmark analysis data not available.\n")
+}
+```
+
+```{r source_q2_thresholds, include=FALSE}
+# Threshold analysis - SUPPRESSED per user request
+# Do not source the threshold analysis chunks to prevent threshold table from appearing
+# Clear any existing threshold_summary object to prevent accidental display
+if (exists("threshold_summary")) {
+  rm(threshold_summary)
+}
+if (exists("optimal_threshold_results")) {
+  rm(optimal_threshold_results)
+}
+# Do not source these chunks:
+# extract_and_run_chunk("Question2_Landmark_Analysis.Rmd", "define_optimal_thresholds")
+# extract_and_run_chunk("Question2_Landmark_Analysis.Rmd", "display_optimal_thresholds")
+```
+
+```{r display_q2_thresholds_os_only, include=FALSE}
+# Threshold comparison table - SUPPRESSED per user request
+# This chunk is set to include=FALSE to completely remove the threshold table from output
+# Do not create or display threshold_summary
+```
+
+```{r source_q2_os_landmark, include=FALSE}
+# Source OS landmark analysis from Question 2
+extract_and_run_chunk("Question2_Landmark_Analysis.Rmd", "overall_survival_landmark_analysis")
+```
+
+```{r display_q2_os_results, results='asis'}
+# Display OS results from landmark analysis
+extract_and_run_chunk("Question2_Landmark_Analysis.Rmd", "os_results_table_q2")
+```
+
+```{r os_deaths_by_clearance_q2, results='asis'}
+# Source OS deaths by clearance from Question 2
+extract_and_run_chunk("Question2_Landmark_Analysis.Rmd", "os_deaths_by_clearance")
+```
+
+```{r os_km_curve_q2}
+# Source OS KM curve from Question 2
+# Check if landmark_os_cleared exists first
+if (!exists("landmark_os_cleared") || is.null(landmark_os_cleared) || nrow(landmark_os_cleared) == 0) {
+  cat("Overall Survival survival curves not available.\n")
+} else {
+  tryCatch({
+    extract_and_run_chunk("Question2_Landmark_Analysis.Rmd", "os_survival_curves_q2")
+  }, error = function(e) {
+    cat("Overall Survival survival curves not available.\n")
+  })
+}
+```
+
+```{r interpretation_and_limitations, results='asis'}
+cat("## Interpretation and Limitations\n\n")
+
+cat("### Research Question 1: Baseline ctDNA as a Prognostic Biomarker\n\n")
+cat("**Interpretation:**\n")
+cat("(Interpretation will be added based on results)\n\n")
+
+cat("### Research Question 2: On-Treatment ctDNA Changes as a Pharmacodynamic Surrogate Endpoint\n\n")
+cat("**Interpretation:**\n")
+cat("(Interpretation will be added based on results)\n\n")
+
+cat("### Limitations\n\n")
+cat("- Interaction testing and additional variable adjustments were not possible due to limited observations.\n")
+cat("- Small sample size limits the ability to adjust for multiple confounders simultaneously.\n")
+cat("- Retrospective design may introduce selection bias.\n")
+cat("- Single-institution study limits generalizability.\n\n")
+
+cat("### Next Steps\n\n")
+cat("- Validation in larger, independent cohorts\n")
+cat("- Prospective validation studies\n")
+cat("- Evaluation across different treatment regimens\n")
+cat("- Assessment of optimal timing for ctDNA assessment\n")
+```
+

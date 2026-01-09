@@ -1,0 +1,474 @@
+---
+title: "Extract Patient Treatments"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, comment = "")
+knitr::opts_knit$set(root.dir = "~/R")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load shared setup
+source("ctDNA_Research_Questions_Shared_Setup.R")
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(readxl)
+  library(janitor)
+  library(lubridate)
+  library(knitr)
+  library(kableExtra)
+})
+```
+
+```{r load_data, include=FALSE}
+# Load minimal data
+data_list <- load_minimal_data(include_survival = TRUE)
+dat_combined <- data_list$dat_combined
+
+# Helper function for dates (from shared setup)
+as_date_safe <- function(x) {
+  v <- as.character(x)
+  num <- suppressWarnings(as.numeric(v))
+  out <- rep(as.Date(NA), length(v))
+  is_serial <- !is.na(num) & num > 20000 & num < 60000
+  out[is_serial] <- as.Date(num[is_serial], origin = "1899-12-30")
+  left <- !is_serial
+  if (any(left)) {
+    parsed <- suppressWarnings(lubridate::parse_date_time(v[left], orders = c("Y-m-d","m/d/Y","d/m/Y","m/d/y","d/m/y","Ymd"), tz = "UTC"))
+    out[left] <- as.Date(parsed)
+  }
+  bad <- is.na(out) | lubridate::year(out) < 2000 | lubridate::year(out) > 2100
+  out[bad] <- as.Date(NA)
+  out
+}
+```
+
+```{r define_universe, include=FALSE}
+# Replicate Question 1 universe definition (38 unique patients, 48 patient-line observations)
+# Universe: Patients with metastatic disease, palliative therapy lines, with ctDNA within 21 days before therapy start
+
+# Get therapy start dates and settings
+therapy_start_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*start.*date", ignore_case = TRUE))]
+therapy_setting_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*treatment.*setting", ignore_case = TRUE))]
+
+# Get all palliative therapy lines with dates
+all_palliative_therapy_lines <- tibble(patient_id = character(0), therapy_line = integer(0), therapy_start_date = as.Date(character(0)))
+
+if (length(therapy_start_cols) > 0 && length(therapy_setting_cols) > 0) {
+  therapy_dates_with_lines <- dat_combined %>%
+    select(patient_id, any_of(therapy_start_cols)) %>%
+    pivot_longer(-patient_id, names_to = "therapy_var", values_to = "start_date_raw") %>%
+    mutate(
+      start_date = as_date_safe(start_date_raw),
+      therapy_line = as.integer(str_extract(therapy_var, "\\d+"))
+    ) %>%
+    filter(!is.na(start_date), !is.na(therapy_line)) %>%
+    select(patient_id, therapy_line, therapy_start_date = start_date)
+  
+  therapy_settings_with_lines <- dat_combined %>%
+    select(patient_id, any_of(therapy_setting_cols)) %>%
+    pivot_longer(-patient_id, names_to = "setting_var", values_to = "setting_raw") %>%
+    mutate(
+      setting = as.character(setting_raw),
+      therapy_line = as.integer(str_extract(setting_var, "\\d+"))
+    ) %>%
+    filter(!is.na(therapy_line)) %>%
+    select(patient_id, therapy_line, setting)
+  
+  all_palliative_therapy_lines <- therapy_dates_with_lines %>%
+    left_join(therapy_settings_with_lines, by = c("patient_id", "therapy_line")) %>%
+    mutate(
+      setting_lower = tolower(setting),
+      is_palliative = str_detect(setting_lower, "palliative|metastatic|1l.*metastatic|2l.*metastatic|3l.*metastatic")
+    ) %>%
+    filter(is_palliative) %>%
+    select(patient_id, therapy_line, therapy_start_date) %>%
+    arrange(patient_id, therapy_line)
+}
+
+# Get patients with metastatic disease
+patients_with_metastatic <- dat_combined %>%
+  filter(str_detect(tolower(as.character(metastatic_disease_ever_diagnosed_yes_no)), "yes|y|1")) %>%
+  select(patient_id) %>%
+  distinct()
+
+# Get ctDNA data - be specific about column patterns to avoid type conflicts
+# Look for ct_dna_level_1, ct_dna_level_2, etc. (numeric value columns)
+ctdna_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^ct_dna_level_\\d+$|^ctdna_level_\\d+$", ignore_case = TRUE))]
+ctdna_date_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^ct_dna_level_\\d+_date$|^ctdna_level_\\d+_date$", ignore_case = TRUE))]
+
+ctdna_long <- tibble(patient_id = character(0), ctdna_date = as.Date(character(0)), ctdna_value = numeric(0))
+
+if (length(ctdna_cols) > 0 && length(ctdna_date_cols) > 0) {
+  ctdna_values <- dat_combined %>%
+    select(patient_id, any_of(ctdna_cols)) %>%
+    pivot_longer(-patient_id, names_to = "ctdna_var", values_to = "ctdna_value_raw") %>%
+    mutate(
+      ctdna_idx = str_extract(ctdna_var, "\\d+"),
+      ctdna_value = suppressWarnings(as.numeric(gsub("^<\\s*", "", gsub(",", "", as.character(ctdna_value_raw)))))
+    ) %>%
+    filter(!is.na(ctdna_value)) %>%
+    select(patient_id, ctdna_idx, ctdna_value)
+  
+  ctdna_dates <- dat_combined %>%
+    select(patient_id, any_of(ctdna_date_cols)) %>%
+    pivot_longer(-patient_id, names_to = "ctdna_date_var", values_to = "ctdna_date_raw") %>%
+    mutate(ctdna_idx = str_extract(ctdna_date_var, "\\d+"))
+  
+  ctdna_long <- ctdna_values %>%
+    left_join(ctdna_dates, by = c("patient_id", "ctdna_idx")) %>%
+    mutate(ctdna_date = as_date_safe(ctdna_date_raw)) %>%
+    filter(!is.na(ctdna_date)) %>%
+    select(patient_id, ctdna_date, ctdna_value)
+}
+
+# Create universe: palliative therapy lines with ctDNA within 21 days before therapy start
+universe <- all_palliative_therapy_lines %>%
+  inner_join(patients_with_metastatic, by = "patient_id") %>%
+  left_join(ctdna_long, by = "patient_id") %>%
+  filter(
+    !is.na(ctdna_date),
+    ctdna_date <= therapy_start_date,
+    ctdna_date >= (therapy_start_date - lubridate::days(21))
+  ) %>%
+  arrange(patient_id, therapy_line, desc(ctdna_date)) %>%
+  group_by(patient_id, therapy_line, therapy_start_date) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(patient_id, therapy_line) %>%
+  mutate(therapy_num = as.character(therapy_line))
+
+cat("Question 1 Universe: ", nrow(universe), " patient-line observations (", length(unique(universe$patient_id)), " unique patients)\n")
+```
+
+```{r extract_treatments}
+# Get therapy regimen columns
+regimen_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*regimen|treatment.*regimen", ignore_case = TRUE))]
+if (length(regimen_cols) == 0) {
+  regimen_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("^systemic_therapy_\\d+$", ignore_case = TRUE))]
+}
+
+# Get therapy setting columns
+therapy_setting_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*treatment.*setting", ignore_case = TRUE))]
+
+# Get note columns
+note_cols <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*note|treatment.*note", ignore_case = TRUE))]
+
+# Create long format for regimens
+regimen_long <- dat_combined %>%
+  select(patient_id, any_of(regimen_cols)) %>%
+  pivot_longer(-patient_id, names_to = "regimen_var", values_to = "regimen_raw") %>%
+  mutate(
+    therapy_num = str_extract(regimen_var, "\\d+"),
+    therapy_num = ifelse(is.na(therapy_num) | therapy_num == "", "all", therapy_num),
+    regimen_orig = str_squish(as.character(regimen_raw)),
+    regimen_clean = tolower(str_squish(as.character(regimen_raw))),
+    regimen_clean = ifelse(is.na(regimen_clean) | regimen_clean == "", "unknown/not recorded", regimen_clean)
+  ) %>%
+  filter(!is.na(regimen_orig) & regimen_orig != "") %>%
+  select(patient_id, therapy_num, regimen_clean, regimen_orig)
+
+# Get therapy settings
+therapy_settings_long <- if (length(therapy_setting_cols) > 0) {
+  dat_combined %>%
+    select(patient_id, any_of(therapy_setting_cols)) %>%
+    pivot_longer(-patient_id, names_to = "setting_var", values_to = "setting_raw") %>%
+    mutate(
+      therapy_num = str_extract(setting_var, "\\d+"),
+      therapy_num = ifelse(is.na(therapy_num) | therapy_num == "", "all", therapy_num),
+      setting = str_squish(as.character(setting_raw)),
+      is_palliative = str_detect(tolower(setting), "palliative|metastatic|1l.*metastatic|2l.*metastatic")
+    ) %>%
+    select(patient_id, therapy_num, is_palliative)
+} else {
+  # If no settings, assume all are palliative for metastatic cohort
+  regimen_long %>%
+    distinct(patient_id, therapy_num) %>%
+    mutate(is_palliative = TRUE)
+}
+
+# Get notes - look for systemic therapy notes column (row 258 = systemic therapy notes)
+# This is a general column, not therapy-specific
+systemic_notes_col <- names(dat_combined)[str_detect(names(dat_combined), regex("systemic.*therapy.*note", ignore_case = TRUE)) & 
+                                          !str_detect(names(dat_combined), regex("systemic.*therapy.*\\d+.*note", ignore_case = TRUE))]
+
+# Get general systemic therapy notes column (row 258) - this is the main source for "see notes"
+# Make sure we capture all patients, even if notes are empty (we'll filter later)
+general_notes <- if (length(systemic_notes_col) > 0) {
+  dat_combined %>%
+    select(patient_id, all_of(systemic_notes_col[1])) %>%
+    rename(systemic_notes = all_of(systemic_notes_col[1])) %>%
+    mutate(
+      systemic_notes = str_squish(as.character(systemic_notes)),
+      systemic_notes = ifelse(is.na(systemic_notes) | systemic_notes == "", NA_character_, systemic_notes)
+    ) %>%
+    select(patient_id, systemic_notes)
+} else {
+  # If column not found, try to find it by checking all columns
+  # Look for any column that might contain notes
+  all_cols <- names(dat_combined)
+  potential_cols <- all_cols[str_detect(all_cols, regex("note", ignore_case = TRUE)) & 
+                             !str_detect(all_cols, regex("\\d+", ignore_case = TRUE)) &
+                             !str_detect(all_cols, regex("date|time", ignore_case = TRUE))]
+  
+  if (length(potential_cols) > 0) {
+    dat_combined %>%
+      select(patient_id, all_of(potential_cols[1])) %>%
+      rename(systemic_notes = all_of(potential_cols[1])) %>%
+      mutate(
+        systemic_notes = str_squish(as.character(systemic_notes)),
+        systemic_notes = ifelse(is.na(systemic_notes) | systemic_notes == "", NA_character_, systemic_notes)
+      ) %>%
+      select(patient_id, systemic_notes)
+  } else {
+    # Return empty tibble with patient_id column for proper joining
+    dat_combined %>%
+      select(patient_id) %>%
+      distinct() %>%
+      mutate(systemic_notes = NA_character_) %>%
+      select(patient_id, systemic_notes)
+  }
+}
+
+# Get therapy-specific notes if available (for additional context)
+therapy_notes_long <- if (length(note_cols) > 0) {
+  dat_combined %>%
+    select(patient_id, any_of(note_cols)) %>%
+    pivot_longer(-patient_id, names_to = "note_var", values_to = "note_raw") %>%
+    mutate(
+      therapy_num = str_extract(note_var, "\\d+"),
+      therapy_num = ifelse(is.na(therapy_num) | therapy_num == "", "all", therapy_num),
+      note_text = str_squish(as.character(note_raw))
+    ) %>%
+    filter(!is.na(note_text) & note_text != "") %>%
+    group_by(patient_id, therapy_num) %>%
+    summarise(therapy_note = paste(unique(note_text), collapse = "; "), .groups = "drop")
+} else {
+  tibble(patient_id = character(0), therapy_num = character(0), therapy_note = character(0))
+}
+
+# Combine notes - for "see notes", use general systemic notes; otherwise prefer therapy-specific
+# Make sure we join to ALL patient-therapy combinations, not just those with existing notes
+notes_long <- regimen_long %>%
+  distinct(patient_id, therapy_num) %>%
+  left_join(general_notes, by = "patient_id") %>%
+  left_join(therapy_notes_long, by = c("patient_id", "therapy_num")) %>%
+  mutate(
+    # For "see notes", use systemic_notes; for others, prefer therapy_note
+    # Priority: systemic_notes (patient-level) > therapy_note (therapy-line-specific)
+    note_filled = case_when(
+      !is.na(systemic_notes) & systemic_notes != "" ~ systemic_notes,  # General notes available (for "see notes")
+      !is.na(therapy_note) & therapy_note != "" ~ therapy_note,  # Fallback to therapy-specific
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(patient_id, therapy_num, note_filled, systemic_notes)
+
+# Get the analysis universe from Question 1 (38 unique patients, 48 patient-line observations)
+# The simplest approach: read the Question 1 Rmd to get the exact patient IDs
+# But since we can't easily do that, we'll filter based on the same criteria:
+# - Patients with metastatic disease
+# - Palliative therapy lines
+# - With baseline ctDNA (we'll identify these by checking if they appear in the Question 1 output)
+
+# For now, we'll filter after joining - the key is to match the exact 48 patient-line observations
+# We'll add a note that this should match Question 1's universe
+cat("**Note:** This extraction is filtered to match the Question 1 analysis universe (38 unique patients, 48 patient-line observations).\n\n")
+
+# We'll filter later after we have the full treatment list, matching to Question 1's universe
+# For now, proceed with palliative therapy filter only - we'll add universe filter below
+
+# Join everything together - filter to palliative therapy only AND Question 1 universe
+# Check if universe exists (from define_universe chunk)
+if (exists("universe") && nrow(universe) > 0) {
+  patient_treatments <- regimen_long %>%
+    inner_join(therapy_settings_long, by = c("patient_id", "therapy_num")) %>%
+    filter(is_palliative) %>%
+    # Filter to only patient-line combinations in Question 1 universe
+    inner_join(universe, by = c("patient_id", "therapy_num")) %>%
+    left_join(notes_long, by = c("patient_id", "therapy_num")) %>%
+    mutate(
+      # Check if regimen indicates "see notes" first (this takes priority)
+      see_notes = str_detect(regimen_clean, regex("see.*note", ignore_case = TRUE)),
+      # Check if regimen indicates clinical trial or other (only if not "see notes")
+      is_clinical_trial = str_detect(regimen_clean, regex("clinical.*trial|trial|gco|hugo", ignore_case = TRUE)) & !see_notes,
+      is_other = str_detect(regimen_clean, regex("other|unspecified", ignore_case = TRUE)) & !see_notes,
+      # Extract the actual treatment information
+      # If "see notes", replace the entire text with the note_filled value from systemic therapy notes column
+      # For clinical trial or other, append note if available
+      # Priority: use systemic_notes if available for "see notes", otherwise use note_filled
+      treatment_display = case_when(
+        see_notes & !is.na(systemic_notes) & systemic_notes != "" & systemic_notes != "NA" ~ systemic_notes,  # Use systemic notes for "see notes"
+        see_notes & !is.na(note_filled) & note_filled != "" & note_filled != "NA" ~ note_filled,  # Fallback to note_filled
+        see_notes ~ regimen_orig,  # Keep original if no note available
+        is_clinical_trial & !is.na(note_filled) & note_filled != "" ~ paste0(regimen_orig, " (Note: ", note_filled, ")"),
+        is_other & !is.na(note_filled) & note_filled != "" ~ paste0(regimen_orig, " (Note: ", note_filled, ")"),
+        TRUE ~ regimen_orig
+      )
+    ) %>%
+    select(patient_id, therapy_num, treatment_display, regimen_orig, note_filled)
+} else {
+  # Fallback if universe not defined - use all palliative therapy
+  patient_treatments <- regimen_long %>%
+    inner_join(therapy_settings_long, by = c("patient_id", "therapy_num")) %>%
+    filter(is_palliative) %>%
+    left_join(notes_long, by = c("patient_id", "therapy_num")) %>%
+    mutate(
+      see_notes = str_detect(regimen_clean, regex("see.*note", ignore_case = TRUE)),
+      is_clinical_trial = str_detect(regimen_clean, regex("clinical.*trial|trial|gco|hugo", ignore_case = TRUE)) & !see_notes,
+      is_other = str_detect(regimen_clean, regex("other|unspecified", ignore_case = TRUE)) & !see_notes,
+      treatment_display = case_when(
+        see_notes & !is.na(systemic_notes) & systemic_notes != "" & systemic_notes != "NA" ~ systemic_notes,
+        see_notes & !is.na(note_filled) & note_filled != "" & note_filled != "NA" ~ note_filled,
+        see_notes ~ regimen_orig,
+        is_clinical_trial & !is.na(note_filled) & note_filled != "" ~ paste0(regimen_orig, " (Note: ", note_filled, ")"),
+        is_other & !is.na(note_filled) & note_filled != "" ~ paste0(regimen_orig, " (Note: ", note_filled, ")"),
+        TRUE ~ regimen_orig
+      )
+    ) %>%
+    select(patient_id, therapy_num, treatment_display, regimen_orig, note_filled)
+}
+
+# Handle semicolons - if treatment_display contains ";", split into separate rows
+# Each item separated by ";" represents a separate therapy line
+patient_treatments_expanded <- patient_treatments %>%
+  mutate(
+    # Split by semicolon if present
+    treatments_list = str_split(treatment_display, "; ")
+  ) %>%
+  unnest(cols = treatments_list) %>%
+  mutate(
+    treatment_display = str_trim(treatments_list),
+    # Create new therapy line numbers for split treatments
+    therapy_line_new = ifelse(str_detect(regimen_orig, ";"), 
+                              paste0(therapy_num, ".", row_number()), 
+                              therapy_num)
+  ) %>%
+  select(patient_id, therapy_num = therapy_line_new, treatment_display) %>%
+  filter(!is.na(treatment_display) & treatment_display != "") %>%
+  distinct() %>%
+  arrange(patient_id, suppressWarnings(as.numeric(str_extract(therapy_num, "\\d+"))))
+
+# Display the table
+cat("## Patient Treatments by Therapy Line\n\n")
+cat("**Patient ID, Therapy Line, and Systemic Treatment Received:**\n\n")
+cat("Note: Treatments separated by ';' are shown as separate lines. For 'see notes', the value from systemic therapy notes column is extracted.\n\n")
+
+patient_treatments_expanded %>%
+  select(`Patient ID` = patient_id, 
+         `Therapy Line` = therapy_num, 
+         `Treatment` = treatment_display) %>%
+  kable(caption = "Patient Treatments by Therapy Line (Palliative Setting Only)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+
+# Classify treatments by therapy class (ADC, ICI, Chemo, Targeted, Other)
+# Based on user guidance: classify each treatment line individually
+patient_treatments_classified <- patient_treatments_expanded %>%
+  rowwise() %>%
+  mutate(
+    treatment_lower = tolower(treatment_display),
+    # Check for "see notes" or "n/a" - these should be classified as "n/a" or "Other"
+    is_see_notes = str_detect(treatment_lower, regex("see.*note|other.*see.*note|clinical.*trial.*see.*note", ignore_case = TRUE)),
+    # Pattern matching for therapy classes (check each individually)
+    # ADC agents
+    is_adc = str_detect(treatment_lower, regex("enfortumab|disitimab|sacituzumab|trastuzumab\\s*deruxtecan|dato.*dxd|bt8009|ff-10832", ignore_case = TRUE)),
+    # ICI agents (pembrolizumab, nivolumab, atezolizumab, etc.)
+    is_ici = str_detect(treatment_lower, regex("pembro|pembrolizumab|nivolumab|nivo\\b|atezo|atezolizumab|durva|durvalumab|relatlimab", ignore_case = TRUE)),
+    # Chemotherapy agents
+    is_chemo = str_detect(treatment_lower, regex("gem\\b|gemcitabine|cis\\b|cisplatin|carbo|carboplatin|oxaliplatin|taxol|docetaxel|folfox|folfiri|mvac|etoposide|eto", ignore_case = TRUE)),
+    is_targeted = str_detect(treatment_lower, regex("erdafitinib|olaparib|loxo|fgfr|fx909|fx-909", ignore_case = TRUE)),
+    # Special cases
+    is_vaccine_trial = str_detect(treatment_lower, regex("pgv001|peptides.*poly.*iclc.*vaccine|vaccine.*atezolizumab|gco.*16-1387", ignore_case = TRUE)),
+    is_intravesical = str_detect(treatment_lower, regex("intravesical", ignore_case = TRUE)),
+    # Build class vector - check for combinations
+    class_vec = list({
+      vec <- c()
+      if (is_adc) vec <- c(vec, "ADC")
+      if (is_ici) vec <- c(vec, "ICI")
+      if (is_chemo) vec <- c(vec, "Chemo")
+      if (is_targeted) vec <- c(vec, "Targeted")
+      if (is_vaccine_trial || is_intravesical) vec <- c(vec, "Other")
+      vec
+    }),
+    # Determine final therapy class
+    therapy_class = {
+      # If "see notes" or unclear, classify as "n/a"
+      if (is_see_notes && length(class_vec[[1]]) == 0) {
+        "n/a"
+      } else if (is_vaccine_trial) {
+        "Other"
+      } else if (is_intravesical) {
+        "Other"
+      } else {
+        cv <- class_vec[[1]]
+        if (length(cv) == 0) {
+          # If no class detected and not "see notes", check for other patterns
+          if (str_detect(treatment_lower, regex("clinical.*trial|trial|gco|hugo|hcrn", ignore_case = TRUE)) && !is_see_notes) {
+            "Other"  # Clinical trial without clear class
+          } else if (is_see_notes) {
+            "n/a"
+          } else {
+            "unspecified"
+          }
+        } else if (length(cv) == 1) {
+          cv[1]  # Single class
+        } else {
+          paste(cv, collapse = " + ")  # Combination
+        }
+      }
+    }
+  ) %>%
+  ungroup() %>%
+  select(patient_id, therapy_num, treatment_display, therapy_class)
+
+# Verify we have the correct counts (should be 38 unique patients, 48 patient-line observations)
+n_unique_patients <- length(unique(patient_treatments_classified$patient_id))
+n_total_lines <- nrow(patient_treatments_classified)
+
+cat("\n**Verification:** This output shows ", n_unique_patients, " unique patients and ", n_total_lines, " patient-line observations.\n")
+cat("Expected: 38 unique patients and 48 patient-line observations (matching Question 1 analysis universe).\n\n")
+
+# Also create a summary by patient with alphabetical sorting
+cat("\n## Summary by Patient\n\n")
+cat("**All treatments received by each patient (palliative setting only), sorted alphabetically:**\n\n")
+
+patient_summary <- patient_treatments_classified %>%
+  group_by(patient_id) %>%
+  arrange(treatment_display) %>%  # Sort treatments alphabetically within each patient
+  summarise(
+    `All Treatments` = paste(treatment_display, collapse = "; "),
+    `N Therapy Lines` = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(patient_id)
+
+patient_summary %>%
+  kable(caption = "Summary of All Treatments by Patient (Alphabetically Sorted)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+
+# Also create a summary with therapy class classification
+cat("\n## Summary by Patient with Therapy Class Classification\n\n")
+cat("**All treatments with therapy class (ADC, ICI, Chemo, Targeted, Other, n/a):**\n\n")
+cat("Note: Treatments are sorted alphabetically. Therapy classes are shown in the same order.\n\n")
+
+patient_summary_classified <- patient_treatments_classified %>%
+  group_by(patient_id) %>%
+  arrange(treatment_display) %>%  # Sort treatments alphabetically within each patient
+  summarise(
+    `All Treatments` = paste(treatment_display, collapse = "; "),
+    `Therapy Classes` = paste(therapy_class, collapse = "; "),
+    `N Therapy Lines` = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(patient_id)
+
+patient_summary_classified %>%
+  kable(caption = "Summary of All Treatments by Patient with Therapy Class Classification (Alphabetically Sorted)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+
+```
