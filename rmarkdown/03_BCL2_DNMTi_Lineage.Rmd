@@ -1,0 +1,3371 @@
+```{r load-workspace-if-standalone-03, include = FALSE, cache = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+if (!exists("expr_target")) {
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(knitr)
+  library(kableExtra)
+  wspath <- NULL
+  if (requireNamespace("here", quietly = TRUE)) wspath <- here::here("data", "HMA_BCL2_workspace.rds")
+  if (is.null(wspath) || !file.exists(wspath)) wspath <- file.path("..", "data", "HMA_BCL2_workspace.rds")
+  if (file.exists(wspath)) load(wspath, envir = .GlobalEnv) else stop("Run the master or 01_Data_Loading.Rmd first to create the workspace.")
+}
+```
+
+## Cohort size and cell lines available per data source
+
+When `data/HMA_BCL2_cohort_assignments.rds` exists (created by knitting **Cell_Line_Assignment_Verification.Rmd** first), Table 1 uses the cleaned, expanded cohort from that verification report. Otherwise it uses fallback lineage assignment from DepMap metadata.
+
+**Cohort** = DepMap cell lines with expression and lineage assignment (same set as in Figure 1). **CRISPR** = cohort cell lines with BCL2 CERES dependency data in DepMap (CERES subpanels in Figure 1); the same cohort is used, but not every cohort line has CERES data, so N (CRISPR) can be less than or equal to N (cohort). **GDSC, PRISM, CTRP** = cohort cell lines with drug sensitivity data in each platform. **Methylation** = cohort cell lines with GSE68379 (Illumina HumanMethylation450) data matched to DepMap (Figures 15–16). A cell line may appear in multiple sources.
+
+Below: **Table 1** (cell lines per data source) is printed first, then **one combined 2×2 figure** with **BCL2** expression (top left) and **BCL2** CERES (top right), **DNMT1** expression (bottom left) and **DNMT1** CERES (bottom right) on the **same** wide lineage x-axis, strata, and fill colors as the BCL2 expression panel (DepMap). Lineage tick labels appear on **both** bottom-row panels; the top row omits x tick labels. Cell lines and `lab`/`subtype` assignments follow the **BCL2 expression** wide figure so DNMT1 panels show the same lineages in the same order with the same box colors.
+
+```{r table-1-cell-lines-by-source, include = TRUE, cache = FALSE, echo = FALSE, results = "asis"}
+# Table 1: Cell lines available per data source (merged; includes CRISPR so readers see it may differ from cohort)
+# Colorectal lineages excluded from this table only (per prior reporting).
+lineage_levels_t1 <- lineage_levels[!grepl("Colorectal", lineage_levels, fixed = TRUE)]
+expr_target_t1 <- expr_target %>%
+  dplyr::filter(!grepl("Colorectal", as.character(.data$lineage_group), fixed = TRUE)) %>%
+  dplyr::mutate(lineage_group = factor(as.character(.data$lineage_group), levels = lineage_levels_t1))
+t1_cohort <- tibble(lineage_group = factor(lineage_levels_t1, levels = lineage_levels_t1)) %>%
+  left_join(expr_target_t1 %>% dplyr::count(lineage_group, name = "N_cohort"), by = "lineage_group") %>%
+  mutate(N_cohort = replace_na(N_cohort, 0L)) %>%
+  arrange(lineage_group)
+
+# CRISPR: cohort lines with BCL2 CERES data (same definition as CERES subpanels in Figure 1)
+t1_crispr <- if (exists("crispr") && exists("target_ids") && nrow(crispr) > 0 && length(target_ids) > 0) {
+  crispr %>%
+    filter(grepl("^BCL2\\b", gene_name), depmap_id %in% target_ids) %>%
+    left_join(expr_target %>% select(depmap_id, lineage_group), by = "depmap_id") %>%
+    filter(!is.na(lineage_group)) %>%
+    dplyr::count(lineage_group, name = "N_CRISPR")
+} else {
+  expr_target %>% distinct(lineage_group) %>% mutate(N_CRISPR = 0L) %>% select(lineage_group, N_CRISPR)
+}
+
+t1_gdsc <- if (exists("merged_aza") && nrow(merged_aza) > 0 && "lineage_group" %in% names(merged_aza)) {
+  merged_aza %>% filter(!is.na(lineage_group)) %>% dplyr::count(lineage_group, name = "N_GDSC")
+} else { expr_target %>% distinct(lineage_group) %>% mutate(N_GDSC = 0L) %>% select(lineage_group, N_GDSC) }
+t1_prism <- if (exists("pair_df") && nrow(pair_df) > 0 && "lineage_group" %in% names(pair_df)) {
+  pair_df %>% filter(!is.na(lineage_group)) %>% dplyr::count(lineage_group, name = "N_PRISM")
+} else { expr_target %>% distinct(lineage_group) %>% mutate(N_PRISM = 0L) %>% select(lineage_group, N_PRISM) }
+t1_ctrp <- if (exists("ctrp_long") && nrow(ctrp_long) > 0) {
+  ctrp_long %>% distinct(depmap_id, lineage_group) %>% dplyr::count(lineage_group, name = "N_CTRP")
+} else { expr_target %>% distinct(lineage_group) %>% mutate(N_CTRP = 0L) %>% select(lineage_group, N_CTRP) }
+
+# Methylation (GSE68379): cohort lines with global methylation data (same match as 09_DNMTi_OnTarget_Methylation)
+t1_methylation <- NULL
+t1_global_meth_depmap_ids <- character(0)
+meth_global_path <- if (requireNamespace("here", quietly = TRUE)) here::here("data", "GSE68379_global_methylation.csv") else file.path("data", "GSE68379_global_methylation.csv")
+alt_global <- file.path("..", "data", "GSE68379_global_methylation.csv")
+for (f in c(meth_global_path, alt_global)) {
+  if (file.exists(f) && file.size(f) > 0 && exists("meta") && exists("expr_target")) {
+    global_meth_raw <- tryCatch(readr::read_csv(f, show_col_types = FALSE), error = function(e) NULL)
+    if (!is.null(global_meth_raw) && nrow(global_meth_raw) > 0) {
+      global_meth <- global_meth_raw %>%
+        filter(!is.na(global_mean_beta), global_mean_beta >= 0, global_mean_beta <= 1) %>%
+        mutate(
+          cell_line_clean = gsub("_AVG\\.Beta$", "", as.character(cell_line)),
+          cell_line_stem = gsub("-", "", gsub("_.*$", "", cell_line_clean))
+        )
+      meta_stem <- meta %>% mutate(cell_line_stem = gsub("-", "", gsub("_.*$", "", cell_line)))
+      global_meth_depmap <- global_meth %>%
+        inner_join(meta_stem %>% select(depmap_id, cell_line_stem), by = "cell_line_stem") %>%
+        distinct(depmap_id, .keep_all = TRUE)
+      t1_global_meth_depmap_ids <- unique(as.character(global_meth_depmap$depmap_id))
+      meth_lineage <- expr_target_t1 %>%
+        select(depmap_id, lineage_group) %>%
+        inner_join(global_meth_depmap %>% select(depmap_id), by = "depmap_id") %>%
+        dplyr::count(lineage_group, name = "N_methylation")
+      t1_methylation <- tibble(lineage_group = factor(lineage_levels_t1, levels = lineage_levels_t1)) %>%
+        left_join(meth_lineage, by = "lineage_group") %>%
+        mutate(N_methylation = replace_na(N_methylation, 0L))
+      break
+    }
+  }
+}
+if (is.null(t1_methylation)) {
+  t1_methylation <- expr_target_t1 %>% distinct(lineage_group) %>% mutate(N_methylation = 0L) %>% select(lineage_group, N_methylation)
+}
+
+t1_body <- t1_cohort %>%
+  left_join(t1_crispr, by = "lineage_group") %>%
+  left_join(t1_gdsc, by = "lineage_group") %>%
+  left_join(t1_prism, by = "lineage_group") %>%
+  left_join(t1_ctrp, by = "lineage_group") %>%
+  left_join(t1_methylation, by = "lineage_group") %>%
+  mutate(across(starts_with("N_"), ~replace(., is.na(.), 0L)))
+
+# Table 1: omit strata with "Unspecified" in the lineage label (all masters; full cohort unchanged for figures)
+t1_body <- dplyr::filter(t1_body, !grepl("Unspecified", as.character(.data$lineage_group), fixed = TRUE))
+
+t1_total <- t1_body %>% summarise(
+  lineage_group = "Total",
+  N_cohort = sum(N_cohort),
+  N_CRISPR = sum(N_CRISPR, na.rm = TRUE),
+  N_GDSC = sum(N_GDSC),
+  N_PRISM = sum(N_PRISM),
+  N_CTRP = sum(N_CTRP),
+  N_methylation = sum(N_methylation, na.rm = TRUE)
+)
+t1_df <- dplyr::bind_rows(t1_body, t1_total) %>%
+  mutate(Lineage = gsub(" \\(control\\)", "", as.character(lineage_group))) %>%
+  select(Lineage, `N (cohort)` = N_cohort, `N (CRISPR)` = N_CRISPR, `N (GDSC)` = N_GDSC, `N (PRISM)` = N_PRISM, `N (CTRP)` = N_CTRP, `N (methylation)` = N_methylation)
+
+t1_kable <- t1_df %>%
+  kable(caption = "Table 1. Cell lines available per data source. Cohort = DepMap expression/lineage (Figure 1). CRISPR = cohort lines with BCL2 CERES data (CERES subpanels in Figure 1). GDSC, PRISM, CTRP = cohort lines with drug sensitivity in each platform. Methylation = cohort lines with GSE68379 (Illumina 450k) data matched to DepMap. A line may appear in multiple sources.") %>%
+  kable_styling(bootstrap_options = c("bordered", "condensed"), full_width = FALSE)
+cat("\n\n")
+print(t1_kable)
+cat("\n\n")
+```
+
+```{r bcl2i-table-42, echo = FALSE, results = "asis"}
+# Table 2: BCL2 inhibitors and DNMTi in the dataset — types, mechanisms, and N (cohort cell lines) in GDSC, PRISM, CTRP
+# 4.1 BCL2 inhibitors
+bcl2i_simple <- tibble::tibble(
+  Compound = c("Venetoclax (ABT-199, GDC-0199)", "Navitoclax (ABT-263)", "Obatoclax", "ABT-737"),
+  `Target / mechanism` = c(
+    "BCL2-selective; FDA-approved (AML, CLL)",
+    "BCL2 + BCL-xL; thrombocytopenia risk",
+    "Pan-BH3 mimetic (MCL1, BCL2, BCL-xL)",
+    "BCL2 + BCL-xL; first-in-class BH3 mimetic"
+  ),
+  `N (GDSC)` = NA_integer_,
+  `N (PRISM)` = NA_integer_,
+  `N (CTRP)` = NA_integer_
+)
+cohort_ids <- if (exists("target_ids")) target_ids else character(0)
+# PRISM: cohort cell lines with that compound
+if (exists("drug_sens") && exists("bcl2i_prism") && nrow(bcl2i_prism) > 0 && length(cohort_ids) > 0) {
+  n_prism <- drug_sens %>% filter(depmap_id %in% cohort_ids, name %in% bcl2i_prism$name) %>%
+    group_by(name) %>% summarise(n = n_distinct(depmap_id), .groups = "drop")
+  bcl2i_simple <- bcl2i_simple %>%
+    mutate(
+      `N (PRISM)` = c(
+        sum(n_prism$n[grepl("venetoclax|ABT-199|GDC-0199", n_prism$name, ignore.case = TRUE)], na.rm = TRUE),
+        sum(n_prism$n[grepl("navitoclax|ABT-263", n_prism$name, ignore.case = TRUE)], na.rm = TRUE),
+        sum(n_prism$n[grepl("obatoclax", n_prism$name, ignore.case = TRUE)], na.rm = TRUE),
+        sum(n_prism$n[grepl("ABT-737", n_prism$name, ignore.case = TRUE)], na.rm = TRUE)
+      )
+    )
+}
+# GDSC: cohort cell lines with that BCL2i (from gdsc_raw if available)
+if (exists("gdsc_raw") && nrow(gdsc_raw) > 0 && exists("meta") && length(cohort_ids) > 0) {
+  nm <- names(gdsc_raw)
+  col_drug <- nm[tolower(nm) == "drug_name"][1]; if (length(col_drug) == 0) col_drug <- "DRUG_NAME"
+  col_cell <- nm[tolower(nm) == "cell_line_name"][1]; if (length(col_cell) == 0) col_cell <- "CELL_LINE_NAME"
+  gdsc_drugs <- unique(gdsc_raw[[col_drug]])
+  bcl2i_gdsc_names <- gdsc_drugs[grepl("venetoclax|ABT-199|GDC-0199|navitoclax|ABT-263|obatoclax|ABT-737", gdsc_drugs, ignore.case = TRUE)]
+  if (length(bcl2i_gdsc_names) > 0) {
+    meta_stem <- meta %>% mutate(cell_line_stem = gsub("-", "", gsub("_.*$", "", cell_line)))
+    gdsc_bcl2i <- gdsc_raw %>%
+      filter(.data[[col_drug]] %in% bcl2i_gdsc_names) %>%
+      mutate(cell_line_stem = gsub("_.*$", "", gsub("-", "", as.character(.data[[col_cell]]))))
+    gdsc_bcl2i <- gdsc_bcl2i %>%
+      inner_join(meta_stem %>% select(depmap_id, cell_line_stem), by = "cell_line_stem") %>%
+      filter(depmap_id %in% cohort_ids)
+    if (nrow(gdsc_bcl2i) > 0) {
+      n_gdsc <- gdsc_bcl2i %>%
+        mutate(drug_name = as.character(.data[[col_drug]])) %>%
+        group_by(drug_name) %>% summarise(n = n_distinct(depmap_id), .groups = "drop")
+      bcl2i_simple <- bcl2i_simple %>%
+        mutate(
+          `N (GDSC)` = c(
+            sum(n_gdsc$n[grepl("venetoclax|ABT-199|GDC-0199", n_gdsc$drug_name, ignore.case = TRUE)], na.rm = TRUE),
+            sum(n_gdsc$n[grepl("navitoclax|ABT-263", n_gdsc$drug_name, ignore.case = TRUE)], na.rm = TRUE),
+            sum(n_gdsc$n[grepl("obatoclax", n_gdsc$drug_name, ignore.case = TRUE)], na.rm = TRUE),
+            sum(n_gdsc$n[grepl("ABT-737", n_gdsc$drug_name, ignore.case = TRUE)], na.rm = TRUE)
+          )
+        )
+    }
+  }
+}
+# CTRP: cohort cell lines with any BCL2 inhibitor (CTRP is summarized by drug_class)
+if (exists("ctrp_long") && nrow(ctrp_long) > 0 && length(cohort_ids) > 0) {
+  n_ctrp_bcl2i <- ctrp_long %>%
+    filter(drug_class == "BCL2 inhibitor", depmap_id %in% cohort_ids) %>%
+    distinct(depmap_id) %>% nrow()
+  bcl2i_simple <- bcl2i_simple %>% mutate(`N (CTRP)` = n_ctrp_bcl2i)
+}
+# 4.2 DNMTi (hypomethylating agents / HMA): DNMT1 inhibitors in the dataset
+dnmti_simple <- tibble::tibble(
+  Compound = c("Decitabine (5-aza-2'-deoxycytidine)", "Azacitidine (5-azacytidine)"),
+  `Target / mechanism` = c(
+    "DNMT1 inhibitor; cytidine analog (DNA incorporation)",
+    "DNMT1 inhibitor; cytidine analog (RNA/DNA incorporation)"
+  ),
+  `N (GDSC)` = NA_integer_,
+  `N (PRISM)` = NA_integer_,
+  `N (CTRP)` = NA_integer_
+)
+cohort_ids_tbl <- if (exists("target_ids")) target_ids else character(0)
+if (exists("drug_sens") && nrow(drug_sens) > 0 && length(cohort_ids_tbl) > 0) {
+  aza_names <- unique(drug_sens$name)[grepl("azacitidine|decitabine|5-aza|dacogen", unique(drug_sens$name), ignore.case = TRUE)]
+  if (length(aza_names) > 0) {
+    n_prism_aza <- drug_sens %>% filter(depmap_id %in% cohort_ids_tbl, name %in% aza_names) %>%
+      group_by(name) %>% summarise(n = n_distinct(depmap_id), .groups = "drop")
+    dnmti_simple <- dnmti_simple %>%
+      mutate(
+        `N (PRISM)` = c(
+          sum(n_prism_aza$n[grepl("decitabine|dacogen|5-aza-2", n_prism_aza$name, ignore.case = TRUE)], na.rm = TRUE),
+          sum(n_prism_aza$n[grepl("azacitidine|5-azacytidine|5-aza[^2]|vidaza", n_prism_aza$name, ignore.case = TRUE)], na.rm = TRUE)
+        )
+      )
+  }
+}
+if (exists("gdsc_raw") && nrow(gdsc_raw) > 0 && length(cohort_ids_tbl) > 0 && exists("meta")) {
+  nm <- names(gdsc_raw)
+  col_drug <- nm[tolower(nm) == "drug_name"][1]; if (length(col_drug) == 0) col_drug <- "DRUG_NAME"
+  col_cell <- nm[tolower(nm) == "cell_line_name"][1]; if (length(col_cell) == 0) col_cell <- "CELL_LINE_NAME"
+  gdsc_drugs <- unique(gdsc_raw[[col_drug]])
+  aza_gdsc <- gdsc_drugs[grepl("azacitidine|decitabine|5-aza|dacogen|vidaza", gdsc_drugs, ignore.case = TRUE)]
+  if (length(aza_gdsc) > 0) {
+    meta_stem <- meta %>% mutate(cell_line_stem = gsub("-", "", gsub("_.*$", "", cell_line)))
+    gdsc_aza <- gdsc_raw %>% filter(.data[[col_drug]] %in% aza_gdsc) %>%
+      mutate(cell_line_stem = gsub("_.*$", "", gsub("-", "", as.character(.data[[col_cell]]))))
+    gdsc_aza <- gdsc_aza %>% inner_join(meta_stem %>% select(depmap_id, cell_line_stem), by = "cell_line_stem") %>%
+      filter(depmap_id %in% cohort_ids_tbl)
+    if (nrow(gdsc_aza) > 0) {
+      n_gdsc_aza <- gdsc_aza %>% mutate(drug_name = as.character(.data[[col_drug]])) %>%
+        group_by(drug_name) %>% summarise(n = n_distinct(depmap_id), .groups = "drop")
+      dnmti_simple <- dnmti_simple %>%
+        mutate(
+          `N (GDSC)` = c(
+            sum(n_gdsc_aza$n[grepl("decitabine|dacogen|5-aza-2", n_gdsc_aza$drug_name, ignore.case = TRUE)], na.rm = TRUE),
+            sum(n_gdsc_aza$n[grepl("azacitidine|5-azacytidine|vidaza", n_gdsc_aza$drug_name, ignore.case = TRUE)], na.rm = TRUE)
+          )
+        )
+    }
+  }
+}
+if (exists("ctrp_long") && nrow(ctrp_long) > 0 && length(cohort_ids_tbl) > 0) {
+  n_ctrp_aza <- ctrp_long %>%
+    filter(drug_class == "HMA", depmap_id %in% cohort_ids_tbl) %>%
+    distinct(depmap_id) %>% nrow()
+  if (n_ctrp_aza > 0) dnmti_simple <- dnmti_simple %>% mutate(`N (CTRP)` = n_ctrp_aza)
+}
+# 4.3 EZH2 inhibitors (Supp table 2)
+ezh2i_simple <- tibble::tibble(
+  Compound = c("Tazemetostat (EPZ-6438)"),
+  `Target / mechanism` = c("EZH2 (PRC2) inhibitor; H3K27me3; FDA-approved R/R follicular lymphoma, epithelioid sarcoma"),
+  `N (GDSC)` = NA_integer_,
+  `N (PRISM)` = NA_integer_,
+  `N (CTRP)` = NA_integer_
+)
+# N (GDSC) for EZH2i: use merged_ezh2i (built in 01_Data_Loading) when available so table matches actual analysis cohort
+if (exists("merged_ezh2i") && is.data.frame(merged_ezh2i) && nrow(merged_ezh2i) > 0 && "depmap_id" %in% names(merged_ezh2i)) {
+  ezh2i_simple <- ezh2i_simple %>% mutate(`N (GDSC)` = as.integer(n_distinct(merged_ezh2i$depmap_id)))
+} else if (exists("gdsc_raw") && nrow(gdsc_raw) > 0 && exists("meta") && length(cohort_ids_tbl) > 0) {
+  nm <- names(gdsc_raw)
+  col_drug <- nm[tolower(nm) == "drug_name"][1]; if (length(col_drug) == 0) col_drug <- "DRUG_NAME"
+  col_cell <- nm[tolower(nm) == "cell_line_name"][1]; if (length(col_cell) == 0) col_cell <- "CELL_LINE_NAME"
+  gdsc_drugs <- unique(gdsc_raw[[col_drug]])
+  ezh2_gdsc_names <- gdsc_drugs[grepl("tazemetostat|EPZ-6438|EZH2|GSK126|GSK343|valemetostat", gdsc_drugs, ignore.case = TRUE)]
+  if (length(ezh2_gdsc_names) > 0) {
+    meta_stem <- meta %>% mutate(cell_line_stem = gsub("-", "", gsub("_.*$", "", cell_line)))
+    gdsc_ezh2 <- gdsc_raw %>%
+      filter(.data[[col_drug]] %in% ezh2_gdsc_names) %>%
+      mutate(cell_line_stem = gsub("_.*$", "", gsub("-", "", as.character(.data[[col_cell]]))))
+    gdsc_ezh2 <- gdsc_ezh2 %>%
+      inner_join(meta_stem %>% select(depmap_id, cell_line_stem), by = "cell_line_stem") %>%
+      filter(depmap_id %in% cohort_ids_tbl)
+    if (nrow(gdsc_ezh2) > 0) ezh2i_simple <- ezh2i_simple %>% mutate(`N (GDSC)` = as.integer(n_distinct(gdsc_ezh2$depmap_id)))
+  }
+}
+# 4.4 HER2-directed small molecules (same strict agent list as ERBB2 / locus-triple GDSC merge)
+her2i_simple <- tibble::tibble(
+  Compound = c(
+    "Lapatinib (Tykerb)", "Tucatinib (Tukysa)", "Afatinib (Gilotrif)", "Neratinib (Nerlynx)",
+    "Pyrotinib", "Poziotinib", "Sapitinib"
+  ),
+  `Target / mechanism` = c(
+    "Reversible ATP-competitive HER2/EGFR tyrosine kinase inhibitor",
+    "Reversible HER2-selective tyrosine kinase inhibitor",
+    "Irreversible pan-ErbB (HER1/HER2/HER4) tyrosine kinase inhibitor",
+    "Irreversible pan-ErbB tyrosine kinase inhibitor",
+    "Irreversible pan-ErbB tyrosine kinase inhibitor",
+    "Irreversible pan-ErbB tyrosine kinase inhibitor",
+    "Dual SRC and HER2 inhibitor"
+  ),
+  `N (GDSC)` = NA_integer_,
+  `N (PRISM)` = NA_integer_,
+  `N (CTRP)` = 0L
+)
+if (exists("drug_sens") && nrow(drug_sens) > 0 && length(cohort_ids_tbl) > 0) {
+  h2_prism_pat <- "lapatinib|tucatinib|afatinib|neratinib|pyrotinib|poziotinib|sapitinib"
+  n_prism_h2 <- drug_sens %>%
+    filter(depmap_id %in% cohort_ids_tbl, grepl(h2_prism_pat, name, ignore.case = TRUE)) %>%
+    group_by(name) %>%
+    summarise(n = n_distinct(depmap_id), .groups = "drop")
+  if (nrow(n_prism_h2) > 0) {
+    her2i_simple <- her2i_simple %>%
+      mutate(
+        `N (PRISM)` = c(
+          sum(n_prism_h2$n[grepl("lapatinib", n_prism_h2$name, ignore.case = TRUE)], na.rm = TRUE),
+          sum(n_prism_h2$n[grepl("tucatinib", n_prism_h2$name, ignore.case = TRUE)], na.rm = TRUE),
+          sum(n_prism_h2$n[grepl("afatinib", n_prism_h2$name, ignore.case = TRUE)], na.rm = TRUE),
+          sum(n_prism_h2$n[grepl("neratinib", n_prism_h2$name, ignore.case = TRUE)], na.rm = TRUE),
+          sum(n_prism_h2$n[grepl("pyrotinib", n_prism_h2$name, ignore.case = TRUE)], na.rm = TRUE),
+          sum(n_prism_h2$n[grepl("poziotinib", n_prism_h2$name, ignore.case = TRUE)], na.rm = TRUE),
+          sum(n_prism_h2$n[grepl("sapitinib", n_prism_h2$name, ignore.case = TRUE)], na.rm = TRUE)
+        )
+      )
+  }
+}
+if (exists("gdsc_raw") && nrow(gdsc_raw) > 0 && exists("meta") && length(cohort_ids_tbl) > 0) {
+  nm <- names(gdsc_raw)
+  col_drug <- nm[tolower(nm) == "drug_name"][1]; if (length(col_drug) == 0) col_drug <- "DRUG_NAME"
+  col_cell <- nm[tolower(nm) == "cell_line_name"][1]; if (length(col_cell) == 0) col_cell <- "CELL_LINE_NAME"
+  gdsc_drugs <- unique(gdsc_raw[[col_drug]])
+  h2_gdsc_names <- gdsc_drugs[grepl("lapatinib|tucatinib|afatinib|neratinib|pyrotinib|poziotinib|sapitinib", gdsc_drugs, ignore.case = TRUE)]
+  if (length(h2_gdsc_names) > 0) {
+    meta_stem <- meta %>% mutate(cell_line_stem = gsub("-", "", gsub("_.*$", "", cell_line)))
+    gdsc_h2 <- gdsc_raw %>%
+      filter(.data[[col_drug]] %in% h2_gdsc_names) %>%
+      mutate(cell_line_stem = gsub("_.*$", "", gsub("-", "", as.character(.data[[col_cell]]))))
+    gdsc_h2 <- gdsc_h2 %>%
+      inner_join(meta_stem %>% select(depmap_id, cell_line_stem), by = "cell_line_stem") %>%
+      filter(depmap_id %in% cohort_ids_tbl)
+    if (nrow(gdsc_h2) > 0) {
+      n_gdsc_h2 <- gdsc_h2 %>%
+        mutate(drug_name = as.character(.data[[col_drug]])) %>%
+        group_by(drug_name) %>%
+        summarise(n = n_distinct(depmap_id), .groups = "drop")
+      her2i_simple <- her2i_simple %>%
+        mutate(
+          `N (GDSC)` = c(
+            sum(n_gdsc_h2$n[grepl("lapatinib", n_gdsc_h2$drug_name, ignore.case = TRUE)], na.rm = TRUE),
+            sum(n_gdsc_h2$n[grepl("tucatinib", n_gdsc_h2$drug_name, ignore.case = TRUE)], na.rm = TRUE),
+            sum(n_gdsc_h2$n[grepl("afatinib", n_gdsc_h2$drug_name, ignore.case = TRUE)], na.rm = TRUE),
+            sum(n_gdsc_h2$n[grepl("neratinib", n_gdsc_h2$drug_name, ignore.case = TRUE)], na.rm = TRUE),
+            sum(n_gdsc_h2$n[grepl("pyrotinib", n_gdsc_h2$drug_name, ignore.case = TRUE)], na.rm = TRUE),
+            sum(n_gdsc_h2$n[grepl("poziotinib", n_gdsc_h2$drug_name, ignore.case = TRUE)], na.rm = TRUE),
+            sum(n_gdsc_h2$n[grepl("sapitinib", n_gdsc_h2$drug_name, ignore.case = TRUE)], na.rm = TRUE)
+          )
+        )
+    }
+  }
+}
+# NA counts displayed as 0; drop compounds with no cohort coverage in any platform (0 / NA / 0 → 0,0,0 → omit)
+.table2_coalesce_drop_all_zero <- function(df) {
+  if (nrow(df) == 0L) return(df)
+  df %>%
+    mutate(
+      `N (GDSC)` = as.integer(dplyr::coalesce(`N (GDSC)`, 0L)),
+      `N (PRISM)` = as.integer(dplyr::coalesce(`N (PRISM)`, 0L)),
+      `N (CTRP)` = as.integer(dplyr::coalesce(`N (CTRP)`, 0L))
+    ) %>%
+    filter(`N (GDSC)` > 0L | `N (PRISM)` > 0L | `N (CTRP)` > 0L)
+}
+bcl2i_simple <- .table2_coalesce_drop_all_zero(bcl2i_simple)
+dnmti_simple <- .table2_coalesce_drop_all_zero(dnmti_simple)
+ezh2i_simple <- .table2_coalesce_drop_all_zero(ezh2i_simple)
+her2i_simple <- .table2_coalesce_drop_all_zero(her2i_simple)
+t2_kable <- dplyr::bind_rows(
+  bcl2i_simple %>% mutate(Section = "4.1 BCL2 inhibitors"),
+  dnmti_simple %>% mutate(Section = "4.2 DNMTi (HMA)"),
+  ezh2i_simple %>% mutate(Section = "4.3 EZH2 inhibitors"),
+  her2i_simple %>% mutate(Section = "4.4 HER2-directed (small molecules)")
+) %>%
+  select(Section, Compound, `Target / mechanism`, `N (GDSC)`, `N (PRISM)`, `N (CTRP)`) %>%
+  knitr::kable(caption = "Table 2 (Supp table 2). B-cell lymphoma 2 inhibitors (BCL2i; 4.1), DNA methyltransferase inhibitors (DNMTi; 4.2), enhancer of zeste homolog 2 inhibitors (EZH2i; 4.3), and HER2-directed small molecules (4.4) in the dataset: compound, target/mechanism, and number of cohort cell lines tested in Genomics of Drug Sensitivity in Cancer (GDSC), Profiling Relative Inhibition Simultaneously in Mixtures (PRISM), and Cancer Therapeutics Response Portal (CTRP). Missing platform counts are shown as 0. Compounds with zero cell lines in all three sources are omitted (e.g. agents not in the PRISM subset and absent from GDSC for this cohort). DNMTi = hypomethylating agents (e.g. decitabine, azacitidine). EZH2i = EZH2 (PRC2) inhibitors (e.g. tazemetostat). CTRP extracts in this pipeline include HMA and BCL2i only, so N (CTRP) for HER2i is 0. HER2 agents align with the strict GDSC list used for ERBB2 concordance (lapatinib, tucatinib, afatinib, neratinib, pyrotinib, poziotinib, sapitinib).") %>%
+  kableExtra::kable_styling(bootstrap_options = c("bordered", "condensed"), full_width = FALSE)
+if (!exists("hma_bcl2_tnbc_lymph_master") || !isTRUE(hma_bcl2_tnbc_lymph_master)) {
+  print(t2_kable)
+}
+```
+
+### BCL2 expression and BH3-related mitochondrial proteins composition is similar in AML and some stem-like solid tumor lineages
+
+In Figure 1, **each point is one cell line**; the x-axis shows lineage with N per group (e.g. ExPulm-SCNEC N=5). The box summarizes the distribution; overlaid points show the actual sample size. **Red dots** = NEPC (ExPulm-SCNEC from prostate); other points are gray. The same red/gray scheme is used for ExPulm-SCNEC on **expression** panels (BCL2 and DNMT1 RNA). **Wide CERES** panels include only cell lines with non-missing dependency scores (same x-axis order as expression; lines without CERES are omitted from those two panels). CERES tick **N** counts plotted scores per stratum (may differ from expression **N**).
+
+```{r fig1-tnbc-lymph-note, echo = FALSE, results = "asis", eval = exists("cohort_extended_hem") && isTRUE(cohort_extended_hem) && !(exists("hma_bcl2_tnbc_lymph_master") && isTRUE(hma_bcl2_tnbc_lymph_master))}
+# Main HMA_BCL2 Master: this chunk is skipped (TNBC folded into Breast; no lymphoma). Extended master only.
+tnbc_note_txt <- if (exists("hma_bcl2_tnbc_lymph_master") && isTRUE(hma_bcl2_tnbc_lymph_master)) {
+  "**TNBC** (localized and metastatic; **Table 1** omits any lineage with **Unspecified** in the name; unspecified TNBC is also omitted from the cohort summary below) and **lymphoma** strata "
+} else {
+  "**TNBC** (Localized / Metastatic / Unspecified TNBC) and **lymphoma** strata "
+}
+knitr::asis_output(paste(
+  tnbc_note_txt,
+  "(**DLBCL/MCL/CLL** vs **Lymphoma (other)** (comparator lymphoid bucket; not the DLBCL/MCL/CLL stratum); histology-based proxies, ",
+  "not DepMap treatment flags) appear on the same axis when present in the extended cohort."
+))
+```
+
+```{r tnbc-lymph-cohort-summary, echo = FALSE, results = "asis", eval = exists("cohort_extended_hem") && isTRUE(cohort_extended_hem) && !(exists("hma_bcl2_tnbc_lymph_master") && isTRUE(hma_bcl2_tnbc_lymph_master))}
+lg_tnbc_summ <- if (exists("lineage_levels_tnbc")) {
+  if (exists("hma_bcl2_tnbc_lymph_master") && isTRUE(hma_bcl2_tnbc_lymph_master)) {
+    setdiff(lineage_levels_tnbc, "Unspecified TNBC")
+  } else {
+    lineage_levels_tnbc
+  }
+} else {
+  c("Localized TNBC", "Metastatic TNBC", "Unspecified TNBC")
+}
+lg_lymph_summ <- c("DLBCL/MCL/CLL", "Lymphoma (other)")
+if (exists("expr_target") && nrow(expr_target) > 0L && "lineage_group" %in% names(expr_target)) {
+  summ_tl <- expr_target %>%
+    dplyr::filter(as.character(.data$lineage_group) %in% c(lg_tnbc_summ, lg_lymph_summ)) %>%
+    dplyr::count(.data$lineage_group, name = "N_cell_lines") %>%
+    dplyr::arrange(.data$lineage_group)
+  if (nrow(summ_tl) > 0L) {
+    knitr::kable(
+      summ_tl,
+      caption = "Cohort: TNBC and lymphoma strata (N cell lines in analysis cohort, same as Table 1 / Figures 1–2). Lymphoma buckets are histology-based proxies for BCL2i-associated types vs other lymphoid malignancies in DepMap text (not treatment exposure)."
+    ) %>%
+      kableExtra::kable_styling(bootstrap_options = c("bordered", "condensed"), full_width = FALSE)
+  } else {
+    knitr::asis_output("*No TNBC or lymphoma lines in the extended cohort (check 01_Data_Loading_TNBC_Lymphoma / verification RDS).*")
+  }
+} else {
+  knitr::asis_output("*expr_target not available for TNBC/lymphoma summary.*")
+}
+```
+
+```{r bcl2-distributions, include = FALSE, cache = FALSE, fig.width = 10, fig.height = 5.5, fig.cap = "Figure 1. BCL2 expression by lineage (single x-axis). N per lineage on x-axis. Red points = NEPC lines only (ExPulm-SCNEC from prostate); other lines are not overlaid."}
+# Figure 1/2 composites: axis titles, tick labels, and rotated lineage names (ggplot pt size; +4 pt vs prior default)
+.f1_fig12_text_pt <- 24
+.f1_lineage_axis_x <- function(angle) ggplot2::element_text(angle = angle, hjust = 1, size = .f1_fig12_text_pt)
+.f1_fig12_axis_theme <- function(angle_x = 45) {
+  ggplot2::theme(
+    text = ggplot2::element_text(size = .f1_fig12_text_pt),
+    axis.text.x = .f1_lineage_axis_x(angle_x),
+    axis.text.y = ggplot2::element_text(size = .f1_fig12_text_pt),
+    axis.title = ggplot2::element_text(size = .f1_fig12_text_pt),
+    plot.title = ggplot2::element_text(size = .f1_fig12_text_pt),
+    legend.text = ggplot2::element_text(size = .f1_fig12_text_pt),
+    strip.text = ggplot2::element_text(size = .f1_fig12_text_pt)
+  )
+}
+# annotate(..., size) uses mm; slightly larger than strict pt→mm so bracket p-values read like axis text.
+.f1_fig12_bracket_label_mm <- .f1_fig12_text_pt * (25.4 / 72.27) * 1.28
+# Top plot.margin (pt) when ggsignif-style brackets run; keep patchwork row themes in sync with two-tier value.
+.f1_fig12_bracket_margin_top_2tier <- 120L
+.f1_fig12_bracket_margin_top_1tier <- 58L
+# Wide-axis: shorten metastatic (m*) and pooled localized (cl*) tick labels (e.g. "Colorectal — localized" -> "clColorectal", "mBreast").
+.f1_axis_tok_tissue <- function(w) {
+  w <- trimws(as.character(w))
+  if (!nzchar(w)) {
+    return("")
+  }
+  if (grepl("^[A-Z0-9 /-]+$", w) && nchar(w) <= 12L) {
+    return(w)
+  }
+  paste0(toupper(substr(w, 1L, 1L)), tolower(substring(w, 2L)))
+}
+.f1_axis_short_met_label <- function(x) {
+  if (length(x) < 1L) {
+    return(x)
+  }
+  vapply(x, function(s0) {
+    s <- as.character(s0)
+    if (!nzchar(s)) {
+      return(s0)
+    }
+    suf <- ""
+    base <- s
+    if (grepl(" N=", s, fixed = TRUE)) {
+      parts <- strsplit(s, " N=", fixed = TRUE)[[1L]]
+      base <- parts[[1L]]
+      suf <- paste0(" N=", paste(parts[-1L], collapse = " N="))
+    }
+    out <- if (grepl(" — metastatic$", base)) {
+      tissue <- sub(" — metastatic$", "", base)
+      paste0("m", .f1_axis_tok_tissue(tissue))
+    } else if (grepl("^Metastatic\\s+", base, ignore.case = TRUE)) {
+      rest <- trimws(sub("^Metastatic\\s+", "", base, ignore.case = TRUE))
+      paste0("m", .f1_axis_tok_tissue(rest))
+    } else if (grepl(" — localized$", base)) {
+      tissue <- sub(" — localized$", "", base)
+      paste0("cl", .f1_axis_tok_tissue(tissue))
+    } else if (grepl("^Localized\\s+", base, ignore.case = TRUE)) {
+      rest <- trimws(sub("^Localized\\s+", "", base, ignore.case = TRUE))
+      paste0("cl", .f1_axis_tok_tissue(rest))
+    } else {
+      base
+    }
+    paste0(out, suf)
+  }, character(1L), USE.NAMES = FALSE)
+}
+# Wide Figure 1 CERES/DNMT1 CERES: tick labels use counts of plotted (finite) dependency rows per `lab`; NEPC with N=0 is blank (no false cohort N).
+.f1_ceres_wide_x_labeller <- function(n_plotted_by_lab) {
+  function(x) {
+    vapply(x, function(s0) {
+      s <- as.character(s0)
+      if (!nzchar(s)) {
+        return("")
+      }
+      parts <- strsplit(s, " N=", fixed = TRUE)[[1L]]
+      base <- parts[[1L]]
+      nc <- unname(n_plotted_by_lab[s])
+      if (length(nc) != 1L || is.na(nc)) {
+        nc <- 0L
+      }
+      nc <- as.integer(nc)
+      if (nc == 0L && grepl("^NEPC\\b", base)) {
+        return("")
+      }
+      s_new <- paste0(base, " N=", nc)
+      .f1_axis_short_met_label(s_new)
+    }, character(1L), USE.NAMES = FALSE)
+  }
+}
+# #region agent log
+.agent_dbg_ndjson <- function(runId, hypothesisId, location, message, data = list()) {
+  if (!requireNamespace("jsonlite", quietly = TRUE)) {
+    return(invisible(NULL))
+  }
+  payload <- list(
+    sessionId = "75d08b",
+    runId = runId,
+    hypothesisId = hypothesisId,
+    location = location,
+    message = message,
+    data = data,
+    timestamp = as.integer(as.numeric(Sys.time()) * 1000)
+  )
+  tryCatch(
+    cat(jsonlite::toJSON(payload, auto_unbox = TRUE, null = "null"), "\n", sep = "", file = "/Users/Alex/R/.cursor/debug-75d08b.log", append = TRUE),
+    error = function(e) invisible(NULL)
+  )
+}
+# #endregion
+# Dashed comparator rule on wide lineage plots (bright red, thick; NEPC point overlay stays #E41A1C)
+f1_rule_line_colour <- "#FF2222"
+f1_rule_line_linewidth <- 1.4
+# Comparison groups for BCL2; subtype = lineage_group (Localized/Metastatic pairs ordered adjacent in plot).
+cohort_ext_hem <- exists("cohort_extended_hem") && isTRUE(cohort_extended_hem)
+cohort_n <- expr_target %>% dplyr::count(lineage_group, name = "n") %>%
+  mutate(subtype = as.character(lineage_group))
+# Lung: use expr_target so we get SCLC, Localized NSCLC, Metastatic NSCLC (not misclassified NSCLC as SCLC)
+bcl2_lung <- expr_meta %>% filter(lineage_lower == "lung", !is.na(BCL2)) %>%
+  inner_join(expr_target %>% filter(lineage_group %in% c("SCLC", "Localized NSCLC", "Metastatic NSCLC")) %>% select(depmap_id, lineage_group), by = "depmap_id") %>%
+  mutate(subtype = as.character(lineage_group), tissue = "Lung")
+bcl2_breast <- expr_target %>% filter(grepl("Breast", as.character(lineage_group)), !is.na(BCL2)) %>%
+  mutate(subtype = as.character(lineage_group), tissue = "Breast")
+bcl2_prostate <- expr_target %>% filter(lineage_group %in% c("Localized prostate", "Metastatic prostate"), !is.na(BCL2)) %>%
+  mutate(subtype = as.character(lineage_group), tissue = "Prostate")
+bcl2_aml <- expr_meta %>% filter(depmap_id %in% aml_lines, !is.na(BCL2)) %>%
+  distinct(depmap_id, .keep_all = TRUE) %>%
+  mutate(subtype = "AML (control)")
+bcl2_urothelial <- expr_target %>% filter(grepl("Urothelial", as.character(lineage_group)), !is.na(BCL2)) %>%
+  mutate(subtype = as.character(lineage_group), tissue = "Urothelial")
+bcl2_renal <- expr_target %>% filter(grepl("Renal cell", as.character(lineage_group), fixed = TRUE), !is.na(BCL2)) %>%
+  mutate(subtype = as.character(lineage_group), tissue = "Renal cell")
+bcl2_colorectal <- expr_target %>% filter(grepl("Colorectal", as.character(lineage_group), fixed = TRUE), !is.na(BCL2)) %>%
+  mutate(subtype = as.character(lineage_group), tissue = "Colorectal")
+bcl2_melanoma <- expr_target %>% filter(grepl("Melanoma", as.character(lineage_group), fixed = TRUE), !is.na(BCL2)) %>%
+  mutate(subtype = as.character(lineage_group), tissue = "Melanoma")
+bcl2_tnbc <- expr_target %>%
+  dplyr::filter(
+    cohort_ext_hem,
+    grepl("TNBC", as.character(.data$lineage_group), fixed = TRUE),
+    !is.na(.data$BCL2)
+  ) %>%
+  dplyr::mutate(subtype = as.character(.data$lineage_group), tissue = "TNBC")
+bcl2_lymph <- expr_target %>%
+  dplyr::filter(
+    as.character(.data$lineage_group) %in% c(
+      "DLBCL/MCL/CLL", "Lymphoma (other)"
+    ),
+    !is.na(.data$BCL2)
+  ) %>%
+  dplyr::mutate(subtype = as.character(.data$lineage_group), tissue = "Lymphoma")
+nb_lineages_f1 <- c("Neuroblastoma", "Localized Neuroblastoma", "Metastatic Neuroblastoma", "Unspecified Neuroblastoma")
+bcl2_neuro <- expr_target %>%
+  dplyr::filter(as.character(.data$lineage_group) %in% nb_lineages_f1, !is.na(.data$BCL2)) %>%
+  dplyr::mutate(subtype = as.character(.data$lineage_group), tissue = "Neuroblastoma", is_nepc = FALSE)
+# #region agent log
+tryCatch({
+  nb_src <- expr_target %>%
+    dplyr::filter(grepl("Neuroblastoma", as.character(.data$lineage_group), ignore.case = TRUE))
+  .agent_dbg_ndjson(
+    runId = "iter2",
+    hypothesisId = "H6",
+    location = "03_Rmd:bcl2_neuro_source",
+    message = "Neuroblastoma rows in expr_target and BCL2 availability",
+    data = list(
+      nb_src_n = nrow(nb_src),
+      nb_src_lineages = unique(as.character(nb_src$lineage_group)),
+      nb_src_bcl2_non_na = sum(!is.na(nb_src$BCL2)),
+      nb_in_nb_lineages_f1 = sum(as.character(nb_src$lineage_group) %in% nb_lineages_f1),
+      bcl2_neuro_n = nrow(bcl2_neuro)
+    )
+  )
+}, error = function(e) invisible(NULL))
+# #endregion
+# DepMap soft_tissue lines + PNS non-NBL (both labeled Sarcoma strata in 01)
+bcl2_sarcoma <- expr_target %>%
+  dplyr::filter(grepl("Sarcoma", as.character(.data$lineage_group), fixed = TRUE), !is.na(.data$BCL2)) %>%
+  dplyr::mutate(subtype = as.character(.data$lineage_group), tissue = "Sarcoma", is_nepc = FALSE)
+# ExPulm-SCNEC: use expr_target so we plot exactly the cohort that defines n; red dot = NEPC (prostate), others gray
+bcl2_expulm_ne <- expr_target %>%
+  filter(lineage_group == "ExPulm-SCNEC") %>%
+  select(depmap_id, dplyr::any_of("lineage_expulm_detail")) %>%
+  left_join(expr_meta %>% select(depmap_id, BCL2), by = "depmap_id") %>%
+  filter(!is.na(BCL2)) %>%
+  distinct(depmap_id, .keep_all = TRUE) %>%
+  mutate(
+    subtype = "ExPulm-SCNEC",
+    tissue = "ExPulm-SCNEC",
+    is_nepc = (dplyr::coalesce(lineage_expulm_detail, "") == "NEPC")
+  ) %>%
+  dplyr::filter(.data$is_nepc %in% TRUE) %>%
+  select(-dplyr::any_of("lineage_expulm_detail"))
+bcl2_plot_df <- bind_rows(
+  bcl2_lung %>% mutate(is_nepc = FALSE),
+  bcl2_breast %>% mutate(tissue = "Breast", is_nepc = FALSE),
+  bcl2_prostate %>% mutate(tissue = "Prostate", is_nepc = FALSE),
+  bcl2_aml %>% mutate(tissue = "AML", is_nepc = FALSE),
+  bcl2_urothelial %>% mutate(is_nepc = FALSE),
+  bcl2_renal %>% mutate(is_nepc = FALSE),
+  bcl2_colorectal %>% mutate(is_nepc = FALSE),
+  bcl2_melanoma %>% mutate(is_nepc = FALSE),
+  bcl2_tnbc %>% dplyr::mutate(is_nepc = FALSE),
+  bcl2_lymph %>% dplyr::mutate(is_nepc = FALSE),
+  bcl2_neuro,
+  bcl2_sarcoma,
+  bcl2_expulm_ne
+) %>% dplyr::filter(!is.na(.data$subtype)) %>%
+  dplyr::mutate(is_nepc = dplyr::coalesce(.data$is_nepc, FALSE)) %>%
+  distinct(depmap_id, tissue, subtype, .keep_all = TRUE)  # one point per cell line (avoids duplicate rows from joins)
+# Order tissue so SCLC (Lung), ExPulm-SCNEC, AML appear next to each other; Localized/Metastatic pairs adjacent within each tissue
+tissue_order_f1 <- c(
+  "Lung", "ExPulm-SCNEC", "AML", "Neuroblastoma", "Breast",
+  if (cohort_ext_hem) "TNBC",
+  "Lymphoma",
+  "Prostate", "Urothelial", "Renal cell", "Colorectal", "Melanoma", "Sarcoma"
+)
+# Wide Figure 1 x-axis order (shared with CERES + DNMT1): stem-like (left-of-line) block first, then remainder by lineage_levels within tissue.
+# Neuroblastoma before Lung so NB strata sit left of the red dashed rule (drawn before first NSCLC); Lung NSCLC comparators stay right of the line.
+f1_tissue_axis_order <- c(
+  "ExPulm-SCNEC", "Lymphoma", "AML", "Neuroblastoma", "Lung", "Breast",
+  if (cohort_ext_hem) "TNBC",
+  "Prostate", "Urothelial", "Renal cell", "Colorectal", "Melanoma", "Sarcoma"
+)
+bcl2_plot_df <- bcl2_plot_df %>%
+  dplyr::mutate(
+    tissue = factor(as.character(tissue), levels = intersect(tissue_order_f1, unique(as.character(tissue)))),
+    subtype = factor(
+      dplyr::if_else(
+        as.character(.data$subtype) %in% c("Localized Neuroblastoma", "Metastatic Neuroblastoma"),
+        "Neuroblastoma",
+        as.character(.data$subtype)
+      ),
+      levels = unique(c(as.character(lineage_levels), "Neuroblastoma"))
+    )
+  )
+# #region agent log
+tryCatch({
+  nb_rows_fac <- bcl2_plot_df %>% dplyr::filter(as.character(.data$tissue) == "Neuroblastoma")
+  .agent_dbg_ndjson(
+    runId = "iter4",
+    hypothesisId = "H9",
+    location = "03_Rmd:bcl2_subtype_factor_cast",
+    message = "Neuroblastoma rows after subtype pooling and factor cast",
+    data = list(
+      lineage_levels_has_nb = any(as.character(lineage_levels) == "Neuroblastoma"),
+      nb_rows_total = nrow(nb_rows_fac),
+      nb_subtype_na = sum(is.na(nb_rows_fac$subtype)),
+      nb_subtype_values = unique(as.character(nb_rows_fac$subtype))
+    )
+  )
+}, error = function(e) invisible(NULL))
+# #endregion
+bcl2_plot_n <- bcl2_plot_df %>% group_by(tissue, subtype) %>% summarise(n_plot = n(), .groups = "drop")
+bcl2_n_labels <- bcl2_plot_n %>%
+  left_join(cohort_n %>% select(subtype, n_cohort = n), by = "subtype") %>%
+  mutate(n_cell = if_else(!is.na(n_cohort), n_cohort, n_plot)) %>%
+  mutate(lab = paste0(gsub(" \\(control\\)", "", as.character(subtype)), " N=", n_cell)) %>%
+  select(tissue, subtype, lab, n_cell)
+# Extended TNBC/Lymph master: require N > 5 per stratum except anchor stem-like lineages (SCLC, ExPulm-SCNEC, AML)
+hma_ext_fig <- exists("hma_bcl2_tnbc_lymph_master") && isTRUE(hma_bcl2_tnbc_lymph_master)
+plastic_anchors <- if (exists("lineage_plastic_ref_canonical")) {
+  as.character(lineage_plastic_ref_canonical)
+} else {
+  c("SCLC", "ExPulm-SCNEC", "AML (control)")
+}
+# When no large-N localized stratum will be rescued later, promote one high-N metastatic bucket through the n>5 filter
+loc_pre <- bcl2_n_labels %>%
+  dplyr::mutate(st = as.character(.data$subtype)) %>%
+  dplyr::filter(grepl("^Localized\\b", .data$st)) %>%
+  dplyr::filter(!grepl("Neuroblastoma", .data$st, fixed = TRUE)) %>%
+  dplyr::filter(!grepl("NSCLC", .data$st, ignore.case = TRUE)) %>%
+  dplyr::filter(.data$n_cell >= 20L)
+if (nrow(loc_pre) == 0L) {
+  meta_one <- bcl2_n_labels %>%
+    dplyr::mutate(st = as.character(.data$subtype)) %>%
+    dplyr::filter(grepl("^Metastatic\\b", .data$st)) %>%
+    dplyr::filter(.data$n_cell >= 25L) %>%
+    dplyr::filter(!(.data$st %in% plastic_anchors)) %>%
+    dplyr::arrange(dplyr::desc(.data$n_cell), .data$st)
+  if (nrow(meta_one) > 0L) {
+    plastic_anchors <- unique(c(plastic_anchors, as.character(meta_one$st[[1L]])))
+  }
+}
+if (hma_ext_fig) {
+  # #region agent log
+  tryCatch({
+    nb_lbl_pre <- bcl2_n_labels %>% dplyr::filter(grepl("Neuroblastoma", as.character(.data$subtype), ignore.case = TRUE))
+    .agent_dbg_ndjson(
+      runId = "iter3",
+      hypothesisId = "H8",
+      location = "03_Rmd:bcl2_n_labels_pre_hma_filter",
+      message = "Neuroblastoma labels before hma_ext_fig n>5/plastic_anchors filter",
+      data = list(
+        n_nb_lbl_pre = nrow(nb_lbl_pre),
+        nb_lbl_pre_subtypes = unique(as.character(nb_lbl_pre$subtype)),
+        nb_lbl_pre_ncell = as.integer(nb_lbl_pre$n_cell)
+      )
+    )
+  }, error = function(e) invisible(NULL))
+  # #endregion
+  nb_lineage_lv <- intersect(
+    c("Neuroblastoma", "Unspecified Neuroblastoma"),
+    if (exists("lineage_levels")) as.character(lineage_levels) else character(0)
+  )
+  sarcoma_lineage_lv <- intersect(
+    c("Localized Sarcoma", "Metastatic Sarcoma", "Unspecified Sarcoma"),
+    if (exists("lineage_levels")) as.character(lineage_levels) else character(0)
+  )
+  plastic_anchors <- unique(c(
+    plastic_anchors,
+    "DLBCL/MCL/CLL",
+    nb_lineage_lv,
+    sarcoma_lineage_lv
+  ))
+  bcl2_n_labels <- bcl2_n_labels %>%
+    dplyr::filter(.data$n_cell > 5L | as.character(.data$subtype) %in% plastic_anchors) %>%
+    dplyr::filter(
+      !grepl("Unspecified", as.character(.data$subtype), fixed = TRUE) |
+        grepl("Unspecified Neuroblastoma", as.character(.data$subtype), fixed = TRUE) |
+        grepl("Unspecified Sarcoma", as.character(.data$subtype), fixed = TRUE)
+    )
+  # #region agent log
+  tryCatch({
+    nb_lbl_post <- bcl2_n_labels %>% dplyr::filter(grepl("Neuroblastoma", as.character(.data$subtype), ignore.case = TRUE))
+    .agent_dbg_ndjson(
+      runId = "iter3",
+      hypothesisId = "H8",
+      location = "03_Rmd:bcl2_n_labels_post_hma_filter",
+      message = "Neuroblastoma labels after hma_ext_fig n>5/plastic_anchors filter",
+      data = list(
+        n_nb_lbl_post = nrow(nb_lbl_post),
+        nb_lbl_post_subtypes = unique(as.character(nb_lbl_post$subtype)),
+        plastic_anchors_nb = as.character(plastic_anchors[grepl("Neuroblastoma", as.character(plastic_anchors), ignore.case = TRUE)])
+      )
+    )
+  }, error = function(e) invisible(NULL))
+  # #endregion
+}
+# Include all cohort subtypes in Figure 1 unless extended master filtered above
+bcl2_keep <- bcl2_n_labels
+bcl2_plot_df <- bcl2_plot_df %>% semi_join(bcl2_keep, by = c("tissue", "subtype"))
+bcl2_n_labels <- bcl2_n_labels %>% semi_join(bcl2_keep, by = c("tissue", "subtype"))
+# One additional localized lineage-stable comparator for Fig. 1 wide panels.
+# Prefer Localized prostate only when it has N > 5 in each subpanel (BCL2 expr, BCL2 CERES, DNMT1 expr, DNMT1 CERES);
+# otherwise choose another localized stable subtype with the largest cross-panel minimum N.
+f1_extra_locmeta_keep <- NA_character_
+if (nrow(bcl2_n_labels) > 0L) {
+  cand_loc_f1 <- bcl2_n_labels %>%
+    dplyr::mutate(st = as.character(.data$subtype)) %>%
+    dplyr::filter(grepl("^Localized\\b", .data$st)) %>%
+    dplyr::filter(!grepl("Neuroblastoma", .data$st, fixed = TRUE)) %>%
+    dplyr::filter(!grepl("NSCLC", .data$st, ignore.case = TRUE)) %>%
+    dplyr::arrange(dplyr::desc(.data$n_cell), .data$st)
+  if (nrow(cand_loc_f1) > 0L && exists("expr_target")) {
+    cand_lv <- unique(as.character(cand_loc_f1$st))
+    n_bcl2_expr <- expr_target %>%
+      dplyr::filter(as.character(.data$lineage_group) %in% cand_lv, !is.na(.data$BCL2)) %>%
+      dplyr::count(.data$lineage_group, name = "n_bcl2_expr")
+    n_dnmt1_expr <- if ("DNMT1" %in% names(expr_target)) {
+      expr_target %>%
+        dplyr::filter(as.character(.data$lineage_group) %in% cand_lv, !is.na(.data$DNMT1)) %>%
+        dplyr::count(.data$lineage_group, name = "n_dnmt1_expr")
+    } else if (exists("expr_meta") && nrow(expr_meta) > 0L && "DNMT1" %in% names(expr_meta)) {
+      expr_target %>%
+        dplyr::select(.data$depmap_id, .data$lineage_group) %>%
+        dplyr::inner_join(expr_meta %>% dplyr::select(.data$depmap_id, .data$DNMT1), by = "depmap_id") %>%
+        dplyr::filter(as.character(.data$lineage_group) %in% cand_lv, !is.na(.data$DNMT1)) %>%
+        dplyr::count(.data$lineage_group, name = "n_dnmt1_expr")
+    } else {
+      tibble::tibble(lineage_group = cand_lv, n_dnmt1_expr = 0L)
+    }
+    n_bcl2_ceres <- tibble::tibble(lineage_group = cand_lv, n_bcl2_ceres = 0L)
+    if (exists("crispr") && nrow(crispr) > 0L && exists("target_ids") && length(target_ids) > 0L) {
+      n_bcl2_ceres <- crispr %>%
+        dplyr::filter(grepl("^BCL2\\b", .data$gene_name), .data$depmap_id %in% target_ids, is.finite(.data$dependency)) %>%
+        dplyr::inner_join(expr_target %>% dplyr::select(.data$depmap_id, .data$lineage_group), by = "depmap_id") %>%
+        dplyr::filter(as.character(.data$lineage_group) %in% cand_lv) %>%
+        dplyr::count(.data$lineage_group, name = "n_bcl2_ceres")
+    }
+    n_dnmt1_ceres <- tibble::tibble(lineage_group = cand_lv, n_dnmt1_ceres = 0L)
+    if (exists("crispr_dnmt1") && nrow(crispr_dnmt1) > 0L) {
+      n_dnmt1_ceres <- crispr_dnmt1 %>%
+        dplyr::filter(as.character(.data$lineage_group) %in% cand_lv, is.finite(.data$dependency)) %>%
+        dplyr::count(.data$lineage_group, name = "n_dnmt1_ceres")
+    }
+    cand_rank <- cand_loc_f1 %>%
+      dplyr::transmute(st = as.character(.data$st), n_label = as.integer(.data$n_cell)) %>%
+      dplyr::left_join(n_bcl2_expr %>% dplyr::transmute(st = as.character(.data$lineage_group), n_bcl2_expr = as.integer(.data$n_bcl2_expr)), by = "st") %>%
+      dplyr::left_join(n_bcl2_ceres %>% dplyr::transmute(st = as.character(.data$lineage_group), n_bcl2_ceres = as.integer(.data$n_bcl2_ceres)), by = "st") %>%
+      dplyr::left_join(n_dnmt1_expr %>% dplyr::transmute(st = as.character(.data$lineage_group), n_dnmt1_expr = as.integer(.data$n_dnmt1_expr)), by = "st") %>%
+      dplyr::left_join(n_dnmt1_ceres %>% dplyr::transmute(st = as.character(.data$lineage_group), n_dnmt1_ceres = as.integer(.data$n_dnmt1_ceres)), by = "st") %>%
+      dplyr::mutate(
+        n_bcl2_expr = dplyr::coalesce(.data$n_bcl2_expr, 0L),
+        n_bcl2_ceres = dplyr::coalesce(.data$n_bcl2_ceres, 0L),
+        n_dnmt1_expr = dplyr::coalesce(.data$n_dnmt1_expr, 0L),
+        n_dnmt1_ceres = dplyr::coalesce(.data$n_dnmt1_ceres, 0L),
+        n_min_4panels = pmin(.data$n_bcl2_expr, .data$n_bcl2_ceres, .data$n_dnmt1_expr, .data$n_dnmt1_ceres)
+      ) %>%
+      dplyr::arrange(dplyr::desc(.data$n_min_4panels), dplyr::desc(.data$n_label), .data$st)
+    pick_prostate <- cand_rank %>%
+      dplyr::filter(.data$st == "Localized prostate", .data$n_min_4panels > 5L)
+    if (nrow(pick_prostate) > 0L) {
+      f1_extra_locmeta_keep <- "Localized prostate"
+    } else {
+      pick_alt <- cand_rank %>% dplyr::filter(.data$n_min_4panels > 5L)
+      if (nrow(pick_alt) > 0L) {
+        f1_extra_locmeta_keep <- as.character(pick_alt$st[[1L]])
+      } else if (nrow(cand_loc_f1) > 0L && is.finite(cand_loc_f1$n_cell[[1]]) && cand_loc_f1$n_cell[[1]] >= 20L) {
+        f1_extra_locmeta_keep <- cand_loc_f1$st[[1L]]
+      }
+    }
+  } else if (nrow(cand_loc_f1) > 0L && is.finite(cand_loc_f1$n_cell[[1]]) && cand_loc_f1$n_cell[[1]] >= 20L) {
+    f1_extra_locmeta_keep <- cand_loc_f1$st[[1L]]
+  }
+}
+bcl2_n_labels <- bcl2_n_labels %>% dplyr::select(tissue, subtype, lab)
+# Figures 1–2: drop localized non-stem-like comparator buckets (keep localized neuroblastoma + localized NSCLC only),
+# then drop selected strata entirely from these figures (localized TNBC / localized sarcoma / Lymphoma (other)).
+.f1_exclude_lineage_from_fig12_plots <- function(lg_chr) {
+  # Keep comparator set consistent across BCL2 and DNMT1 expression/CERES panels.
+  # Keep metastatic TNBC on Figure 1 wide-axis (shown as mTNBC); only exclude localized TNBC.
+  drop_set <- c("Localized TNBC", "Localized Sarcoma", "Lymphoma (other)")
+  if (exists("f1_extra_locmeta_keep", inherits = TRUE)) {
+    ex <- as.character(get("f1_extra_locmeta_keep", inherits = TRUE))
+    if (length(ex) == 1L && !is.na(ex) && nzchar(ex)) {
+      drop_set <- unique(c(drop_set, "Metastatic prostate"))
+    }
+  }
+  as.character(lg_chr) %in% drop_set
+}
+.f1_keep_localized_subtype_chr <- function(st_chr) {
+  ex <- NA_character_
+  if (exists("f1_extra_locmeta_keep", inherits = TRUE)) {
+    ex <- as.character(get("f1_extra_locmeta_keep", inherits = TRUE))
+    if (length(ex) != 1L || is.na(ex) || !nzchar(ex)) ex <- NA_character_
+  }
+  grepl("Neuroblastoma", st_chr, fixed = TRUE) |
+    grepl("\\bNSCLC\\b", st_chr, ignore.case = TRUE) |
+    (!is.na(ex) & st_chr == ex)
+}
+{
+  st_drop <- as.character(bcl2_plot_df$subtype)
+  keep_loc_st <- .f1_keep_localized_subtype_chr(st_drop)
+  drop_loc_st <- grepl("^Localized\\b", st_drop) & !keep_loc_st
+  bcl2_plot_df <- dplyr::filter(bcl2_plot_df, !drop_loc_st)
+  st_drop2 <- as.character(bcl2_n_labels$subtype)
+  keep_loc_st2 <- .f1_keep_localized_subtype_chr(st_drop2)
+  drop_loc_st2 <- grepl("^Localized\\b", st_drop2) & !keep_loc_st2
+  bcl2_n_labels <- dplyr::filter(bcl2_n_labels, !drop_loc_st2)
+}
+bcl2_plot_df <- dplyr::filter(bcl2_plot_df, !.f1_exclude_lineage_from_fig12_plots(as.character(.data$subtype)))
+bcl2_n_labels <- dplyr::filter(bcl2_n_labels, !.f1_exclude_lineage_from_fig12_plots(as.character(.data$subtype)))
+# Remove malformed lineage group labels before wide-axis pooling/order to avoid NA buckets.
+bcl2_plot_df <- bcl2_plot_df %>%
+  dplyr::filter(
+    !is.na(.data$subtype),
+    nzchar(trimws(as.character(.data$subtype))),
+    toupper(trimws(as.character(.data$subtype))) != "NA"
+  )
+bcl2_n_labels <- bcl2_n_labels %>%
+  dplyr::filter(
+    !is.na(.data$subtype),
+    nzchar(trimws(as.character(.data$subtype))),
+    toupper(trimws(as.character(.data$subtype))) != "NA"
+  )
+# #region agent log
+tryCatch({
+  keep_counts <- bcl2_plot_df %>%
+    dplyr::mutate(subtype_chr = as.character(.data$subtype)) %>%
+    dplyr::filter(grepl("TNBC|Melanoma|Sarcoma", .data$subtype_chr, ignore.case = TRUE)) %>%
+    dplyr::count(.data$subtype_chr, name = "n_expr")
+  .agent_dbg_ndjson(
+    runId = "pre-fix-debug2",
+    hypothesisId = "H3",
+    location = "03_Rmd:bcl2_keep_focus_subtypes",
+    message = "BCL2 kept lineage focus counts after figure filters",
+    data = list(
+      n_rows = nrow(bcl2_plot_df),
+      focus_subtypes = as.character(keep_counts$subtype_chr),
+      focus_counts = as.integer(keep_counts$n_expr),
+      extra_locmeta_keep = if (exists("f1_extra_locmeta_keep", inherits = TRUE)) as.character(get("f1_extra_locmeta_keep", inherits = TRUE)) else NA_character_
+    )
+  )
+}, error = function(e) invisible(NULL))
+# #endregion
+# #region agent log
+tryCatch({
+  nb_plot <- bcl2_plot_df %>% dplyr::filter(grepl("Neuroblastoma", as.character(.data$subtype), ignore.case = TRUE))
+  nb_lbl <- bcl2_n_labels %>% dplyr::filter(grepl("Neuroblastoma", as.character(.data$subtype), ignore.case = TRUE))
+  .agent_dbg_ndjson(
+    runId = "iter2",
+    hypothesisId = "H7",
+    location = "03_Rmd:bcl2_post_filters",
+    message = "Neuroblastoma rows after localized/exclude filters",
+    data = list(
+      nb_plot_n = nrow(nb_plot),
+      nb_plot_subtypes = unique(as.character(nb_plot$subtype)),
+      nb_label_n = nrow(nb_lbl),
+      nb_label_subtypes = unique(as.character(nb_lbl$subtype))
+    )
+  )
+}, error = function(e) invisible(NULL))
+# #endregion
+if (nrow(bcl2_plot_df) >= 2) {
+  bcl2_plot_df <- bcl2_plot_df %>% left_join(bcl2_n_labels %>% dplyr::select(tissue, subtype, lab), by = c("tissue", "subtype"))
+  # Single x-axis: all lineages in one order (tissue then subtype), like CERES plot below
+  lab_levels_f1 <- bcl2_plot_df %>% distinct(tissue, subtype, lab) %>%
+    arrange(tissue, match(as.character(subtype), lineage_levels)) %>% pull(lab)
+  bcl2_plot_df <- bcl2_plot_df %>% mutate(lab = factor(lab, levels = unique(as.character(lab_levels_f1))))
+  # Final dedup: one point per cell line
+  bcl2_plot_df <- bcl2_plot_df %>% distinct(depmap_id, lab, .keep_all = TRUE)
+  bcl2_plot_df <- bcl2_plot_df %>% filter(!is.na(lab), nzchar(trimws(as.character(lab))))
+  # Extended master: if >10 x-axis groups, pool non-anchor strata within tissue to localized vs metastatic
+  if (hma_ext_fig && length(unique(as.character(bcl2_plot_df$lab))) > 10L) {
+    st <- as.character(bcl2_plot_df$subtype)
+    tt <- as.character(bcl2_plot_df$tissue)
+    pooled_axis_preview <- dplyr::case_when(
+      st %in% plastic_anchors ~ st,
+      grepl("Neuroblastoma", st, fixed = TRUE) & !grepl("^Unspecified", st, fixed = TRUE) ~ "Neuroblastoma",
+      grepl("^Localized\\b", st) ~ paste0(tt, " — localized"),
+      grepl("^Metastatic\\b", st) ~ paste0(tt, " — metastatic"),
+      TRUE ~ st
+    )
+    # #region agent log
+    tryCatch({
+      .agent_dbg_ndjson(
+        runId = "pre-fix-debug2",
+        hypothesisId = "H1",
+        location = "03_Rmd:bcl2_pooling_preview",
+        message = "BCL2 pooled-axis preview before filtering",
+        data = list(
+          n_rows = nrow(bcl2_plot_df),
+          n_na_pooled = sum(is.na(pooled_axis_preview)),
+          n_blank_pooled = sum(!is.na(pooled_axis_preview) & !nzchar(trimws(as.character(pooled_axis_preview)))),
+          pooled_head = utils::head(unique(as.character(pooled_axis_preview)), 10L)
+        )
+      )
+    }, error = function(e) invisible(NULL))
+    # #endregion
+    bcl2_plot_df <- bcl2_plot_df %>%
+      dplyr::mutate(
+        # Pool localized + metastatic neuroblastoma to one axis bucket (do not split to "Neuroblastoma — localized/metastatic")
+        pooled_axis = dplyr::case_when(
+          st %in% plastic_anchors ~ st,
+          grepl("Neuroblastoma", st, fixed = TRUE) & !grepl("^Unspecified", st, fixed = TRUE) ~ "Neuroblastoma",
+          grepl("^Localized\\b", st) ~ paste0(tt, " — localized"),
+          grepl("^Metastatic\\b", st) ~ paste0(tt, " — metastatic"),
+          TRUE ~ st
+        )
+      ) %>%
+      dplyr::filter(!is.na(.data$pooled_axis), nzchar(trimws(as.character(.data$pooled_axis))))
+    n_pool <- bcl2_plot_df %>% dplyr::count(.data$pooled_axis, name = "nn")
+    bcl2_plot_df <- bcl2_plot_df %>%
+      dplyr::left_join(n_pool, by = "pooled_axis") %>%
+      dplyr::mutate(lab = paste0(gsub(" \\(control\\)", "", as.character(.data$pooled_axis)), " N=", .data$nn))
+    ord_l <- bcl2_plot_df %>%
+      dplyr::distinct(.data$tissue, .data$pooled_axis, .data$lab) %>%
+      dplyr::arrange(.data$tissue, .data$pooled_axis) %>%
+      dplyr::pull(.data$lab)
+    bcl2_plot_df <- bcl2_plot_df %>%
+      dplyr::mutate(lab = factor(.data$lab, levels = unique(ord_l))) %>%
+      dplyr::select(-dplyr::any_of(c("pooled_axis", "nn")))
+  }
+  # Extended master: drop pooled labels with "Unspecified" except neuroblastoma / sarcoma strata
+  if (hma_ext_fig && nrow(bcl2_plot_df) > 0L) {
+    bcl2_plot_df <- bcl2_plot_df %>%
+      dplyr::filter(
+        !grepl("Unspecified", as.character(.data$lab), fixed = TRUE) |
+          grepl("Unspecified Neuroblastoma", as.character(.data$lab), fixed = TRUE) |
+          grepl("Unspecified Sarcoma", as.character(.data$lab), fixed = TRUE)
+      )
+  }
+  # X-axis: fixed tumor order (f1_tissue_axis_order × lineage_levels); CERES wide inherits levels(bcl2_plot_df$lab); DNMT1 wide matches below
+  f1_ord_tbl <- bcl2_plot_df %>%
+    dplyr::distinct(.data$tissue, .data$subtype, .data$lab) %>%
+    dplyr::mutate(
+      ti_rnk = match(as.character(.data$tissue), f1_tissue_axis_order),
+      st_rnk = match(as.character(.data$subtype), lineage_levels)
+    ) %>%
+    dplyr::mutate(
+      ti_rnk = dplyr::coalesce(as.integer(.data$ti_rnk), 999L),
+      st_rnk = dplyr::coalesce(as.integer(.data$st_rnk), 999L)
+    )
+  ord_labs_f1 <- f1_ord_tbl %>%
+    dplyr::arrange(.data$ti_rnk, .data$st_rnk, as.character(.data$lab)) %>%
+    dplyr::pull(.data$lab) %>%
+    unique()
+  extra_labs <- setdiff(unique(as.character(bcl2_plot_df$lab)), ord_labs_f1)
+  if (length(extra_labs) > 0L) {
+    ord_labs_f1 <- c(ord_labs_f1, sort(extra_labs))
+  }
+  # Lymphoma (other): comparator arm — x-axis at end of comparator block (strictly right of red vline before NSCLC)
+  f1_lymph_other_subtype <- "Lymphoma (other)"
+  lo_labs_f1 <- bcl2_plot_df %>%
+    dplyr::filter(as.character(.data$subtype) == f1_lymph_other_subtype) %>%
+    dplyr::distinct(.data$lab) %>%
+    dplyr::pull(.data$lab) %>%
+    unique() %>%
+    as.character()
+  if (length(lo_labs_f1) > 0L && length(ord_labs_f1) > 0L) {
+    lo_in <- intersect(lo_labs_f1, ord_labs_f1)
+    if (length(lo_in) > 0L) {
+      is_comp_f1 <- grepl("NSCLC", ord_labs_f1, fixed = TRUE) |
+        grepl("Lung — localized", ord_labs_f1, fixed = TRUE) |
+        grepl("Lung — metastatic", ord_labs_f1, fixed = TRUE)
+      j_comp <- suppressWarnings(min(which(is_comp_f1)))
+      if (is.finite(j_comp) && j_comp > 1L) {
+        left_vec <- ord_labs_f1[seq_len(j_comp - 1L)]
+        right_vec <- ord_labs_f1[j_comp:length(ord_labs_f1)]
+        # Append Lymphoma (other) after NSCLC/comparator block so it is strictly right of the red vline
+        ord_labs_f1 <- c(setdiff(left_vec, lo_in), setdiff(right_vec, lo_in), lo_in)
+      } else {
+        nb_labs_pre <- unique(as.character(bcl2_plot_df$lab[as.character(bcl2_plot_df$tissue) == "Neuroblastoma"]))
+        idx_nb <- which(ord_labs_f1 %in% nb_labs_pre)
+        if (length(idx_nb) > 0L) {
+          k_nb <- max(idx_nb)
+          left_vec <- ord_labs_f1[seq_len(k_nb)]
+          right_vec <- ord_labs_f1[(k_nb + 1L):length(ord_labs_f1)]
+          ord_labs_f1 <- c(setdiff(left_vec, lo_in), setdiff(right_vec, lo_in), lo_in)
+        }
+      }
+    }
+  }
+  bcl2_plot_df <- bcl2_plot_df %>%
+    dplyr::mutate(lab = factor(as.character(.data$lab), levels = ord_labs_f1))
+  # Wide-axis display: if the only ExPulm-SCNEC stratum is entirely NEPC-labeled lines, show "NEPC" on the x-axis (DepMap subtype stays ExPulm-SCNEC).
+  if (nrow(bcl2_plot_df) > 0L && all(c("subtype", "is_nepc", "lab") %in% names(bcl2_plot_df))) {
+    ex_i <- as.character(bcl2_plot_df$subtype) == "ExPulm-SCNEC"
+    if (any(ex_i) && all(bcl2_plot_df$is_nepc[ex_i] %in% TRUE)) {
+      lev_ex <- levels(bcl2_plot_df$lab)
+      lev_ex2 <- sub("ExPulm-SCNEC", "NEPC", lev_ex, fixed = TRUE)
+      bcl2_plot_df <- bcl2_plot_df %>%
+        dplyr::mutate(lab = factor(sub("ExPulm-SCNEC", "NEPC", as.character(.data$lab), fixed = TRUE), levels = lev_ex2))
+    }
+  }
+  .f1_sanitize_lab_rows <- function(df) {
+    if (is.null(df) || !is.data.frame(df) || !"lab" %in% names(df) || nrow(df) < 1L) {
+      return(df)
+    }
+    lab_chr <- as.character(df$lab)
+    base_chr <- trimws(sub("\\s*N=\\s*.*$", "", lab_chr))
+    bad_lab <- is.na(df$lab) |
+      !nzchar(trimws(lab_chr)) |
+      grepl("^NA\\b", lab_chr) |
+      !nzchar(base_chr) |
+      grepl("^N=\\s*\\d+$", trimws(lab_chr))
+    if (any(bad_lab)) {
+      df <- dplyr::filter(df, !bad_lab)
+    }
+    if (nrow(df) > 0L && is.factor(df$lab)) {
+      df$lab <- factor(as.character(df$lab), levels = intersect(levels(df$lab), unique(as.character(df$lab))))
+    }
+    df
+  }
+  # Drop empty / malformed wide-axis buckets (e.g. "NA N=…") after pooling + joins.
+  bcl2_plot_df <- .f1_sanitize_lab_rows(bcl2_plot_df)
+  # Keep TNBC metastatic stratum (mTNBC) when present; only malformed labels are removed above.
+  # #region agent log
+  tryCatch({
+    nb_axis_rows <- bcl2_plot_df %>% dplyr::filter(grepl("Neuroblastoma", as.character(.data$lab), fixed = TRUE))
+    .agent_dbg_ndjson(
+      runId = "post-fix",
+      hypothesisId = "H1",
+      location = "03_Rmd:bcl2_axis_final",
+      message = "Neuroblastoma presence on expression axis",
+      data = list(
+        n_rows_total = nrow(bcl2_plot_df),
+        n_nb_axis_rows = nrow(nb_axis_rows),
+        nb_axis_labs = unique(as.character(nb_axis_rows$lab)),
+        nb_axis_subtypes = unique(as.character(nb_axis_rows$subtype))
+      )
+    )
+  }, error = function(e) invisible(NULL))
+  # #endregion
+  # Wide axis vline + stem-like arm: prefer placing line so Localized/Metastatic NSCLC are strictly to the right; else NB-based fallback
+  f1_enriched_lineages <- character(0)
+  f1_vline_x <- NA_real_
+  f1_wilcox_left_aml_p <- NA_real_
+  f1_p_subtitle <- NULL
+  lv_f1 <- levels(bcl2_plot_df$lab)
+  # Comparator arm to the right of the dashed line: explicit NSCLC strata and pooled lung localized/metastatic (no "NSCLC" in label text)
+  ns_idx_f1 <- which(
+    grepl("NSCLC", lv_f1, fixed = TRUE) |
+      grepl("Lung — localized", lv_f1, fixed = TRUE) |
+      grepl("Lung — metastatic", lv_f1, fixed = TRUE)
+  )
+  nb_lab_set_f1 <- unique(as.character(bcl2_plot_df$lab[as.character(bcl2_plot_df$tissue) == "Neuroblastoma"]))
+  nb_idx_f1 <- which(lv_f1 %in% nb_lab_set_f1)
+  left_labs_f1 <- character(0)
+  if (length(ns_idx_f1) > 0L && length(lv_f1) > 0L) {
+    k_before_nsclc <- min(ns_idx_f1) - 1L
+    if (k_before_nsclc >= 1L) {
+      f1_vline_x <- min(ns_idx_f1) - 0.5
+      left_labs_f1 <- lv_f1[seq_len(k_before_nsclc)]
+    }
+  } else if (length(nb_idx_f1) > 0L && length(lv_f1) > 0L) {
+    k_right_nb <- max(nb_idx_f1)
+    f1_vline_x <- k_right_nb + 0.5
+    left_labs_f1 <- lv_f1[seq_len(k_right_nb)]
+  }
+  if (length(left_labs_f1) > 0L) {
+    f1_enriched_lineages <- bcl2_plot_df %>%
+      dplyr::filter(as.character(.data$lab) %in% left_labs_f1) %>%
+      dplyr::distinct(.data$subtype) %>%
+      dplyr::pull(.data$subtype) %>%
+      unique() %>%
+      as.character()
+    # Comparator bucket: never part of stem-like / left-of-line arm
+    f1_enriched_lineages <- setdiff(f1_enriched_lineages, "Lymphoma (other)")
+    # NSCLC is a non-stem-like lung comparator (right of dashed rule): never part of the stem-like arm
+    f1_enriched_lineages <- f1_enriched_lineages[!grepl("NSCLC", f1_enriched_lineages, fixed = TRUE)]
+    f1_enriched_lineages <- f1_enriched_lineages[!.f1_exclude_lineage_from_fig12_plots(f1_enriched_lineages)]
+    aml_b2_f1 <- dplyr::filter(bcl2_plot_df, as.character(.data$subtype) == "AML (control)") %>% dplyr::pull(.data$BCL2)
+    enr_b2_f1 <- dplyr::filter(
+      bcl2_plot_df,
+      as.character(.data$lab) %in% left_labs_f1,
+      as.character(.data$subtype) != "AML (control)"
+    ) %>%
+      dplyr::pull(.data$BCL2)
+    enr_b2_f1 <- as.numeric(stats::na.omit(enr_b2_f1))
+    aml_b2_f1 <- as.numeric(stats::na.omit(aml_b2_f1))
+    if (length(enr_b2_f1) >= 2L && length(aml_b2_f1) >= 2L) {
+      wt_f1 <- tryCatch(
+        stats::wilcox.test(enr_b2_f1, aml_b2_f1, alternative = "greater", exact = FALSE),
+        error = function(e) NULL
+      )
+      if (!is.null(wt_f1) && !is.na(wt_f1$p.value)) {
+        f1_wilcox_left_aml_p <- unname(wt_f1$p.value)
+        pl <- if (f1_wilcox_left_aml_p < 0.001) "<0.001" else format.pval(f1_wilcox_left_aml_p, digits = 3)
+        line_txt <- if (length(ns_idx_f1) > 0L) {
+          "left of localized/metastatic NSCLC strata"
+        } else {
+          "right of neuroblastoma strata"
+        }
+        f1_p_subtitle <- paste0("Red dashed line: ", line_txt, ".")
+      }
+    }
+  }
+  f1_vline_leftof_nsclc <- length(ns_idx_f1) > 0L && length(left_labs_f1) > 0L
+  f1_enriched_lineages_ordered <- if (length(f1_enriched_lineages) > 0L && exists("lineage_levels")) {
+    f1_enriched_lineages[order(match(f1_enriched_lineages, as.character(lineage_levels)))]
+  } else {
+    character(0)
+  }
+  # Tighter y window for wide BCL2 expression (top row): cap upper near ~6 log2(TPM+1) so lineage contrasts read larger.
+  f1_bcl2_expr_y_hi_cap <- 6.15
+  f1_bcl2_expr_ylim <- local({
+    yv <- bcl2_plot_df$BCL2
+    yv <- yv[is.finite(yv)]
+    if (length(yv) < 1L) {
+      return(NULL)
+    }
+    yr <- range(yv)
+    d <- diff(yr)
+    if (!is.finite(d) || d < 1e-6) d <- 0.35
+    pad <- max(0.1, 0.065 * d)
+    y_lo <- max(0, yr[1] - pad)
+    y_hi <- min(f1_bcl2_expr_y_hi_cap, yr[2] + pad)
+    # Widen window to include every finite NEPC BCL2 value (cap can otherwise hide the red dot).
+    yn <- bcl2_plot_df$BCL2[bcl2_plot_df$is_nepc %in% TRUE]
+    yn <- yn[is.finite(yn)]
+    if (length(yn) > 0L) {
+      rng_n <- if (length(yn) >= 2L) diff(range(yn)) else 0
+      pad_n <- max(0.1, 0.12 * max(rng_n, max(abs(yn), na.rm = TRUE) * 0.08, 0.22))
+      y_lo <- max(0, min(y_lo, min(yn) - pad_n))
+      y_hi <- max(y_hi, max(yn) + pad_n)
+      y_hi <- min(8.5, y_hi)
+    }
+    if (!is.finite(y_hi) || y_hi <= y_lo) y_hi <- y_lo + 0.45
+    c(y_lo, y_hi)
+  })
+  .mk_bcl2_expr_plot <- function(dat, vline_x = NA_real_, subtitle_txt = NULL) {
+    g <- ggplot(dat, aes(x = lab, y = BCL2, fill = subtype)) +
+      geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+      ggplot2::geom_point(
+        data = dplyr::filter(dat, .data$is_nepc %in% TRUE),
+        ggplot2::aes(x = lab, y = BCL2),
+        inherit.aes = FALSE,
+        color = "#E41A1C",
+        position = ggplot2::position_jitter(width = 0.12, height = 0),
+        alpha = 0.92,
+        size = 2.5
+      ) +
+      ggplot2::scale_x_discrete(drop = FALSE, labels = .f1_axis_short_met_label) +
+      labs(x = "Lineage", y = "BCL2 expression (log2(TPM+1))") +
+      theme_minimal() +
+      .f1_fig12_axis_theme(45) +
+      theme(legend.position = "none")
+    if (!is.na(vline_x)) {
+      g <- g + ggplot2::geom_vline(
+        xintercept = vline_x,
+        linetype = "dashed",
+        linewidth = f1_rule_line_linewidth,
+        alpha = 1,
+        colour = f1_rule_line_colour
+      )
+    }
+    g
+  }
+  # Wide x-axis: NEPC-only point overlay (red); metastatic tick labels shortened via .f1_axis_short_met_label.
+  # Bracket p-values are added in chunk `bcl2-fig-table-dependency` after `similarity-panels` defines fig12_* p-values.
+  p_bcl2 <- .mk_bcl2_expr_plot(bcl2_plot_df, vline_x = f1_vline_x, subtitle_txt = NULL)
+} else {
+  p_bcl2 <- NULL
+  p_placeholder <- ggplot() + annotate("text", x = 0.5, y = 0.5, label = "Insufficient data for Figure 1 (need ≥2 groups with BCL2). Run Rscript scripts/load_depmap_cache.R then re-knit.", size = 5) + theme_void()
+  f1_enriched_lineages_ordered <- character(0)
+}
+```
+
+```{r similarity-panels, include = FALSE, cache = FALSE}
+# Create BCL2 and DNMT1 similarity panels for use as subfigures in Figure 1 (BCL2) and Figure 2 (DNMT1)
+lineage_plastic <- if (exists("lineage_plastic_ref_canonical")) lineage_plastic_ref_canonical else c("SCLC", "ExPulm-SCNEC", "AML (control)")
+hma_fig1_b2 <- exists("hma_bcl2_tnbc_lymph_master") && isTRUE(hma_bcl2_tnbc_lymph_master)
+lymph_bcl2_context_lbl <- "DLBCL/MCL/CLL"
+lineage_bcl2_fig1_multi <- lineage_plastic
+if (hma_fig1_b2) {
+  lineage_bcl2_fig1_multi <- c(lineage_plastic, lymph_bcl2_context_lbl)
+}
+# Wide Figure 1: lineages left of dashed vertical rule on Fig. 1 wide axis (NSCLC to the right of line when those strata are shown; else NB rule)
+if (exists("f1_enriched_lineages") && length(f1_enriched_lineages) > 0L) {
+  lineage_bcl2_fig1_multi <- f1_enriched_lineages
+}
+lineage_bcl2_fig1_multi <- lineage_bcl2_fig1_multi[!grepl("NSCLC", lineage_bcl2_fig1_multi, fixed = TRUE)]
+lineage_bcl2_fig1_multi <- lineage_bcl2_fig1_multi[!.f1_exclude_lineage_from_fig12_plots(lineage_bcl2_fig1_multi)]
+lbl_b2_enriched_two <- if (exists("f1_enriched_lineages") && length(f1_enriched_lineages) > 0L) {
+  "Stem-like"
+} else if (hma_fig1_b2) {
+  "Stem-like"
+} else {
+  "Stem-like (SCLC, ExPulm-SCNEC, AML)"
+}
+lbl_other_two <- "Non-stem-like"
+p_three <- p_two <- p_three_dnmt1 <- p_two_dnmt1 <- NULL
+kw_txt <- wx_txt <- kw_dnmt1_txt <- wx_dnmt1_txt <- "—"
+ni_aml_expr_note <- ""
+cap_bcl2_sim <- "Figure 2b. BCL2 and DNMT1 similarity (see subfigures in Figures 1 and 2)."
+if (exists("expr_target") && nrow(expr_target) > 0 && "BCL2" %in% names(expr_target)) {
+  bcl2_sim <- expr_target %>% filter(!is.na(BCL2)) %>%
+    mutate(is_nepc = (lineage_group == "ExPulm-SCNEC" & dplyr::coalesce(lineage_expulm_detail, "") == "NEPC"))
+  lg0 <- as.character(bcl2_sim$lineage_group)
+  keep_loc <- .f1_keep_localized_subtype_chr(lg0)
+  drop_loc <- grepl("^Localized\\b", lg0) & !keep_loc
+  bcl2_sim <- dplyr::filter(bcl2_sim, !drop_loc)
+  bcl2_sim <- dplyr::filter(bcl2_sim, !.f1_exclude_lineage_from_fig12_plots(as.character(.data$lineage_group)))
+  bcl2_three <- bcl2_sim %>% filter(lineage_group %in% lineage_bcl2_fig1_multi)
+  bcl2_sim_two <- bcl2_sim %>%
+    mutate(
+      in_plastic_grp = (.data$lineage_group %in% lineage_bcl2_fig1_multi) &
+        !grepl("NSCLC", as.character(.data$lineage_group), fixed = TRUE),
+      group_2 = if_else(in_plastic_grp, lbl_b2_enriched_two, lbl_other_two)
+    )
+  kw_three <- tryCatch(kruskal.test(BCL2 ~ lineage_group, data = bcl2_three), error = function(e) list(p.value = NA_real_))
+  lbl_enr_g2 <- lbl_b2_enriched_two
+  lbl_oth_g2 <- lbl_other_two
+  vals_b2_enr <- dplyr::filter(bcl2_sim_two, .data$group_2 == lbl_enr_g2) %>% dplyr::pull(.data$BCL2)
+  vals_b2_oth <- dplyr::filter(bcl2_sim_two, .data$group_2 == lbl_oth_g2) %>% dplyr::pull(.data$BCL2)
+  wx_vs_other <- if (length(stats::na.omit(vals_b2_enr)) >= 1L && length(stats::na.omit(vals_b2_oth)) >= 1L) {
+    tryCatch(
+      stats::wilcox.test(vals_b2_enr, vals_b2_oth, alternative = "greater", exact = FALSE),
+      error = function(e) list(p.value = NA_real_)
+    )
+  } else {
+    list(p.value = NA_real_)
+  }
+  kw_p <- kw_three$p.value
+  wx_p <- wx_vs_other$p.value
+  wx_txt <- if (is.na(wx_p)) "—" else if (wx_p < 0.001) "<0.001" else format.pval(wx_p, digits = 2)
+  n_three <- bcl2_three %>% group_by(lineage_group) %>% summarise(n = n(), .groups = "drop")
+  lab_three <- setNames(paste0(gsub(" \\(control\\)", "", as.character(n_three$lineage_group)), " N=", n_three$n), as.character(n_three$lineage_group))
+  prio_b <- c("SCLC", "ExPulm-SCNEC", "AML (control)", if (hma_fig1_b2) lymph_bcl2_context_lbl else NULL)
+  u_b <- unique(as.character(bcl2_three$lineage_group))
+  ord_b <- c(intersect(prio_b, u_b), setdiff(u_b, prio_b))
+  bcl2_three <- bcl2_three %>% mutate(lineage_group = factor(as.character(lineage_group), levels = ord_b))
+  use_f1_nb_arm <- exists("f1_enriched_lineages") && length(f1_enriched_lineages) > 0L
+  ttl_multi <- if (use_f1_nb_arm) {
+    paste0(
+      "BCL2: lineages left of Fig. 1 vertical rule (n = ", length(ord_b), " groups; ",
+      if (exists("f1_vline_leftof_nsclc") && isTRUE(f1_vline_leftof_nsclc)) {
+        "NSCLC to the right of dashed line"
+      } else {
+        "neuroblastoma-based rule if NSCLC absent"
+      },
+      ")"
+    )
+  } else if (length(ord_b) >= 4L) {
+    if (hma_fig1_b2) "Stem-like lineages + DLBCL/MCL/CLL (four groups)" else "Stem-like lineages (four groups)"
+  } else {
+    if (hma_fig1_b2) "Stem-like lineages + DLBCL/MCL/CLL (three groups)" else "Stem-like lineages (three groups)"
+  }
+  aml_bcl2_vals <- dplyr::filter(bcl2_sim, .data$lineage_group == "AML (control)") %>% dplyr::pull(.data$BCL2)
+  ni_bits_expr <- character(0)
+  if (exists("f1_wilcox_left_aml_p") && !is.na(f1_wilcox_left_aml_p) && use_f1_nb_arm) {
+    plf <- if (f1_wilcox_left_aml_p < 0.001) "<0.001" else format.pval(f1_wilcox_left_aml_p, digits = 3)
+    ni_sub_bcl2 <- paste(
+      strwrap(
+        paste0(
+          "Same arm as Fig. 1 (left of red dashed line, excluding AML) vs AML — 1-sided Wilcoxon (NI / ≥ AML): p = ", plf, "."
+        ),
+        width = 92
+      ),
+      collapse = "\n"
+    )
+    ni_aml_expr_note <- paste0(
+      " Combined BCL2 (left of Fig. 1 line",
+      if (exists("f1_vline_leftof_nsclc") && isTRUE(f1_vline_leftof_nsclc)) ", NSCLC right of line" else "",
+      ", excl. AML) vs AML: p = ", plf, "."
+    )
+  } else if (length(aml_bcl2_vals) >= 2L) {
+    for (lg in ord_b) {
+      if (identical(as.character(lg), "AML (control)")) next
+      xv <- dplyr::filter(bcl2_sim, as.character(.data$lineage_group) == as.character(lg)) %>% dplyr::pull(.data$BCL2)
+      if (length(stats::na.omit(xv)) < 1L) next
+      wt <- tryCatch(
+        stats::wilcox.test(xv, aml_bcl2_vals, alternative = "greater", exact = FALSE),
+        error = function(e) NULL
+      )
+      if (is.null(wt) || is.na(wt$p.value)) next
+      p1 <- unname(wt$p.value)
+      pl <- if (p1 < 0.001) "<0.001" else format.pval(p1, digits = 2)
+      short_lg <- gsub(" \\(control\\)", "", as.character(lg))
+      ni_bits_expr <- c(ni_bits_expr, paste0(short_lg, " p=", pl))
+    }
+    ni_sub_bcl2 <- if (length(ni_bits_expr) > 0L) {
+      paste(strwrap(paste0("vs AML (1-sided Wilcoxon, stochastic ≥ AML): ", paste(ni_bits_expr, collapse = "; ")), width = 92), collapse = "\n")
+    } else {
+      NULL
+    }
+    if (length(ni_bits_expr) > 0L) {
+      ni_aml_expr_note <- paste0(" BCL2 RNA vs AML (1-sided): ", paste(ni_bits_expr, collapse = "; "), ".")
+    }
+  } else {
+    ni_sub_bcl2 <- NULL
+  }
+  # Multi-lineage BCL2 panel: corner label = non-inferior vs AML (1-sided), not Kruskal–Wallis
+  bcl2_ni_p <- NA_real_
+  if (exists("f1_wilcox_left_aml_p") && !is.na(f1_wilcox_left_aml_p) && use_f1_nb_arm) {
+    bcl2_ni_p <- f1_wilcox_left_aml_p
+  } else if (length(aml_bcl2_vals) >= 2L && nrow(bcl2_three) > 0L) {
+    pool_b2_ni <- dplyr::filter(bcl2_three, as.character(.data$lineage_group) != "AML (control)") %>%
+      dplyr::pull(.data$BCL2) %>%
+      stats::na.omit() %>%
+      as.numeric()
+    if (length(pool_b2_ni) >= 2L) {
+      wt_ni_b2 <- tryCatch(
+        stats::wilcox.test(pool_b2_ni, aml_bcl2_vals, alternative = "greater", exact = FALSE),
+        error = function(e) NULL
+      )
+      if (!is.null(wt_ni_b2) && !is.na(wt_ni_b2$p.value)) {
+        bcl2_ni_p <- unname(wt_ni_b2$p.value)
+      }
+    }
+  }
+  kw_txt <- if (is.na(bcl2_ni_p)) "—" else if (bcl2_ni_p < 0.001) "<0.001" else format.pval(bcl2_ni_p, digits = 2)
+  kw_lab_bcl2 <- if (is.na(bcl2_ni_p)) {
+    "NI vs AML: p = —"
+  } else {
+    paste0("NI vs AML (1-sided): p = ", ifelse(bcl2_ni_p < 0.001, "<0.001", format.pval(bcl2_ni_p, digits = 2)))
+  }
+  p_three <- ggplot(bcl2_three, aes(x = lineage_group, y = BCL2, fill = lineage_group)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+    geom_point(aes(color = is_nepc), position = position_jitter(width = 0.12, height = 0), alpha = 0.85, size = 2.5) +
+    scale_color_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "gray45"), guide = "none") +
+    annotate("text", x = Inf, y = Inf, label = kw_lab_bcl2, hjust = 1.05, vjust = 1.5, size = 5) +
+    scale_x_discrete(labels = lab_three) +
+    labs(x = "Lineage", y = "BCL2 expression (log2(TPM+1))", title = ttl_multi, subtitle = ni_sub_bcl2) +
+    theme_minimal() + .f1_fig12_axis_theme(25) + theme(legend.position = "none", plot.subtitle = element_text(size = 20, lineheight = 1.05))
+  n_two <- bcl2_sim_two %>% group_by(group_2) %>% summarise(n = n(), .groups = "drop")
+  lab_two <- setNames(paste0(as.character(n_two$group_2), " N=", n_two$n), as.character(n_two$group_2))
+  wx_lab_bcl2 <- if (is.na(wx_vs_other$p.value)) {
+    "1-sided vs stable: p = —"
+  } else {
+    paste0(
+      "1-sided vs stable: p = ",
+      ifelse(wx_vs_other$p.value < 0.001, "<0.001", format.pval(wx_vs_other$p.value, digits = 2))
+    )
+  }
+  p_two <- ggplot(bcl2_sim_two, aes(x = group_2, y = BCL2, fill = group_2)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+    geom_point(aes(color = is_nepc), position = position_jitter(width = 0.12, height = 0), alpha = 0.85, size = 2.5) +
+    scale_color_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "gray45"), guide = "none") +
+    annotate("text", x = Inf, y = Inf, label = wx_lab_bcl2, hjust = 1.05, vjust = 1.5, size = 5) +
+    scale_x_discrete(labels = lab_two) +
+    labs(x = "", y = "BCL2 expression (log2(TPM+1))", title = "BCL2 (two groups)") +
+    theme_minimal() + .f1_fig12_axis_theme(15) + theme(legend.position = "none")
+  cap_bcl2_sim <- paste0(
+    "Figure 2b. BCL2 and DNMT1 similarity. BCL2 multi-lineage: NI vs AML (1-sided) p = ", kw_txt,
+    "; two-group Wilcoxon (stem-like > non-stem-like, 1-sided) p = ", wx_txt, "). DNMT1 (see Figure 2 subfigures).",
+    if (nzchar(ni_aml_expr_note)) ni_aml_expr_note else ""
+  )
+  if (exists("expr_meta_dnmt1") && nrow(expr_meta_dnmt1) > 0 && "DNMT1" %in% names(expr_meta_dnmt1)) {
+    dnmt1_sim <- expr_target %>%
+      mutate(is_nepc = (lineage_group == "ExPulm-SCNEC" & dplyr::coalesce(lineage_expulm_detail, "") == "NEPC")) %>%
+      left_join(expr_meta_dnmt1 %>% select(depmap_id, DNMT1), by = "depmap_id") %>%
+      filter(!is.na(DNMT1))
+    lg0d <- as.character(dnmt1_sim$lineage_group)
+    keep_loc_d <- .f1_keep_localized_subtype_chr(lg0d)
+    drop_loc_d <- grepl("^Localized\\b", lg0d) & !keep_loc_d
+    dnmt1_sim <- dplyr::filter(dnmt1_sim, !drop_loc_d)
+    dnmt1_sim <- dplyr::filter(dnmt1_sim, !.f1_exclude_lineage_from_fig12_plots(as.character(.data$lineage_group)))
+    lineage_dnmt1_multi <- lineage_bcl2_fig1_multi
+    dnmt1_three <- dnmt1_sim %>% filter(lineage_group %in% lineage_dnmt1_multi)
+    lbl_dnmt1_enriched_two <- lbl_b2_enriched_two
+    dnmt1_sim_two <- dnmt1_sim %>%
+      mutate(
+        in_plastic_dnmt1 = (.data$lineage_group %in% lineage_dnmt1_multi) &
+          !grepl("NSCLC", as.character(.data$lineage_group), fixed = TRUE),
+        group_2 = if_else(in_plastic_dnmt1, lbl_dnmt1_enriched_two, lbl_other_two)
+      )
+    kw_three_dnmt1 <- tryCatch(kruskal.test(DNMT1 ~ lineage_group, data = dnmt1_three), error = function(e) list(p.value = NA_real_))
+    wx_vs_other_dnmt1 <- tryCatch(wilcox.test(DNMT1 ~ group_2, data = dnmt1_sim_two), error = function(e) list(p.value = NA_real_))
+    # Same arm as Fig. 1 (left of red line, excl. AML) vs AML: 1-sided Wilcoxon, DNMT1 stochastically ≤ AML
+    dnmt1_ni_p <- NA_real_
+    if (use_f1_nb_arm && exists("f1_enriched_lineages") && length(f1_enriched_lineages) > 0L) {
+      pool_dnmt1_ni <- dnmt1_sim %>%
+        dplyr::filter(as.character(.data$lineage_group) %in% as.character(f1_enriched_lineages)) %>%
+        dplyr::filter(as.character(.data$lineage_group) != "AML (control)") %>%
+        dplyr::filter(!grepl("NSCLC", as.character(.data$lineage_group), fixed = TRUE))
+      aml_dnmt1_ni <- dnmt1_sim %>% dplyr::filter(.data$lineage_group == "AML (control)")
+      pd1 <- stats::na.omit(pool_dnmt1_ni$DNMT1)
+      ad1 <- stats::na.omit(aml_dnmt1_ni$DNMT1)
+      if (length(pd1) >= 2L && length(ad1) >= 2L) {
+        wt_dnmt1_ni <- tryCatch(
+          stats::wilcox.test(pd1, ad1, alternative = "less", exact = FALSE),
+          error = function(e) NULL
+        )
+        if (!is.null(wt_dnmt1_ni) && !is.na(wt_dnmt1_ni$p.value)) {
+          dnmt1_ni_p <- unname(wt_dnmt1_ni$p.value)
+        }
+      }
+    }
+    kw_dnmt1_txt <- if (!is.na(dnmt1_ni_p)) {
+      ifelse(dnmt1_ni_p < 0.001, "<0.001", format.pval(dnmt1_ni_p, digits = 2))
+    } else if (is.na(kw_three_dnmt1$p.value)) {
+      "—"
+    } else if (kw_three_dnmt1$p.value < 0.001) {
+      "<0.001"
+    } else {
+      format.pval(kw_three_dnmt1$p.value, digits = 2)
+    }
+    wx_dnmt1_txt <- if (is.na(wx_vs_other_dnmt1$p.value)) "—" else if (wx_vs_other_dnmt1$p.value < 0.001) "<0.001" else format.pval(wx_vs_other_dnmt1$p.value, digits = 2)
+    kw_lab_dnmt1 <- if (!is.na(dnmt1_ni_p)) {
+      paste0(
+        "NI vs AML (1-sided, ≤ AML): p = ",
+        ifelse(dnmt1_ni_p < 0.001, "<0.001", format.pval(dnmt1_ni_p, digits = 2))
+      )
+    } else if (is.na(kw_three_dnmt1$p.value)) {
+      "p = —"
+    } else {
+      paste0("p = ", ifelse(kw_three_dnmt1$p.value < 0.001, "<0.001", format.pval(kw_three_dnmt1$p.value, digits = 2)))
+    }
+    n_three_d <- dnmt1_three %>% group_by(lineage_group) %>% summarise(n = n(), .groups = "drop")
+    lab_three_d <- setNames(paste0(gsub(" \\(control\\)", "", as.character(n_three_d$lineage_group)), " N=", n_three_d$n), as.character(n_three_d$lineage_group))
+    p_three_dnmt1 <- ggplot(dnmt1_three, aes(x = lineage_group, y = DNMT1, fill = lineage_group)) +
+      geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+      geom_point(aes(color = is_nepc), position = position_jitter(width = 0.12, height = 0), alpha = 0.85, size = 2.5) +
+      scale_color_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "gray45"), guide = "none") +
+      annotate("text", x = Inf, y = Inf, label = kw_lab_dnmt1, hjust = 1.05, vjust = 1.5, size = 5) +
+      scale_x_discrete(labels = lab_three_d) +
+      labs(
+        x = "Lineage", y = "DNMT1 expression (log2(TPM+1))",
+        title = if (length(unique(dnmt1_three$lineage_group)) >= 4L) "DNMT1 (four lineages)" else "DNMT1 (three lineages)"
+      ) +
+      theme_minimal() + .f1_fig12_axis_theme(25) + theme(legend.position = "none")
+    n_two_d <- dnmt1_sim_two %>% group_by(group_2) %>% summarise(n = n(), .groups = "drop")
+    lab_two_d <- setNames(paste0(as.character(n_two_d$group_2), " N=", n_two_d$n), as.character(n_two_d$group_2))
+    wx_lab_dnmt1 <- if (is.na(wx_vs_other_dnmt1$p.value)) "p = —" else paste0("p = ", ifelse(wx_vs_other_dnmt1$p.value < 0.001, "<0.001", format.pval(wx_vs_other_dnmt1$p.value, digits = 2)))
+    p_two_dnmt1 <- ggplot(dnmt1_sim_two, aes(x = group_2, y = DNMT1, fill = group_2)) +
+      geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+      geom_point(aes(color = is_nepc), position = position_jitter(width = 0.12, height = 0), alpha = 0.85, size = 2.5) +
+      scale_color_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "gray45"), guide = "none") +
+      annotate("text", x = Inf, y = Inf, label = wx_lab_dnmt1, hjust = 1.05, vjust = 1.5, size = 5) +
+      scale_x_discrete(labels = lab_two_d) +
+      labs(x = "", y = "DNMT1 expression (log2(TPM+1))", title = "DNMT1 (two groups)") +
+      theme_minimal() + .f1_fig12_axis_theme(15) + theme(legend.position = "none")
+    cap_bcl2_sim <- paste0(
+      "Figure 2b. BCL2 and DNMT1 similarity. BCL2 multi-lineage: NI vs AML (1-sided) p = ", kw_txt, "; two-group (1-sided) p = ", wx_txt, ". DNMT1 multi-lineage: ",
+      if (!is.na(dnmt1_ni_p)) {
+        paste0("NI vs AML (1-sided, DNMT1 ≤ AML) p = ", kw_dnmt1_txt)
+      } else {
+        paste0("Kruskal–Wallis p = ", kw_dnmt1_txt)
+      },
+      "; two-group Wilcoxon p = ", wx_dnmt1_txt, ").",
+      if (nzchar(ni_aml_expr_note)) ni_aml_expr_note else ""
+    )
+  }
+}
+# Expose numeric p-values for wide-figure bracket annotations (Figures 1–2)
+fig12_bcl2_ni_p <- if (exists("bcl2_ni_p")) bcl2_ni_p else NA_real_
+fig12_bcl2_two_p <- if (exists("wx_vs_other") && !is.null(wx_vs_other)) wx_vs_other$p.value else NA_real_
+fig12_dnmt1_ni_p <- if (exists("dnmt1_ni_p")) dnmt1_ni_p else NA_real_
+fig12_dnmt1_two_p <- if (exists("wx_vs_other_dnmt1")) wx_vs_other_dnmt1$p.value else NA_real_
+```
+
+```{r ceres-similarity-panels, include = FALSE, cache = FALSE}
+# BCL2 and DNMT1 CERES similarity panels (stem-like lineages + two-group) and broad DNMT1 CERES for Figure 2
+lineage_plastic_ceres <- if (exists("lineage_plastic_ref_canonical")) lineage_plastic_ref_canonical else c("SCLC", "ExPulm-SCNEC", "AML (control)")
+lbl_b2_ceres_two <- if (exists("lbl_b2_enriched_two")) lbl_b2_enriched_two else "Stem-like (SCLC, ExPulm-SCNEC, AML)"
+lineage_bcl2_ceres_multi <- if (exists("lineage_bcl2_fig1_multi")) lineage_bcl2_fig1_multi else lineage_plastic_ceres
+ni_aml_ceres_note <- ""
+p_three_bcl2_ceres <- p_two_bcl2_ceres <- p_three_dnmt1_ceres <- p_two_dnmt1_ceres <- p_dnmt1_ceres <- NULL
+dnmt1_ceres_plot_df <- NULL
+# BCL2 CERES: build crispr_bcl2 (same as 08) then multi-lineage + two panels (aligned with BCL2 expression Figure 1)
+if (exists("crispr") && nrow(crispr) > 0 && exists("target_ids") && length(target_ids) > 0 && exists("expr_target")) {
+  crispr_bcl2 <- crispr %>%
+    filter(grepl("^BCL2\\b", gene_name), depmap_id %in% target_ids) %>%
+    select(depmap_id, cell_line, dependency) %>%
+    left_join(expr_target %>% select(depmap_id, lineage_group, dplyr::any_of("lineage_expulm_detail")), by = "depmap_id") %>%
+    filter(!is.na(lineage_group)) %>%
+    mutate(is_nepc = (lineage_group == "ExPulm-SCNEC" & dplyr::coalesce(lineage_expulm_detail, "") == "NEPC"))
+  lg0c <- as.character(crispr_bcl2$lineage_group)
+  keep_loc_c <- .f1_keep_localized_subtype_chr(lg0c)
+  drop_loc_c <- grepl("^Localized\\b", lg0c) & !keep_loc_c
+  crispr_bcl2 <- dplyr::filter(crispr_bcl2, !drop_loc_c)
+  crispr_bcl2 <- dplyr::filter(crispr_bcl2, !.f1_exclude_lineage_from_fig12_plots(as.character(.data$lineage_group)))
+  if (nrow(crispr_bcl2) >= 2) {
+    bcl2_three_ceres <- crispr_bcl2 %>%
+      dplyr::filter(.data$lineage_group %in% lineage_bcl2_ceres_multi, is.finite(.data$dependency))
+    bcl2_sim_two_ceres <- crispr_bcl2 %>%
+      mutate(
+        in_plastic_ceres = (.data$lineage_group %in% lineage_bcl2_ceres_multi) &
+          !grepl("NSCLC", as.character(.data$lineage_group), fixed = TRUE),
+        group_2 = if_else(in_plastic_ceres, lbl_b2_ceres_two, lbl_other_two)
+      ) %>%
+      dplyr::filter(is.finite(.data$dependency))
+    kw_bcl2 <- tryCatch(kruskal.test(dependency ~ lineage_group, data = bcl2_three_ceres), error = function(e) list(p.value = NA_real_))
+    wx_bcl2 <- tryCatch(wilcox.test(dependency ~ group_2, data = bcl2_sim_two_ceres), error = function(e) list(p.value = NA_real_))
+    n_three_bc <- bcl2_three_ceres %>% group_by(lineage_group) %>% summarise(n = n(), .groups = "drop")
+    lab_three_bc <- setNames(paste0(gsub(" \\(control\\)", "", as.character(n_three_bc$lineage_group)), " N=", n_three_bc$n), as.character(n_three_bc$lineage_group))
+    lymph_lbl_c <- "DLBCL/MCL/CLL"
+    u_c <- unique(as.character(bcl2_three_ceres$lineage_group))
+    prio_c <- c("SCLC", "ExPulm-SCNEC", "AML (control)")
+    if (lymph_lbl_c %in% u_c) prio_c <- c(prio_c, lymph_lbl_c)
+    ord_c <- c(intersect(prio_c, u_c), setdiff(u_c, prio_c))
+    bcl2_three_ceres <- bcl2_three_ceres %>% mutate(lineage_group = factor(as.character(lineage_group), levels = ord_c))
+    ttl_ceres_multi <- if (length(ord_c) >= 4L) "BCL2 CERES (four lineages)" else "BCL2 CERES (three lineages)"
+    aml_ceres_vals <- dplyr::filter(crispr_bcl2, .data$lineage_group == "AML (control)", is.finite(.data$dependency)) %>%
+      dplyr::pull(.data$dependency)
+    # Single pooled NI p: all non-AML lineages in Fig. 1 arm (or multi-panel lineages) vs AML; greater = stochastically more positive CERES (not more dependent)
+    bcl2_ceres_ni_p <- NA_real_
+    lg_pool_ceres <- if (exists("f1_enriched_lineages") && length(f1_enriched_lineages) > 0L) {
+      as.character(f1_enriched_lineages)
+    } else {
+      as.character(lineage_bcl2_ceres_multi)
+    }
+    lg_pool_ceres <- lg_pool_ceres[!grepl("NSCLC", lg_pool_ceres, fixed = TRUE)]
+    lg_pool_ceres <- lg_pool_ceres[!.f1_exclude_lineage_from_fig12_plots(lg_pool_ceres)]
+    pool_bcl2_ceres <- crispr_bcl2 %>%
+      dplyr::filter(as.character(.data$lineage_group) %in% lg_pool_ceres) %>%
+      dplyr::filter(as.character(.data$lineage_group) != "AML (control)") %>%
+      dplyr::filter(is.finite(.data$dependency))
+    pbc <- stats::na.omit(pool_bcl2_ceres$dependency)
+    abc <- stats::na.omit(aml_ceres_vals)
+    if (length(pbc) >= 2L && length(abc) >= 2L) {
+      wt_bcer <- tryCatch(
+        stats::wilcox.test(pbc, abc, alternative = "greater", exact = FALSE),
+        error = function(e) NULL
+      )
+      if (!is.null(wt_bcer) && !is.na(wt_bcer$p.value)) {
+        bcl2_ceres_ni_p <- unname(wt_bcer$p.value)
+      }
+    }
+    kw_lab_bcl2 <- if (!is.na(bcl2_ceres_ni_p)) {
+      paste0(
+        "NI vs AML (1-sided, less BCL2-dependent: combined non-AML lineages, CERES ≥ AML): p = ",
+        ifelse(bcl2_ceres_ni_p < 0.001, "<0.001", format.pval(bcl2_ceres_ni_p, digits = 2))
+      )
+    } else if (is.na(kw_bcl2$p.value)) {
+      "p = —"
+    } else {
+      paste0("p = ", ifelse(kw_bcl2$p.value < 0.001, "<0.001", format.pval(kw_bcl2$p.value, digits = 2)))
+    }
+    ni_sub_bcl2_ceres <- NULL
+    if (!is.na(bcl2_ceres_ni_p)) {
+      pln <- if (bcl2_ceres_ni_p < 0.001) "<0.001" else format.pval(bcl2_ceres_ni_p, digits = 2)
+      ni_aml_ceres_note <- paste0(
+        " BCL2 CERES vs AML (1-sided Wilcoxon, alternative: combined non-AML ≥ AML; more positive CERES = less BCL2-dependent): p = ",
+        pln, "."
+      )
+    }
+    p_three_bcl2_ceres <- ggplot(bcl2_three_ceres, aes(x = lineage_group, y = dependency, fill = lineage_group)) +
+      geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+      geom_hline(yintercept = 0, linetype = 2) +
+      geom_point(aes(color = is_nepc), position = position_jitter(width = 0.12, height = 0), alpha = 0.85, size = 2.5) +
+      scale_color_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "gray45"), guide = "none") +
+      annotate("text", x = Inf, y = Inf, label = kw_lab_bcl2, hjust = 1.05, vjust = 1.5, size = 5) +
+      scale_x_discrete(labels = lab_three_bc) +
+      labs(x = "Lineage", y = "BCL2 CERES", title = ttl_ceres_multi, subtitle = ni_sub_bcl2_ceres) +
+      theme_minimal() + .f1_fig12_axis_theme(25) + theme(legend.position = "none", plot.subtitle = element_text(size = 20, lineheight = 1.05))
+    n_two_bc <- bcl2_sim_two_ceres %>% group_by(group_2) %>% summarise(n = n(), .groups = "drop")
+    lab_two_bc <- setNames(paste0(as.character(n_two_bc$group_2), " N=", n_two_bc$n), as.character(n_two_bc$group_2))
+    wx_lab_bcl2 <- if (is.na(wx_bcl2$p.value)) "p = —" else paste0("p = ", ifelse(wx_bcl2$p.value < 0.001, "<0.001", format.pval(wx_bcl2$p.value, digits = 2)))
+    p_two_bcl2_ceres <- ggplot(bcl2_sim_two_ceres, aes(x = group_2, y = dependency, fill = group_2)) +
+      geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+      geom_hline(yintercept = 0, linetype = 2) +
+      geom_point(aes(color = is_nepc), position = position_jitter(width = 0.12, height = 0), alpha = 0.85, size = 2.5) +
+      scale_color_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "gray45"), guide = "none") +
+      annotate("text", x = Inf, y = Inf, label = wx_lab_bcl2, hjust = 1.05, vjust = 1.5, size = 5) +
+      scale_x_discrete(labels = lab_two_bc) +
+      labs(x = "", y = "BCL2 CERES", title = "BCL2 CERES (two groups)") +
+      theme_minimal() + .f1_fig12_axis_theme(15) + theme(legend.position = "none")
+  }
+}
+fig12_bcl2_ceres_ni_p <- if (exists("bcl2_ceres_ni_p")) bcl2_ceres_ni_p else NA_real_
+fig12_bcl2_ceres_two_p <- if (exists("wx_bcl2")) wx_bcl2$p.value else NA_real_
+# DNMT1 CERES: three/two panels + broad by-lineage plot for Figure 2
+if (exists("crispr_dnmt1") && nrow(crispr_dnmt1) > 0 && exists("expr_target")) {
+  key_lineages_dnmt1 <- c("SCLC", "ExPulm-SCNEC", "AML (control)")
+  tnbc_lymph_dnmt1_ceres <- c(
+    if (exists("cohort_extended_hem") && isTRUE(cohort_extended_hem)) {
+      c(
+        if (exists("lineage_levels_tnbc")) {
+          setdiff(lineage_levels_tnbc, "Unspecified TNBC")
+        } else {
+          c("Localized TNBC", "Metastatic TNBC")
+        },
+        "DLBCL/MCL/CLL"
+      )
+    } else {
+      character(0)
+    },
+    "Neuroblastoma", "Unspecified Neuroblastoma"
+  )
+  tnbc_lymph_dnmt1_ceres <- setdiff(
+    tnbc_lymph_dnmt1_ceres,
+    c("Localized TNBC", "Localized Sarcoma", "Lymphoma (other)")
+  )
+  crispr_dnmt1 <- crispr_dnmt1 %>%
+    left_join(expr_target %>% select(depmap_id, dplyr::any_of("lineage_expulm_detail")), by = "depmap_id") %>%
+    mutate(is_nepc = (lineage_group == "ExPulm-SCNEC" & dplyr::coalesce(lineage_expulm_detail, "") == "NEPC"))
+  lg0dn <- as.character(crispr_dnmt1$lineage_group)
+  keep_loc_dn <- .f1_keep_localized_subtype_chr(lg0dn)
+  drop_loc_dn <- grepl("^Localized\\b", lg0dn) & !keep_loc_dn
+  crispr_dnmt1 <- dplyr::filter(crispr_dnmt1, !drop_loc_dn)
+  crispr_dnmt1 <- dplyr::filter(crispr_dnmt1, !.f1_exclude_lineage_from_fig12_plots(as.character(.data$lineage_group)))
+  lineage_dnmt1_ceres_multi <- if (exists("lineage_bcl2_ceres_multi")) lineage_bcl2_ceres_multi else lineage_plastic_ceres
+  lbl_dnmt1_ceres_two <- if (exists("lbl_b2_enriched_two")) lbl_b2_enriched_two else "Stem-like (SCLC, ExPulm-SCNEC, AML)"
+  lbl_dnmt1_ceres_other <- if (exists("lbl_other_two")) lbl_other_two else "Non-stem-like"
+  dnmt1_three_ceres <- crispr_dnmt1 %>%
+    dplyr::filter(.data$lineage_group %in% lineage_dnmt1_ceres_multi, is.finite(.data$dependency))
+  dnmt1_sim_two_ceres <- crispr_dnmt1 %>%
+    mutate(
+      in_plastic_dnmt1_ceres = (.data$lineage_group %in% lineage_dnmt1_ceres_multi) &
+        !grepl("NSCLC", as.character(.data$lineage_group), fixed = TRUE),
+      group_2 = if_else(in_plastic_dnmt1_ceres, lbl_dnmt1_ceres_two, lbl_dnmt1_ceres_other)
+    ) %>%
+    dplyr::filter(is.finite(.data$dependency))
+  if (nrow(dnmt1_three_ceres) >= 2) {
+    kw_dnmt1 <- tryCatch(kruskal.test(dependency ~ lineage_group, data = dnmt1_three_ceres), error = function(e) list(p.value = NA_real_))
+    wx_dnmt1 <- tryCatch(wilcox.test(dependency ~ group_2, data = dnmt1_sim_two_ceres), error = function(e) list(p.value = NA_real_))
+    dnmt1_ceres_ni_p <- NA_real_
+    if (exists("f1_enriched_lineages") && length(f1_enriched_lineages) > 0L) {
+      pool_dc <- crispr_dnmt1 %>%
+        dplyr::filter(as.character(.data$lineage_group) %in% as.character(f1_enriched_lineages)) %>%
+        dplyr::filter(as.character(.data$lineage_group) != "AML (control)") %>%
+        dplyr::filter(!grepl("NSCLC", as.character(.data$lineage_group), fixed = TRUE)) %>%
+        dplyr::filter(is.finite(.data$dependency))
+      aml_dc <- crispr_dnmt1 %>%
+        dplyr::filter(.data$lineage_group == "AML (control)", is.finite(.data$dependency))
+      pdc <- stats::na.omit(pool_dc$dependency)
+      adc <- stats::na.omit(aml_dc$dependency)
+      if (length(pdc) >= 2L && length(adc) >= 2L) {
+        wt_dc <- tryCatch(
+          stats::wilcox.test(pdc, adc, alternative = "greater", exact = FALSE),
+          error = function(e) NULL
+        )
+        if (!is.null(wt_dc) && !is.na(wt_dc$p.value)) {
+          dnmt1_ceres_ni_p <- unname(wt_dc$p.value)
+        }
+      }
+    }
+    kw_lab_dnmt1 <- if (!is.na(dnmt1_ceres_ni_p)) {
+      paste0(
+        "NI vs AML (1-sided, less DNMT1-dependent: combined non-AML lineages, CERES ≥ AML): p = ",
+        ifelse(dnmt1_ceres_ni_p < 0.001, "<0.001", format.pval(dnmt1_ceres_ni_p, digits = 2))
+      )
+    } else if (is.na(kw_dnmt1$p.value)) {
+      "p = —"
+    } else {
+      paste0("p = ", ifelse(kw_dnmt1$p.value < 0.001, "<0.001", format.pval(kw_dnmt1$p.value, digits = 2)))
+    }
+    n_three_dc <- dnmt1_three_ceres %>% group_by(lineage_group) %>% summarise(n = n(), .groups = "drop")
+    lab_three_dc <- setNames(paste0(gsub(" \\(control\\)", "", as.character(n_three_dc$lineage_group)), " N=", n_three_dc$n), as.character(n_three_dc$lineage_group))
+    p_three_dnmt1_ceres <- ggplot(dnmt1_three_ceres, aes(x = lineage_group, y = dependency, fill = lineage_group)) +
+      geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+      geom_hline(yintercept = 0, linetype = 2) +
+      geom_point(aes(color = is_nepc), position = position_jitter(width = 0.12, height = 0), alpha = 0.85, size = 2.5) +
+      scale_color_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "gray45"), guide = "none") +
+      annotate("text", x = Inf, y = Inf, label = kw_lab_dnmt1, hjust = 1.05, vjust = 1.5, size = 5) +
+      scale_x_discrete(labels = lab_three_dc) +
+      labs(
+        x = "Lineage", y = "DNMT1 CERES",
+        title = if (length(unique(dnmt1_three_ceres$lineage_group)) >= 4L) {
+          "DNMT1 CERES (four lineages)"
+        } else {
+          "DNMT1 CERES (three lineages)"
+        }
+      ) +
+      theme_minimal() + .f1_fig12_axis_theme(25) + theme(legend.position = "none")
+    n_two_dc <- dnmt1_sim_two_ceres %>% group_by(group_2) %>% summarise(n = n(), .groups = "drop")
+    lab_two_dc <- setNames(paste0(as.character(n_two_dc$group_2), " N=", n_two_dc$n), as.character(n_two_dc$group_2))
+    wx_lab_dnmt1 <- if (is.na(wx_dnmt1$p.value)) "p = —" else paste0("p = ", ifelse(wx_dnmt1$p.value < 0.001, "<0.001", format.pval(wx_dnmt1$p.value, digits = 2)))
+    p_two_dnmt1_ceres <- ggplot(dnmt1_sim_two_ceres, aes(x = group_2, y = dependency, fill = group_2)) +
+      geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+      geom_hline(yintercept = 0, linetype = 2) +
+      geom_point(aes(color = is_nepc), position = position_jitter(width = 0.12, height = 0), alpha = 0.85, size = 2.5) +
+      scale_color_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "gray45"), guide = "none") +
+      annotate("text", x = Inf, y = Inf, label = wx_lab_dnmt1, hjust = 1.05, vjust = 1.5, size = 5) +
+      scale_x_discrete(labels = lab_two_dc) +
+      labs(x = "", y = "DNMT1 CERES", title = "DNMT1 CERES (two groups)") +
+      theme_minimal() + .f1_fig12_axis_theme(15) + theme(legend.position = "none")
+  }
+  # Broad DNMT1 CERES by lineage (for Figure 2 bottom-left)
+  dnmt1_crispr_n <- crispr_dnmt1 %>% group_by(lineage_group) %>% summarise(n = n(), .groups = "drop")
+  dnmt1_keep <- dnmt1_crispr_n %>%
+    dplyr::filter(
+      n >= 5 |
+        .data$lineage_group == "ExPulm-SCNEC" |
+        as.character(.data$lineage_group) %in% tnbc_lymph_dnmt1_ceres
+    ) %>%
+    dplyr::pull(.data$lineage_group)
+  if (exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && nrow(bcl2_plot_df) > 0L && "subtype" %in% names(bcl2_plot_df)) {
+    axis_sub_d <- unique(as.character(bcl2_plot_df$subtype))
+    in_dn <- unique(as.character(crispr_dnmt1$lineage_group))
+    dnmt1_keep <- union(dnmt1_keep, intersect(axis_sub_d, in_dn))
+  }
+  # #region agent log
+  tryCatch({
+    .agent_dbg_ndjson(
+      runId = "post-fix",
+      hypothesisId = "H4",
+      location = "03_Rmd:dnmt1_keep",
+      message = "DNMT1 keep set and neuroblastoma availability pre-join",
+      data = list(
+        dnmt1_keep = as.character(dnmt1_keep),
+        in_dn_nb = sum(grepl("Neuroblastoma", as.character(crispr_dnmt1$lineage_group), fixed = TRUE))
+      )
+    )
+  }, error = function(e) invisible(NULL))
+  # #endregion
+  crispr_dnmt1_plot <- crispr_dnmt1 %>% dplyr::filter(lineage_group %in% dnmt1_keep)
+  p_dnmt1_ceres <- NULL
+  if (nrow(crispr_dnmt1_plot) > 0) {
+    if (exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) &&
+          nrow(bcl2_plot_df) > 0L &&
+          all(c("depmap_id", "lab", "subtype") %in% names(bcl2_plot_df))) {
+      axis_dn <- bcl2_plot_df %>%
+        dplyr::distinct(.data$depmap_id, .keep_all = TRUE) %>%
+        dplyr::select(.data$depmap_id, .data$lab, .data$subtype, .data$is_nepc)
+      crispr_d_dep <- crispr_dnmt1_plot %>%
+        dplyr::select(.data$depmap_id, .data$dependency)
+      ddj <- axis_dn %>%
+        dplyr::left_join(crispr_d_dep, by = "depmap_id")
+      if (nrow(ddj) >= 2L) {
+        lev_dn <- levels(bcl2_plot_df$lab)
+        ddj <- ddj %>%
+          dplyr::filter(!is.na(.data$lab), nzchar(trimws(as.character(.data$lab))))
+        ddj$lab <- factor(as.character(ddj$lab), levels = lev_dn)
+        ddj <- ddj %>% dplyr::filter(!is.na(.data$lab))
+        ddj <- dplyr::filter(ddj, is.finite(.data$dependency))
+        # #region agent log
+        tryCatch({
+          nb_ddj <- ddj %>% dplyr::filter(grepl("Neuroblastoma", as.character(.data$lab), fixed = TRUE))
+          .agent_dbg_ndjson(
+            runId = "post-fix",
+            hypothesisId = "H5",
+            location = "03_Rmd:dnmt1_ddj_finite",
+            message = "DNMT1 wide CERES rows after finite filter",
+            data = list(
+              n_rows = nrow(ddj),
+              n_nb_rows = nrow(nb_ddj),
+              nb_labs = unique(as.character(nb_ddj$lab))
+            )
+          )
+        }, error = function(e) invisible(NULL))
+        # #endregion
+        n_dnmt1_ceres_by_lab <- setNames(rep(0L, length(lev_dn)), lev_dn)
+        if (nrow(ddj) > 0L && "lab" %in% names(ddj)) {
+          cn_d1 <- ddj %>% dplyr::count(.data$lab, name = "nn")
+          for (ri in seq_len(nrow(cn_d1))) {
+            k <- as.character(cn_d1$lab[[ri]])
+            if (k %in% names(n_dnmt1_ceres_by_lab)) {
+              n_dnmt1_ceres_by_lab[[k]] <- as.integer(cn_d1$nn[[ri]])
+            }
+          }
+        }
+        f1_dnmt1_ceres_labels_fun <- .f1_ceres_wide_x_labeller(n_dnmt1_ceres_by_lab)
+        if (nrow(ddj) >= 2L) {
+          f1_dnmt1_ceres_ylim <- local({
+            yv <- ddj$dependency
+            yv <- yv[is.finite(yv)]
+            yn <- ddj$dependency[ddj$is_nepc %in% TRUE]
+            yn <- yn[is.finite(yn)]
+            if (length(yv) < 2L) {
+              # Still define limits so y=0 reference and any finite NEPC overlay are visible.
+              pad0 <- 0.14
+              if (length(yn) >= 1L) {
+                y_lo0 <- min(min(yn) - pad0, -pad0)
+                y_hi0 <- max(max(yn) + pad0, pad0)
+                return(c(max(-4.8, y_lo0), min(1.2, y_hi0)))
+              }
+              return(c(-0.35, 0.35))
+            }
+            qs <- stats::quantile(yv, c(0.04, 0.96), names = FALSE, na.rm = TRUE)
+            d <- diff(qs)
+            if (!is.finite(d) || d < 0.18) d <- max(0.42, diff(range(yv)))
+            pad <- max(0.07, 0.14 * d)
+            y_lo <- max(-3.15, qs[[1L]] - pad)
+            y_hi <- min(0.62, qs[[2L]] + pad)
+            # Always include finite NEPC overlay CERES so coord_cartesian does not clip the red points.
+            if (length(yn) > 0L) {
+              rng_n <- if (length(yn) >= 2L) diff(range(yn)) else 0
+              pad_n <- max(0.08, 0.12 * max(rng_n, max(abs(yn), na.rm = TRUE) * 0.12, 0.2))
+              y_lo <- min(y_lo, min(yn) - pad_n)
+              y_hi <- max(y_hi, max(yn) + pad_n)
+              y_lo <- max(-4.6, y_lo)
+              y_hi <- min(1.15, y_hi)
+            }
+            # CERES panels: always span y=0 (dashed reference).
+            pad0 <- 0.12
+            y_lo <- min(y_lo, -pad0)
+            y_hi <- max(y_hi, pad0)
+            y_lo <- max(-4.85, y_lo)
+            y_hi <- min(1.25, y_hi)
+            if (!is.finite(y_hi) || y_hi <= y_lo) {
+              return(NULL)
+            }
+            c(y_lo, y_hi)
+          })
+          kw_dnmt1_broad <- tryCatch(
+            stats::kruskal.test(dependency ~ lab, data = ddj),
+            error = function(e) list(p.value = NA_real_)
+          )
+          p_kw_dnmt1 <- if (!is.null(kw_dnmt1_broad$p.value) && !is.na(kw_dnmt1_broad$p.value)) {
+            format.pval(kw_dnmt1_broad$p.value, digits = 2)
+          } else {
+            "—"
+          }
+          vx_ddj <- if (exists("f1_vline_x")) f1_vline_x else NA_real_
+          p_dnmt1_ceres <- ggplot(ddj, aes(x = lab, y = dependency, fill = subtype)) +
+            geom_boxplot(alpha = 0.7, outlier.shape = NA, na.rm = TRUE) +
+            geom_hline(yintercept = 0, linetype = 2) +
+            ggplot2::geom_point(
+              data = dplyr::filter(ddj, .data$is_nepc %in% TRUE),
+              ggplot2::aes(x = lab, y = dependency),
+              inherit.aes = FALSE,
+              color = "#E41A1C",
+              position = ggplot2::position_jitter(width = 0.12, height = 0),
+              alpha = 0.92,
+              size = 2.5,
+              na.rm = TRUE
+            )
+          if (!is.na(vx_ddj)) {
+            p_dnmt1_ceres <- p_dnmt1_ceres + ggplot2::geom_vline(
+              xintercept = vx_ddj,
+              linetype = "dashed",
+              linewidth = f1_rule_line_linewidth,
+              alpha = 1,
+              colour = f1_rule_line_colour
+            )
+          }
+          p_dnmt1_ceres <- p_dnmt1_ceres +
+            ggplot2::scale_x_discrete(drop = FALSE, labels = f1_dnmt1_ceres_labels_fun) +
+            labs(x = "Lineage", y = "DNMT1 CERES") +
+            theme_minimal() +
+            .f1_fig12_axis_theme(45) +
+            theme(legend.position = "none")
+          dnmt1_ceres_plot_df <- ddj
+        }
+      }
+    }
+    if (is.null(p_dnmt1_ceres)) {
+      u_d <- unique(as.character(crispr_dnmt1_plot$lineage_group))
+      prio_d <- c(key_lineages_dnmt1, tnbc_lymph_dnmt1_ceres)
+      ord_d <- c(intersect(prio_d, u_d), setdiff(u_d, prio_d))
+      crispr_dnmt1_plot <- crispr_dnmt1_plot %>%
+        mutate(lineage_group = factor(as.character(lineage_group), levels = ord_d))
+      crispr_dnmt1_plot_fin <- dplyr::filter(crispr_dnmt1_plot, is.finite(.data$dependency))
+      kw_dnmt1_broad <- tryCatch(kruskal.test(dependency ~ lineage_group, data = crispr_dnmt1_plot_fin), error = function(e) list(p.value = NA))
+      p_kw_dnmt1 <- if (!is.null(kw_dnmt1_broad$p.value)) format.pval(kw_dnmt1_broad$p.value, digits = 2) else "—"
+      lbl_dnmt1 <- crispr_dnmt1_plot_fin %>% group_by(lineage_group) %>% summarise(n = n(), .groups = "drop")
+      lab_dnmt1_ceres <- setNames(paste0(gsub(" \\(control\\)", "", as.character(lbl_dnmt1$lineage_group)), " N=", lbl_dnmt1$n), as.character(lbl_dnmt1$lineage_group))
+      p_dnmt1_ceres <- ggplot(crispr_dnmt1_plot_fin, aes(x = lineage_group, y = dependency, fill = lineage_group)) +
+        geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+        geom_hline(yintercept = 0, linetype = 2) +
+        geom_point(aes(color = is_nepc), position = position_jitter(width = 0.12, height = 0), alpha = 0.85, size = 2.5) +
+        scale_color_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "gray45"), guide = "none") +
+        scale_x_discrete(labels = lab_dnmt1_ceres) +
+        labs(x = "Lineage", y = "DNMT1 CERES") +
+        theme_minimal() + .f1_fig12_axis_theme(45) + theme(legend.position = "none")
+      dnmt1_ceres_plot_df <- dplyr::transmute(
+        crispr_dnmt1_plot_fin,
+        lab = as.character(.data$lineage_group),
+        subtype = as.character(.data$lineage_group),
+        dependency = .data$dependency
+      )
+      vx_dfb <- if (exists("f1_vline_x")) f1_vline_x else NA_real_
+      if (!is.na(vx_dfb) && exists("bcl2_plot_df") && nrow(bcl2_plot_df) > 0L &&
+            length(ord_d) == length(levels(bcl2_plot_df$lab))) {
+        p_dnmt1_ceres <- p_dnmt1_ceres + ggplot2::geom_vline(
+          xintercept = vx_dfb,
+          linetype = "dashed",
+          linewidth = f1_rule_line_linewidth,
+          alpha = 1,
+          colour = f1_rule_line_colour
+        )
+      }
+    }
+  }
+}
+fig12_dnmt1_ceres_ni_p <- if (exists("dnmt1_ceres_ni_p")) dnmt1_ceres_ni_p else NA_real_
+fig12_dnmt1_ceres_two_p <- if (exists("wx_dnmt1")) wx_dnmt1$p.value else NA_real_
+if (exists("cap_bcl2_sim") && exists("ni_aml_ceres_note") && nzchar(ni_aml_ceres_note)) {
+  cap_bcl2_sim <- paste0(cap_bcl2_sim, ni_aml_ceres_note)
+}
+```
+
+```{r tnbc-master-lineage-def-t2-then-figures, echo = FALSE, results = "asis", eval = exists("cohort_extended_hem") && isTRUE(cohort_extended_hem) && exists("hma_bcl2_tnbc_lymph_master") && isTRUE(hma_bcl2_tnbc_lymph_master)}
+knitr::asis_output(paste0(
+  "### Lymphoma strata: BCL2-treated / stem-like proxy\n\n",
+  "Lymphoma lines are classified from DepMap disease, subtype, and molecular text (not treatment exposure). ",
+  "DLBCL/MCL/CLL includes chronic lymphocytic leukemia / small lymphocytic lymphoma (CLL/SLL; venetoclax FDA-indication proxy) and B-NHL labels commonly studied with BCL2-pathway therapy in trials ",
+  "(e.g. mantle cell, follicular, DLBCL and related high-grade B-cell patterns, marginal-zone/MALT, Waldenström/lymphoplasmacytic; full regex patterns are in DNMTi_BCL2_Child_Expanded.Rmd). ",
+  "Lymphoma (other) pools remaining lymphoid lines in the extended cohort that do not match those patterns.\n\n",
+  "TNBC: localized and metastatic strata appear on the same axis when present. Table 1 omits lineages with \"Unspecified\" in the name; unspecified TNBC is omitted from the cohort summary table below. ",
+  "TNBC and lymphoma buckets (DLBCL/MCL/CLL vs Lymphoma (other)) appear on the x-axis in Figures 1–2 when present.\n\n"
+))
+lg_tnbc_summ <- if (exists("lineage_levels_tnbc")) {
+  setdiff(lineage_levels_tnbc, "Unspecified TNBC")
+} else {
+  c("Localized TNBC", "Metastatic TNBC")
+}
+lg_lymph_summ <- c("DLBCL/MCL/CLL", "Lymphoma (other)")
+if (exists("expr_target") && nrow(expr_target) > 0L && "lineage_group" %in% names(expr_target)) {
+  summ_tl <- expr_target %>%
+    dplyr::filter(as.character(.data$lineage_group) %in% c(lg_tnbc_summ, lg_lymph_summ)) %>%
+    dplyr::count(.data$lineage_group, name = "N_cell_lines") %>%
+    dplyr::arrange(.data$lineage_group)
+  if (nrow(summ_tl) > 0L) {
+    print(
+      knitr::kable(
+        summ_tl,
+        caption = "Cohort: TNBC and lymphoma strata (N cell lines in analysis cohort, same as Table 1 / Figures 1–2). Lymphoma buckets are histology-based proxies (not treatment exposure)."
+      ) %>%
+        kableExtra::kable_styling(bootstrap_options = c("bordered", "condensed"), full_width = FALSE)
+    )
+  } else {
+    knitr::asis_output("*No TNBC or lymphoma lines in the extended cohort (check 01_Data_Loading_TNBC_Lymphoma / verification RDS).*\n\n")
+  }
+} else {
+  knitr::asis_output("*expr_target not available for TNBC/lymphoma summary.*\n\n")
+}
+if (exists("t2_kable")) {
+  print(t2_kable)
+  cat("\n\n")
+}
+```
+
+```{r bcl2-fig-table-dependency, cache = FALSE, fig.show = "hide"}
+# Build BCL2 dependency plot (CERES) for Figure 1 composite
+p_bcl2_ceres <- NULL
+if (exists("crispr") && nrow(crispr) > 0 && exists("target_ids") && length(target_ids) > 0 && exists("expr_target")) {
+  crispr_bcl2_f1 <- crispr %>%
+    filter(grepl("^BCL2\\b", gene_name), depmap_id %in% target_ids) %>%
+    select(depmap_id, dependency) %>%
+    left_join(expr_target %>% select(depmap_id, lineage_group, dplyr::any_of("lineage_expulm_detail")), by = "depmap_id") %>%
+    filter(!is.na(lineage_group)) %>%
+    mutate(is_nepc = (lineage_group == "ExPulm-SCNEC" & dplyr::coalesce(lineage_expulm_detail, "") == "NEPC"))
+  crispr_bcl2_f1 <- crispr_bcl2_f1 %>%
+    dplyr::filter(
+      !grepl("^Localized\\b", as.character(.data$lineage_group)) |
+        .f1_keep_localized_subtype_chr(as.character(.data$lineage_group))
+    )
+  crispr_bcl2_f1 <- dplyr::filter(crispr_bcl2_f1, !.f1_exclude_lineage_from_fig12_plots(as.character(.data$lineage_group)))
+  if (nrow(crispr_bcl2_f1) > 0) {
+    # Lymphoma + neuroblastoma: always allow in wide CERES (n<5 anchor), like expression panel
+    tnbc_lymph_ceres <- c(
+      if (exists("cohort_extended_hem") && isTRUE(cohort_extended_hem)) {
+        if (exists("lineage_levels_tnbc")) {
+          setdiff(lineage_levels_tnbc, "Unspecified TNBC")
+        } else {
+          c("Localized TNBC", "Metastatic TNBC")
+        }
+      } else {
+        character(0)
+      },
+      "DLBCL/MCL/CLL",
+      "Neuroblastoma", "Unspecified Neuroblastoma",
+      "Localized Sarcoma", "Metastatic Sarcoma", "Unspecified Sarcoma"
+    )
+    tnbc_lymph_ceres <- setdiff(
+      tnbc_lymph_ceres,
+      c("Localized TNBC", "Localized Sarcoma", "Lymphoma (other)")
+    )
+    c_n <- crispr_bcl2_f1 %>% group_by(lineage_group) %>% summarise(n = n(), .groups = "drop")
+    keep_l <- c_n %>%
+      dplyr::filter(
+        n >= 5 |
+          as.character(.data$lineage_group) == "ExPulm-SCNEC" |
+          as.character(.data$lineage_group) %in% tnbc_lymph_ceres
+      ) %>%
+      dplyr::pull(.data$lineage_group)
+    # Keep CRISPR rows for any lineage present on the Figure 1 expression axis (avoids empty CERES slots when n < 5).
+    if (exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && nrow(bcl2_plot_df) > 0L && "subtype" %in% names(bcl2_plot_df)) {
+      axis_sub <- unique(as.character(bcl2_plot_df$subtype))
+      in_crispr <- unique(as.character(crispr_bcl2_f1$lineage_group))
+      keep_l <- union(keep_l, intersect(axis_sub, in_crispr))
+    }
+    # #region agent log
+    tryCatch({
+      .agent_dbg_ndjson(
+        runId = "post-fix",
+        hypothesisId = "H2",
+        location = "03_Rmd:bcl2_keep_l",
+        message = "BCL2 CERES lineage keep set and neuroblastoma availability",
+        data = list(
+          keep_l = as.character(keep_l),
+          in_crispr_nb = sum(grepl("Neuroblastoma", as.character(crispr_bcl2_f1$lineage_group), fixed = TRUE)),
+          axis_nb_lab = unique(as.character(bcl2_plot_df$lab[grepl("Neuroblastoma", as.character(bcl2_plot_df$lab), fixed = TRUE)]))
+        )
+      )
+    }, error = function(e) invisible(NULL))
+    # #endregion
+    crispr_bcl2_f1 <- crispr_bcl2_f1 %>% filter(lineage_group %in% keep_l)
+    if (nrow(crispr_bcl2_f1) > 0) {
+      use_bcl2_axis <- exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) &&
+        nrow(bcl2_plot_df) > 0L &&
+        all(c("lab", "subtype", "depmap_id") %in% names(bcl2_plot_df))
+      if (use_bcl2_axis) {
+        bcl2_axis_c <- bcl2_plot_df %>%
+          dplyr::distinct(.data$depmap_id, .keep_all = TRUE) %>%
+          dplyr::select(.data$depmap_id, .data$lab, .data$subtype, .data$is_nepc)
+        crispr_dep <- crispr_bcl2_f1 %>%
+          dplyr::select(.data$depmap_id, .data$dependency)
+        # Same cell lines as expression (left join) so every lineage slot can draw CERES when values exist.
+        ceres_f1_df <- bcl2_axis_c %>%
+          dplyr::left_join(crispr_dep, by = "depmap_id")
+        if (nrow(ceres_f1_df) >= 2L) {
+          ceres_f1_df <- ceres_f1_df %>% dplyr::filter(!is.na(.data$lab), nzchar(trimws(as.character(.data$lab))))
+          lev_lab <- levels(bcl2_plot_df$lab)
+          if (length(lev_lab) > 0L) {
+            ceres_f1_df$lab <- factor(as.character(ceres_f1_df$lab), levels = lev_lab)
+          }
+          ceres_f1_df <- dplyr::filter(ceres_f1_df, is.finite(.data$dependency))
+          # #region agent log
+          tryCatch({
+            nb_ceres_rows <- ceres_f1_df %>% dplyr::filter(grepl("Neuroblastoma", as.character(.data$lab), fixed = TRUE))
+            .agent_dbg_ndjson(
+              runId = "post-fix",
+              hypothesisId = "H3",
+              location = "03_Rmd:bcl2_ceres_f1_df",
+              message = "BCL2 wide CERES rows after finite filter",
+              data = list(
+                n_rows = nrow(ceres_f1_df),
+                n_nb_rows = nrow(nb_ceres_rows),
+                nb_labs = unique(as.character(nb_ceres_rows$lab))
+              )
+            )
+          }, error = function(e) invisible(NULL))
+          # #endregion
+          n_ceres_f1_by_lab <- setNames(rep(0L, length(lev_lab)), lev_lab)
+          if (nrow(ceres_f1_df) > 0L && "lab" %in% names(ceres_f1_df)) {
+            cn_b1 <- ceres_f1_df %>% dplyr::count(.data$lab, name = "nn")
+            for (ri in seq_len(nrow(cn_b1))) {
+              k <- as.character(cn_b1$lab[[ri]])
+              if (k %in% names(n_ceres_f1_by_lab)) {
+                n_ceres_f1_by_lab[[k]] <- as.integer(cn_b1$nn[[ri]])
+              }
+            }
+          }
+          f1_bcl2_ceres_labels_fun <- .f1_ceres_wide_x_labeller(n_ceres_f1_by_lab)
+          if (nrow(ceres_f1_df) >= 2L) {
+            # Top-row BCL2 CERES: slightly tighter y than default limits so contrasts read larger (still shows ~0 reference).
+            f1_bcl2_ceres_ylim <- local({
+              yv <- ceres_f1_df$dependency
+              yv <- yv[is.finite(yv)]
+              yn <- ceres_f1_df$dependency[ceres_f1_df$is_nepc %in% TRUE]
+              yn <- yn[is.finite(yn)]
+              if (length(yv) < 2L) {
+                pad0 <- 0.14
+                if (length(yn) >= 1L) {
+                  y_lo0 <- min(min(yn) - pad0, -pad0)
+                  y_hi0 <- max(max(yn) + pad0, pad0)
+                  return(c(max(-4.8, y_lo0), min(1.2, y_hi0)))
+                }
+                return(c(-0.35, 0.35))
+              }
+              qs <- stats::quantile(yv, c(0.04, 0.96), names = FALSE, na.rm = TRUE)
+              d <- diff(qs)
+              if (!is.finite(d) || d < 0.18) d <- max(0.42, diff(range(yv)))
+              pad <- max(0.07, 0.14 * d)
+              y_lo <- max(-3.15, qs[[1L]] - pad)
+              y_hi <- min(0.62, qs[[2L]] + pad)
+              if (length(yn) > 0L) {
+                rng_n <- if (length(yn) >= 2L) diff(range(yn)) else 0
+                pad_n <- max(0.08, 0.12 * max(rng_n, max(abs(yn), na.rm = TRUE) * 0.12, 0.2))
+                y_lo <- min(y_lo, min(yn) - pad_n)
+                y_hi <- max(y_hi, max(yn) + pad_n)
+                y_lo <- max(-4.6, y_lo)
+                y_hi <- min(1.15, y_hi)
+              }
+              pad0 <- 0.12
+              y_lo <- min(y_lo, -pad0)
+              y_hi <- max(y_hi, pad0)
+              y_lo <- max(-4.85, y_lo)
+              y_hi <- min(1.25, y_hi)
+              if (!is.finite(y_hi) || y_hi <= y_lo) {
+                return(NULL)
+              }
+              c(y_lo, y_hi)
+            })
+            .mk_bcl2_ceres_wide <- function(dat, vline_x = NA_real_, labels_fun = .f1_axis_short_met_label) {
+              g <- ggplot(dat, aes(x = lab, y = dependency, fill = subtype)) +
+                geom_boxplot(alpha = 0.7, outlier.shape = NA, na.rm = TRUE) +
+                geom_hline(yintercept = 0, linetype = 2) +
+                ggplot2::geom_point(
+                  data = dplyr::filter(dat, .data$is_nepc %in% TRUE),
+                  ggplot2::aes(x = lab, y = dependency),
+                  inherit.aes = FALSE,
+                  color = "#E41A1C",
+                  position = ggplot2::position_jitter(width = 0.12, height = 0),
+                  alpha = 0.92,
+                  size = 2.5,
+                  na.rm = TRUE
+                ) +
+                ggplot2::scale_x_discrete(drop = FALSE, labels = labels_fun) +
+                labs(x = "Lineage", y = "BCL2 CERES") +
+                theme_minimal() +
+                .f1_fig12_axis_theme(45) +
+                theme(legend.position = "none")
+              if (!is.na(vline_x)) {
+                g <- g + ggplot2::geom_vline(
+                  xintercept = vline_x,
+                  linetype = "dashed",
+                  linewidth = f1_rule_line_linewidth,
+                  alpha = 1,
+                  colour = f1_rule_line_colour
+                )
+              }
+              g
+            }
+            vx_ceres <- if (exists("f1_vline_x")) f1_vline_x else NA_real_
+            p_bcl2_ceres <- .mk_bcl2_ceres_wide(ceres_f1_df, vline_x = vx_ceres, labels_fun = f1_bcl2_ceres_labels_fun)
+            bcl2_ceres_plot_df <- ceres_f1_df
+          }
+        }
+      }
+      if (is.null(p_bcl2_ceres)) {
+        key_l <- c("SCLC", "ExPulm-SCNEC", "AML (control)")
+        u_lg <- unique(as.character(crispr_bcl2_f1$lineage_group))
+        prio_lg <- c(key_l, tnbc_lymph_ceres)
+        ord_lg <- c(intersect(prio_lg, u_lg), setdiff(u_lg, prio_lg))
+        crispr_bcl2_f1 <- crispr_bcl2_f1 %>%
+          mutate(lineage_group = factor(as.character(lineage_group), levels = ord_lg))
+        crispr_bcl2_f1 <- dplyr::filter(crispr_bcl2_f1, is.finite(.data$dependency))
+        if (nrow(crispr_bcl2_f1) >= 2L) {
+          lbl_bcl2 <- crispr_bcl2_f1 %>% group_by(lineage_group) %>% summarise(n = n(), .groups = "drop")
+          lab_bcl2_ceres <- setNames(paste0(gsub(" \\(control\\)", "", as.character(lbl_bcl2$lineage_group)), " N=", lbl_bcl2$n), as.character(lbl_bcl2$lineage_group))
+          p_bcl2_ceres <- ggplot(crispr_bcl2_f1, aes(x = lineage_group, y = dependency, fill = lineage_group)) +
+            geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+            geom_hline(yintercept = 0, linetype = 2) +
+            geom_point(aes(color = is_nepc), position = position_jitter(width = 0.12, height = 0), alpha = 0.85, size = 2.5) +
+            scale_color_manual(values = c("TRUE" = "#E41A1C", "FALSE" = "gray45"), guide = "none") +
+            scale_x_discrete(labels = lab_bcl2_ceres) +
+            labs(x = "Lineage", y = "BCL2 CERES") +
+            theme_minimal() + .f1_fig12_axis_theme(45) + theme(legend.position = "none")
+          vx_fb <- if (exists("f1_vline_x")) f1_vline_x else NA_real_
+          if (!is.na(vx_fb) && exists("bcl2_plot_df") && nrow(bcl2_plot_df) > 0L &&
+                length(ord_lg) == length(levels(bcl2_plot_df$lab))) {
+            p_bcl2_ceres <- p_bcl2_ceres + ggplot2::geom_vline(
+              xintercept = vx_fb,
+              linetype = "dashed",
+              linewidth = f1_rule_line_linewidth,
+              alpha = 1,
+              colour = f1_rule_line_colour
+            )
+          }
+          bcl2_ceres_plot_df <- dplyr::transmute(
+            crispr_bcl2_f1,
+            lab = as.character(.data$lineage_group),
+            subtype = as.character(.data$lineage_group),
+            dependency = .data$dependency
+          )
+        }
+      }
+    }
+  }
+}
+.fig12_signif_brackets_wide <- function(p, y_num, ni_p, two_p, vline_x, lv_chr, aml_subtype = "AML (control)", plot_df, ylim = NULL) {
+  if (is.null(p)) return(p)
+  if (!is.null(ylim) && length(ylim) == 2L && all(is.finite(ylim))) {
+    ymin <- ylim[[1L]]
+    ymax <- ylim[[2L]]
+  } else {
+    ymax <- suppressWarnings(max(y_num, na.rm = TRUE))
+    ymin <- suppressWarnings(min(y_num, na.rm = TRUE))
+  }
+  if (!is.finite(ymax) || !is.finite(ymin)) return(p)
+  # Anchor brackets to observed y (box tops), not full ylim span — avoids "low" brackets when ylim has headroom (e.g. BCL2 expression cap).
+  y_num_f <- suppressWarnings(as.numeric(y_num))
+  y_num_f <- y_num_f[is.finite(y_num_f)]
+  y_dat_max <- if (length(y_num_f)) max(y_num_f) else ymax
+  y_dat_min <- if (length(y_num_f)) min(y_num_f) else ymin
+  y_dat_max <- min(y_dat_max, ymax)
+  y_dat_min <- max(y_dat_min, ymin)
+  d_win <- ymax - ymin
+  d_dat <- y_dat_max - y_dat_min
+  if (!is.finite(d_dat) || d_dat < 1e-6 * d_win) d_dat <- 0.06 * d_win
+  tick_h <- max(0.014 * d_win, 0.03 * d_dat)
+  lab_dy <- max(0.02 * d_win, 0.028 * d_dat)
+  # NI tier just above data; stem-like tier stacked above NI (less total height than two independent offsets from ymax).
+  y_hi <- y_dat_max + 0.08 * d_dat + 0.025 * d_win
+  gap_tiers <- max(0.035 * d_win, 0.05 * d_dat, tick_h + lab_dy * 0.35)
+  y_top <- y_hi + lab_dy + gap_tiers + 0.02 * d_dat
+  fmt_p <- function(pv) {
+    if (length(pv) != 1L || is.na(pv)) return("—")
+    if (pv < 0.001) return("<0.001")
+    format.pval(pv, digits = 2)
+  }
+  sig_sfx <- function(pv) {
+    if (length(pv) != 1L || is.na(pv)) return("")
+    if (pv < 0.01) return("**")
+    if (pv < 0.05) return("*")
+    ""
+  }
+  lv <- lv_chr
+  if (length(lv) < 1L) return(p)
+  aml_lab_chr <- dplyr::filter(plot_df, as.character(.data$subtype) == aml_subtype) %>%
+    dplyr::distinct(.data$lab) %>%
+    dplyr::pull(.data$lab) %>%
+    as.character()
+  aml_lab <- intersect(aml_lab_chr, lv)
+  if (length(aml_lab) < 1L) {
+    aml_guess <- lv[vapply(lv, function(lb) grepl("^AML\\b", lb), logical(1L))]
+    aml_lab <- head(aml_guess, 1L)
+  }
+  if (length(aml_lab) < 1L) return(p)
+  aml_lab <- aml_lab[[1]]
+  aml_i <- match(aml_lab, lv)
+  if (is.na(aml_i)) return(p)
+  # NI-vs-AML bracket should stop strictly left of the red divider (do not include first box to the right, e.g., NSCLC).
+  left_i <- if (!is.na(vline_x)) seq_len(max(0L, floor(vline_x))) else integer(0)
+  left_i <- setdiff(left_i, aml_i)
+  left_i <- left_i[is.finite(left_i) & left_i >= 1L]
+  # Top margin: two p-value tiers + large annotate() mm need generous headroom (patchwork row theme must match).
+  two_tier <- !is.na(two_p) && !is.na(vline_x) && length(lv_chr) >= 1L
+  bracket_plot_margin_top <- as.numeric(if (isTRUE(two_tier)) {
+    get0(".f1_fig12_bracket_margin_top_2tier", ifnotfound = 120L, inherits = TRUE)
+  } else {
+    get0(".f1_fig12_bracket_margin_top_1tier", ifnotfound = 58L, inherits = TRUE)
+  })
+  # Right margin: keep consistent across all four Fig.1 patchwork panels so column panels align (annotate p-values sit in the right gutter).
+  bracket_plot_margin_r <- 36
+  if (!is.null(ylim) && length(ylim) == 2L && all(is.finite(ylim))) {
+    p2 <- p + ggplot2::coord_cartesian(ylim = ylim, clip = "off") +
+      ggplot2::theme(plot.margin = ggplot2::margin(t = bracket_plot_margin_top, r = bracket_plot_margin_r, b = 6, l = 6))
+  } else {
+    p2 <- p + ggplot2::coord_cartesian(clip = "off") +
+      ggplot2::theme(plot.margin = ggplot2::margin(t = bracket_plot_margin_top, r = bracket_plot_margin_r, b = 6, l = 6))
+  }
+  add_bracket_segments <- function(p_in, x0, x1, y0, y1) {
+    p_in +
+      ggplot2::annotate(
+        "segment",
+        x = x0, xend = x1, y = y0, yend = y0,
+        linewidth = 0.35,
+        color = "gray20"
+      ) +
+      ggplot2::annotate(
+        "segment",
+        x = x0, xend = x0, y = y0, yend = y1,
+        linewidth = 0.35,
+        color = "gray20"
+      ) +
+      ggplot2::annotate(
+        "segment",
+        x = x1, xend = x1, y = y0, yend = y1,
+        linewidth = 0.35,
+        color = "gray20"
+      )
+  }
+  xc <- function(i) mean(c(i - 0.25, i + 0.25))
+  br_mm <- if (exists(".f1_fig12_bracket_label_mm", inherits = TRUE)) get(".f1_fig12_bracket_label_mm", inherits = TRUE) else 10.5
+  if (!is.na(ni_p) && length(left_i) >= 1L) {
+    xmin_plastic <- min(left_i)
+    p2 <- add_bracket_segments(p2, xmin_plastic, max(left_i), y_hi, y_hi - tick_h)
+    p2 <- p2 +
+      ggplot2::annotate(
+        "text",
+        x = mean(c(xc(xmin_plastic), xc(max(left_i)))),
+        y = y_hi + lab_dy,
+        label = paste0("NI vs AML: ", fmt_p(ni_p), sig_sfx(ni_p)),
+        size = br_mm
+      )
+  }
+  if (!is.na(two_p) && !is.na(vline_x)) {
+    # Span all lineage boxes (leftmost through rightmost) so the bracket visually covers the full comparator axis.
+    xr <- seq_len(length(lv))
+    if (length(xr) >= 1L) {
+      p2 <- add_bracket_segments(p2, min(xr), max(xr), y_top, y_top - tick_h)
+      p2 <- p2 +
+        ggplot2::annotate(
+          "text",
+          x = mean(c(xc(min(xr)), xc(max(xr)))),
+          y = y_top + lab_dy,
+          label = paste0("Stem-like vs other: ", fmt_p(two_p), sig_sfx(two_p)),
+          size = br_mm
+        )
+    }
+  }
+  p2
+}
+# Wide BCL2 expression: bracket p-values (requires fig12_* from `similarity-panels`, which runs before this chunk).
+if (!is.null(p_bcl2) && exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && nrow(bcl2_plot_df) > 0L && "BCL2" %in% names(bcl2_plot_df)) {
+  ni_p_e <- if (exists("fig12_bcl2_ni_p")) fig12_bcl2_ni_p else NA_real_
+  two_p_e <- if (exists("fig12_bcl2_two_p")) fig12_bcl2_two_p else NA_real_
+  vx_e <- if (exists("f1_vline_x")) f1_vline_x else NA_real_
+  lv_e <- as.character(levels(bcl2_plot_df$lab))
+  p_bcl2 <- .fig12_signif_brackets_wide(
+    p_bcl2,
+    y_num = bcl2_plot_df$BCL2,
+    ni_p = ni_p_e,
+    two_p = two_p_e,
+    vline_x = vx_e,
+    lv_chr = lv_e,
+    plot_df = bcl2_plot_df,
+    ylim = if (exists("f1_bcl2_expr_ylim", inherits = TRUE)) f1_bcl2_expr_ylim else NULL
+  )
+  fig_path_b2 <- if (requireNamespace("here", quietly = TRUE)) here::here("figures", "BCL2_rationale_Fig1.png") else "figures/BCL2_rationale_Fig1.png"
+  rmd_fig_b2 <- if (requireNamespace("here", quietly = TRUE)) here::here("rmarkdown", "figures") else file.path("rmarkdown", "figures")
+  if (dir.exists(dirname(fig_path_b2))) {
+    tryCatch(ggsave(fig_path_b2, p_bcl2, width = 12, height = 6.5, dpi = 150), error = function(e) NULL)
+    tryCatch(ggsave(sub("\\.png$", ".pdf", fig_path_b2), p_bcl2, width = 12, height = 6.5, device = "pdf"), error = function(e) NULL)
+  }
+  if (dir.exists(rmd_fig_b2)) {
+    tryCatch(ggsave(file.path(rmd_fig_b2, "BCL2_rationale_Fig1.png"), p_bcl2, width = 12, height = 6.5, dpi = 150), error = function(e) NULL)
+    tryCatch(ggsave(file.path(rmd_fig_b2, "BCL2_rationale_Fig1.pdf"), p_bcl2, width = 12, height = 6.5, device = "pdf"), error = function(e) NULL)
+  }
+  if (exists(".save_expanded_pdf") && ((exists("dnmti_bcl2_expanded_vector_pdf") && isTRUE(dnmti_bcl2_expanded_vector_pdf)) || (exists("hma_bcl2_master_vector_pdf") && isTRUE(hma_bcl2_master_vector_pdf)))) {
+    .save_expanded_pdf(p_bcl2, "03_BCL2_rationale_Fig1_wide", 12, 6.5)
+  }
+}
+if (exists("p_bcl2_ceres") && !is.null(p_bcl2_ceres) && exists("bcl2_ceres_plot_df") && is.data.frame(bcl2_ceres_plot_df) && nrow(bcl2_ceres_plot_df) > 0L) {
+  ni_p_c <- if (exists("fig12_bcl2_ceres_ni_p")) fig12_bcl2_ceres_ni_p else NA_real_
+  two_p_c <- if (exists("fig12_bcl2_ceres_two_p")) fig12_bcl2_ceres_two_p else NA_real_
+  vx_c2 <- if (exists("f1_vline_x")) f1_vline_x else NA_real_
+  lv_c <- as.character(levels(bcl2_plot_df$lab))
+  p_bcl2_ceres <- .fig12_signif_brackets_wide(
+    p_bcl2_ceres,
+    y_num = bcl2_ceres_plot_df$dependency,
+    ni_p = ni_p_c,
+    two_p = two_p_c,
+    vline_x = vx_c2,
+    lv_chr = lv_c,
+    plot_df = bcl2_ceres_plot_df,
+    ylim = if (exists("f1_bcl2_ceres_ylim", inherits = TRUE)) f1_bcl2_ceres_ylim else NULL
+  )
+}
+if (exists("p_dnmt1_ceres") && !is.null(p_dnmt1_ceres) && exists("dnmt1_ceres_plot_df") && is.data.frame(dnmt1_ceres_plot_df) && nrow(dnmt1_ceres_plot_df) > 0L &&
+      exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && "lab" %in% names(bcl2_plot_df)) {
+  ni_p_dn <- if (exists("fig12_dnmt1_ceres_ni_p")) fig12_dnmt1_ceres_ni_p else NA_real_
+  two_p_dn <- if (exists("fig12_dnmt1_ceres_two_p")) fig12_dnmt1_ceres_two_p else NA_real_
+  vx_dn <- if (exists("f1_vline_x")) f1_vline_x else NA_real_
+  lv_dn <- as.character(levels(bcl2_plot_df$lab))
+  p_dnmt1_ceres <- .fig12_signif_brackets_wide(
+    p_dnmt1_ceres,
+    y_num = dnmt1_ceres_plot_df$dependency,
+    ni_p = ni_p_dn,
+    two_p = two_p_dn,
+    vline_x = vx_dn,
+    lv_chr = lv_dn,
+    plot_df = dnmt1_ceres_plot_df,
+    ylim = if (exists("f1_dnmt1_ceres_ylim", inherits = TRUE)) f1_dnmt1_ceres_ylim else NULL
+  )
+}
+# BCL2 wide panels are stacked with DNMT1 in chunk `fig-bcl2-dnmt1-lineage-combined` (single figure for the child report).
+```
+
+### DNMT1 panels (stacked with BCL2 in one figure below)
+
+```{r dnmt1-distributions, cache = FALSE, fig.show = "hide"}
+# DNMT1 wide panels (same cohort and x-axis as BCL2); rendered with BCL2 in `fig-bcl2-dnmt1-lineage-combined`.
+cohort_ext_hem_f2 <- exists("cohort_extended_hem") && isTRUE(cohort_extended_hem)
+dnmt1_fig2_ok <- exists("expr_target") && (
+  (exists("expr_meta_dnmt1") && is.data.frame(expr_meta_dnmt1) && nrow(expr_meta_dnmt1) > 0L &&
+    sum(!is.na(expr_meta_dnmt1$DNMT1)) >= 2L) ||
+  (exists("expr_meta") && is.data.frame(expr_meta) && "DNMT1" %in% names(expr_meta) && sum(!is.na(expr_meta$DNMT1)) >= 2L)
+)
+p_dnmt1 <- NULL
+if (dnmt1_fig2_ok) {
+  # Use full expression matrix for DNMT1 when available so DNMT1 expression keeps the same lymphoma strata as BCL2 in Figure 1
+  # (expr_meta_dnmt1 can be a narrowed subset in some workspaces).
+  dnmt1_expr_src <- if (exists("expr_meta") && is.data.frame(expr_meta) && "DNMT1" %in% names(expr_meta)) {
+    expr_meta
+  } else {
+    expr_meta_dnmt1
+  }
+  dnmt1_with_lineage <- dnmt1_expr_src %>%
+    left_join(expr_target %>% select(depmap_id, lineage_group), by = "depmap_id") %>%
+    filter(!is.na(lineage_group), !is.na(DNMT1))
+  dnmt1_with_lineage <- dnmt1_with_lineage %>%
+    mutate(
+      subtype = as.character(lineage_group),
+      tissue = dplyr::case_when(
+        lineage_lower == "lung" ~ "Lung",
+        grepl("ExPulm|NEPC|NE/small", subtype) ~ "ExPulm-SCNEC",
+        as.character(lineage_group) == "AML (control)" ~ "AML",
+        grepl("Lymphoma", as.character(.data$lineage_group), fixed = TRUE) |
+          as.character(.data$lineage_group) == "DLBCL/MCL/CLL" ~ "Lymphoma",
+        grepl("Neuroblastoma", subtype, fixed = TRUE) ~ "Neuroblastoma",
+        grepl("TNBC", subtype, fixed = TRUE) ~ "TNBC",
+        grepl("Breast", subtype) ~ "Breast",
+        grepl("prostate", subtype, ignore.case = TRUE) ~ "Prostate",
+        grepl("Urothelial", subtype, fixed = TRUE) ~ "Urothelial",
+        grepl("Renal cell", subtype, fixed = TRUE) ~ "Renal cell",
+        grepl("Colorectal", subtype, fixed = TRUE) ~ "Colorectal",
+        grepl("Melanoma", subtype, fixed = TRUE) ~ "Melanoma",
+        grepl("Sarcoma", subtype, fixed = TRUE) ~ "Sarcoma",
+        TRUE ~ NA_character_
+      )
+    ) %>% filter(!is.na(tissue))
+  # Lung: use expr_target so SCLC, Localized NSCLC, Metastatic NSCLC (Localized/Metastatic adjacent in plot)
+  dnmt1_lung <- dnmt1_expr_src %>% filter(lineage_lower == "lung", !is.na(DNMT1)) %>%
+    inner_join(expr_target %>% filter(lineage_group %in% c("SCLC", "Localized NSCLC", "Metastatic NSCLC")) %>% select(depmap_id, lineage_group), by = "depmap_id") %>%
+    mutate(subtype = as.character(lineage_group), tissue = "Lung")
+  dnmt1_plot_df_f2 <- dnmt1_with_lineage %>% filter(tissue != "Lung") %>% bind_rows(dnmt1_lung) %>%
+    distinct(depmap_id, tissue, subtype, .keep_all = TRUE)  # one point per cell line
+  tissue_order_f2 <- if (exists("f1_tissue_axis_order")) {
+    f1_tissue_axis_order
+  } else {
+    c(
+      "Lung", "ExPulm-SCNEC", "AML", "Neuroblastoma", "Breast",
+      if (cohort_ext_hem_f2) "TNBC",
+      "Lymphoma",
+      "Prostate", "Urothelial", "Renal cell", "Colorectal", "Melanoma", "Sarcoma"
+    )
+  }
+  dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>%
+    mutate(
+      tissue = factor(as.character(tissue), levels = intersect(tissue_order_f2, unique(as.character(tissue)))),
+      subtype = factor(
+        dplyr::if_else(
+          as.character(.data$subtype) %in% c("Localized Neuroblastoma", "Metastatic Neuroblastoma"),
+          "Neuroblastoma",
+          as.character(.data$subtype)
+        ),
+        levels = unique(c(as.character(lineage_levels), "Neuroblastoma"))
+      )
+    )
+  dnmt1_n_f2 <- dnmt1_plot_df_f2 %>% group_by(tissue, subtype) %>% summarise(n = n(), .groups = "drop")
+  hma_ext_f2 <- exists("hma_bcl2_tnbc_lymph_master") && isTRUE(hma_bcl2_tnbc_lymph_master)
+  plastic_anchors_f2 <- if (exists("lineage_plastic_ref_canonical")) {
+    as.character(lineage_plastic_ref_canonical)
+  } else {
+    c("SCLC", "ExPulm-SCNEC", "AML (control)")
+  }
+  if (hma_ext_f2) {
+    nb_f2 <- intersect(
+      c("Neuroblastoma", "Unspecified Neuroblastoma"),
+      if (exists("lineage_levels")) as.character(lineage_levels) else character(0)
+    )
+    sarcoma_f2 <- intersect(
+      c("Localized Sarcoma", "Metastatic Sarcoma", "Unspecified Sarcoma"),
+      if (exists("lineage_levels")) as.character(lineage_levels) else character(0)
+    )
+    plastic_anchors_f2 <- unique(c(
+      plastic_anchors_f2,
+      "DLBCL/MCL/CLL",
+      nb_f2,
+      sarcoma_f2
+    ))
+    dnmt1_n_f2 <- dnmt1_n_f2 %>%
+      dplyr::filter(.data$n > 5L | as.character(.data$subtype) %in% plastic_anchors_f2) %>%
+      dplyr::filter(
+        !grepl("Unspecified", as.character(.data$subtype), fixed = TRUE) |
+          grepl("Unspecified Neuroblastoma", as.character(.data$subtype), fixed = TRUE) |
+          grepl("Unspecified Sarcoma", as.character(.data$subtype), fixed = TRUE)
+      )
+  }
+  # Match BCL2 wide Fig. 1 anchors (incl. optional high-N metastatic promote from bcl2-distributions)
+  if (exists("plastic_anchors") && length(plastic_anchors) > 0L) {
+    plastic_anchors_f2 <- unique(c(plastic_anchors_f2, as.character(plastic_anchors)))
+  }
+  dnmt1_keep_f2 <- dnmt1_n_f2
+  dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>% semi_join(dnmt1_keep_f2, by = c("tissue", "subtype"))
+  st_dnf <- as.character(dnmt1_plot_df_f2$subtype)
+  keep_loc_dnf <- .f1_keep_localized_subtype_chr(st_dnf)
+  drop_loc_dnf <- grepl("^Localized\\b", st_dnf) & !keep_loc_dnf
+  dnmt1_plot_df_f2 <- dplyr::filter(dnmt1_plot_df_f2, !drop_loc_dnf)
+  st_kf2 <- as.character(dnmt1_keep_f2$subtype)
+  keep_loc_kf2 <- .f1_keep_localized_subtype_chr(st_kf2)
+  drop_loc_kf2 <- grepl("^Localized\\b", st_kf2) & !keep_loc_kf2
+  dnmt1_keep_f2 <- dplyr::filter(dnmt1_keep_f2, !drop_loc_kf2)
+  dnmt1_plot_df_f2 <- dplyr::filter(dnmt1_plot_df_f2, !.f1_exclude_lineage_from_fig12_plots(as.character(.data$subtype)))
+  dnmt1_keep_f2 <- dplyr::filter(dnmt1_keep_f2, !.f1_exclude_lineage_from_fig12_plots(as.character(.data$subtype)))
+  # #region agent log
+  tryCatch({
+    keep_counts2 <- dnmt1_plot_df_f2 %>%
+      dplyr::mutate(subtype_chr = as.character(.data$subtype)) %>%
+      dplyr::filter(grepl("TNBC|Melanoma|Sarcoma", .data$subtype_chr, ignore.case = TRUE)) %>%
+      dplyr::count(.data$subtype_chr, name = "n_expr")
+    .agent_dbg_ndjson(
+      runId = "pre-fix-debug2",
+      hypothesisId = "H3",
+      location = "03_Rmd:dnmt1_keep_focus_subtypes",
+      message = "DNMT1 kept lineage focus counts after figure filters",
+      data = list(
+        n_rows = nrow(dnmt1_plot_df_f2),
+        focus_subtypes = as.character(keep_counts2$subtype_chr),
+        focus_counts = as.integer(keep_counts2$n_expr)
+      )
+    )
+  }, error = function(e) invisible(NULL))
+  # #endregion
+  dnmt1_n_lab_f2 <- dnmt1_plot_df_f2 %>% group_by(tissue, subtype) %>% summarise(n = n(), .groups = "drop") %>% mutate(lab = paste0(gsub(" \\(control\\)", "", as.character(subtype)), " N=", n))
+  dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>% left_join(dnmt1_n_lab_f2 %>% select(tissue, subtype, lab), by = c("tissue", "subtype"))
+  dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>%
+    dplyr::left_join(expr_target %>% dplyr::select(.data$depmap_id, dplyr::any_of("lineage_expulm_detail")), by = "depmap_id") %>%
+    dplyr::mutate(is_nepc = (.data$subtype == "ExPulm-SCNEC" & dplyr::coalesce(.data$lineage_expulm_detail, "") == "NEPC")) %>%
+    dplyr::mutate(
+      lab = dplyr::if_else(
+        as.character(.data$subtype) == "ExPulm-SCNEC" & .data$is_nepc,
+        sub("ExPulm-SCNEC", "NEPC", as.character(.data$lab), fixed = TRUE),
+        as.character(.data$lab)
+      )
+    )
+  # Order x-axis so Localized X and Metastatic X are adjacent within each tissue
+  lab_levels_f2 <- dnmt1_plot_df_f2 %>% distinct(tissue, subtype, lab) %>%
+    arrange(tissue, match(as.character(subtype), lineage_levels)) %>% pull(lab)
+  dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>% mutate(lab = factor(lab, levels = lab_levels_f2))
+  if (nrow(dnmt1_plot_df_f2) >= 2) {
+    if (hma_ext_f2 && length(unique(as.character(dnmt1_plot_df_f2$lab))) > 10L) {
+      st2 <- as.character(dnmt1_plot_df_f2$subtype)
+      tt2 <- as.character(dnmt1_plot_df_f2$tissue)
+      pooled_axis_preview2 <- dplyr::case_when(
+        st2 %in% plastic_anchors_f2 ~ st2,
+        grepl("Neuroblastoma", st2, fixed = TRUE) & !grepl("^Unspecified", st2, fixed = TRUE) ~ "Neuroblastoma",
+        grepl("^Localized\\b", st2) ~ paste0(tt2, " — localized"),
+        grepl("^Metastatic\\b", st2) ~ paste0(tt2, " — metastatic"),
+        TRUE ~ st2
+      )
+      # #region agent log
+      tryCatch({
+        .agent_dbg_ndjson(
+          runId = "pre-fix-debug2",
+          hypothesisId = "H1",
+          location = "03_Rmd:dnmt1_pooling_preview",
+          message = "DNMT1 pooled-axis preview before filtering",
+          data = list(
+            n_rows = nrow(dnmt1_plot_df_f2),
+            n_na_pooled = sum(is.na(pooled_axis_preview2)),
+            n_blank_pooled = sum(!is.na(pooled_axis_preview2) & !nzchar(trimws(as.character(pooled_axis_preview2)))),
+            pooled_head = utils::head(unique(as.character(pooled_axis_preview2)), 10L)
+          )
+        )
+      }, error = function(e) invisible(NULL))
+      # #endregion
+      dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>%
+        dplyr::mutate(
+          pooled_axis = dplyr::case_when(
+            st2 %in% plastic_anchors_f2 ~ st2,
+            grepl("Neuroblastoma", st2, fixed = TRUE) & !grepl("^Unspecified", st2, fixed = TRUE) ~ "Neuroblastoma",
+            grepl("^Localized\\b", st2) ~ paste0(tt2, " — localized"),
+            grepl("^Metastatic\\b", st2) ~ paste0(tt2, " — metastatic"),
+            TRUE ~ st2
+          )
+        ) %>%
+        dplyr::filter(!is.na(.data$pooled_axis), nzchar(trimws(as.character(.data$pooled_axis))))
+      n_pool2 <- dnmt1_plot_df_f2 %>% dplyr::count(.data$pooled_axis, name = "nn")
+      dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>%
+        dplyr::left_join(n_pool2, by = "pooled_axis") %>%
+        dplyr::mutate(lab = paste0(gsub(" \\(control\\)", "", as.character(.data$pooled_axis)), " N=", .data$nn))
+      ord2 <- dnmt1_plot_df_f2 %>%
+        dplyr::distinct(.data$tissue, .data$pooled_axis, .data$lab) %>%
+        dplyr::arrange(.data$tissue, .data$pooled_axis) %>%
+        dplyr::pull(.data$lab)
+      dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>%
+        dplyr::mutate(lab = factor(.data$lab, levels = unique(ord2))) %>%
+        dplyr::select(-dplyr::any_of(c("pooled_axis", "nn")))
+    }
+    if (hma_ext_f2 && nrow(dnmt1_plot_df_f2) > 0L) {
+      dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>%
+        dplyr::filter(
+          !grepl("Unspecified", as.character(.data$lab), fixed = TRUE) |
+            grepl("Unspecified Neuroblastoma", as.character(.data$lab), fixed = TRUE) |
+            grepl("Unspecified Sarcoma", as.character(.data$lab), fixed = TRUE)
+        )
+    }
+    dnmt1_plot_df_f2 <- .f1_sanitize_lab_rows(dnmt1_plot_df_f2)
+    # Keep TNBC metastatic stratum (mTNBC) for DNMT1 to match BCL2 wide-axis lineage boxes.
+    # Match Figure 1 wide x-axis (BCL2 expression) lab order when available
+    if (exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && "lab" %in% names(bcl2_plot_df)) {
+      lev_ref_dn <- levels(bcl2_plot_df$lab)
+      if (length(lev_ref_dn) > 0L) {
+        # Strictly follow BCL2 wide-axis levels for DNMT1 expression to keep left-column boxes/colors aligned.
+        dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>%
+          dplyr::filter(as.character(.data$lab) %in% lev_ref_dn)
+        lev_full_dn <- lev_ref_dn
+        dnmt1_plot_df_f2 <- dnmt1_plot_df_f2 %>%
+          dplyr::mutate(lab = factor(as.character(.data$lab), levels = lev_full_dn))
+      }
+    }
+    # Bottom-row DNMT1 expression: cap upper y (log2 TPM+1) near ~9 to zoom contrasts.
+    f1_dnmt1_expr_y_hi_cap <- 9
+    f1_dnmt1_expr_ylim <- local({
+      yv <- dnmt1_plot_df_f2$DNMT1
+      yv <- yv[is.finite(yv)]
+      if (length(yv) < 1L) {
+        return(NULL)
+      }
+      yr <- range(yv)
+      d <- diff(yr)
+      if (!is.finite(d) || d < 1e-6) d <- 0.45
+      pad <- max(0.12, 0.065 * d)
+      y_lo <- max(2.5, yr[1] - pad)
+      y_hi <- min(f1_dnmt1_expr_y_hi_cap, yr[2] + pad)
+      yn <- dnmt1_plot_df_f2$DNMT1[dnmt1_plot_df_f2$is_nepc %in% TRUE]
+      yn <- yn[is.finite(yn)]
+      if (length(yn) > 0L) {
+        rng_n <- if (length(yn) >= 2L) diff(range(yn)) else 0
+        pad_n <- max(0.12, 0.12 * max(rng_n, max(abs(yn), na.rm = TRUE) * 0.06, 0.28))
+        y_lo <- min(y_lo, min(yn) - pad_n)
+        y_hi <- max(y_hi, max(yn) + pad_n)
+        y_lo <- max(1.5, y_lo)
+        y_hi <- min(12, y_hi)
+      }
+      if (!is.finite(y_hi) || y_hi <= y_lo) y_hi <- y_lo + 0.55
+      c(y_lo, y_hi)
+    })
+    .mk_dnmt1_expr_plot <- function(dat, vline_x = NA_real_) {
+      g <- ggplot(dat, aes(x = lab, y = DNMT1, fill = subtype)) +
+        geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+        ggplot2::geom_point(
+          data = dplyr::filter(dat, .data$is_nepc %in% TRUE),
+          ggplot2::aes(x = lab, y = DNMT1),
+          inherit.aes = FALSE,
+          color = "#E41A1C",
+          position = ggplot2::position_jitter(width = 0.12, height = 0),
+          alpha = 0.92,
+          size = 2.5
+        ) +
+        ggplot2::scale_x_discrete(drop = FALSE, labels = .f1_axis_short_met_label) +
+        labs(x = "Lineage", y = "DNMT1 expression (log2(TPM+1))") +
+        theme_minimal() +
+        .f1_fig12_axis_theme(45) +
+        theme(legend.position = "none")
+      if (!is.na(vline_x)) {
+        g <- g + ggplot2::geom_vline(
+          xintercept = vline_x,
+          linetype = "dashed",
+          linewidth = f1_rule_line_linewidth,
+          alpha = 1,
+          colour = f1_rule_line_colour
+        )
+      }
+      g
+    }
+    vx_dnmt1_expr <- if (exists("f1_vline_x")) f1_vline_x else NA_real_
+    p_dnmt1 <- .mk_dnmt1_expr_plot(dnmt1_plot_df_f2, vline_x = vx_dnmt1_expr)
+    if (exists(".fig12_signif_brackets_wide") && exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && nrow(dnmt1_plot_df_f2) > 0L) {
+      ni_p_d1 <- if (exists("fig12_dnmt1_ni_p")) fig12_dnmt1_ni_p else NA_real_
+      two_p_d1 <- if (exists("fig12_dnmt1_two_p")) fig12_dnmt1_two_p else NA_real_
+      lv_d1 <- as.character(levels(bcl2_plot_df$lab))
+      p_dnmt1 <- .fig12_signif_brackets_wide(
+        p_dnmt1,
+        y_num = dnmt1_plot_df_f2$DNMT1,
+        ni_p = ni_p_d1,
+        two_p = two_p_d1,
+        vline_x = vx_dnmt1_expr,
+        lv_chr = lv_d1,
+        plot_df = dnmt1_plot_df_f2,
+        ylim = if (exists("f1_dnmt1_expr_ylim", inherits = TRUE)) f1_dnmt1_expr_ylim else NULL
+      )
+    }
+    # DNMT1 expression + CERES are stacked with BCL2 in chunk `fig-bcl2-dnmt1-lineage-combined`.
+  }
+}
+```
+
+```{r fig-bcl2-dnmt1-lineage-combined, cache = FALSE, fig.width = 18, fig.height = 26.5, fig.cap = "Figure 1. BCL2 and DNMT1 expression and genetic dependency across lineages (one composite figure). RNA-seq and CRISPR dependency are from DepMap. Expression is log2(TPM + 1); dependency is CERES (more negative = stronger apparent dependency on the named gene). Layout: 2×2 grid on the same wide lineage x-axis and strata when DNMT1 data are available—top left BCL2 expression, top right BCL2 CERES, bottom left DNMT1 expression, bottom right DNMT1 CERES. Expression panels use the full cohort per `lab`/`subtype`; **wide CERES** panels plot only cell lines with non-missing CERES (same x-axis order and fill colors as BCL2 expression; lines without dependency scores are omitted from the CERES panels). The **N** in each CERES tick label counts plotted dependency scores in that stratum (expression cohort **N** may differ); NEPC-only strata with no plotted CERES have a blank tick label. Lineage tick labels are drawn on **both** bottom-row panels; the top row omits x tick labels. Metastatic strata on the x-axis use an **m** prefix (e.g. mBreast for metastatic breast). Bracketed p-values on the BCL2 panels: pooled non-AML left-of-line arm vs AML (1-sided Wilcoxon; expression stochastic ≥ AML; CERES combined non-AML ≥ AML) and stem-like vs non-stem-like to the right of the dashed rule (expression: stem-like > other). DNMT1 panels use the same comparator logic as in the prior two-figure layout (expression stochastic ≤ AML vs pooled non-AML when that arm applies; CERES combined non-AML ≥ AML; stem-like vs non-stem-like two-group Wilcoxon). On **expression** panels, **points** are drawn for **NEPC** lines only (red); other lines are not overlaid as points. NSCLC strata are non-stem-like comparators for two-group p-values. Abbreviations: AML, acute myeloid leukemia; BCL2, B-cell lymphoma 2; CERES, CRISPR Essentiality Ranked by Expression of effect and Specificity; DepMap, Cancer Dependency Map; DNMT1, DNA methyltransferase 1; ExPulm-SCNEC, extrapulmonary small cell neuroendocrine carcinoma; NEPC, neuroendocrine prostate cancer; NSCLC, non-small cell lung cancer; SCLC, small cell lung cancer; TPM, transcripts per million."}
+if (!exists("f1_rule_line_colour")) f1_rule_line_colour <- "#FF2222"
+if (!exists("f1_rule_line_linewidth")) f1_rule_line_linewidth <- 1.4
+fig_dir_lineage <- if (requireNamespace("here", quietly = TRUE)) here::here("figures") else "figures"
+# Canonical wide lineage order and subtype fill = BCL2 expression panel (all four grid panels match these)
+lev_f1_grid <- if (exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && is.factor(bcl2_plot_df$lab)) {
+  levels(bcl2_plot_df$lab)
+} else {
+  character(0)
+}
+f1_fill_subtype_levels <- if (exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && is.factor(bcl2_plot_df$subtype)) {
+  levels(bcl2_plot_df$subtype)
+} else if (exists("lineage_levels")) {
+  as.character(lineage_levels)
+} else {
+  character(0)
+}
+# Per-level colors: golden-ratio hue steps so *consecutive* subtype factor levels are visually far apart
+# (sequential hues cluster red/orange/yellow; this mixes cool blues, magentas, greens, etc. along the axis).
+.f1_distinct_subtype_palette <- function(level_chr) {
+  k <- length(level_chr)
+  if (k < 1L) {
+    return(character(0))
+  }
+  if (k == 1L) {
+    return(stats::setNames("#5B9BD5", level_chr))
+  }
+  golden <- 0.6180339887498948482045868343656
+  ii <- seq_len(k) - 1L
+  h <- (0.11 + ii * golden) %% 1
+  s <- 0.70 + 0.24 * ((ii + 1L) %% 3L) / 2
+  v <- 0.84 + 0.14 * ((ii + 2L) %% 4L) / 3
+  cols <- grDevices::hsv(h = h, s = pmin(0.94, s), v = pmin(0.98, v))
+  stats::setNames(cols, level_chr)
+}
+f1_fill_palette <- if (length(f1_fill_subtype_levels) > 0L) {
+  .f1_distinct_subtype_palette(f1_fill_subtype_levels)
+} else {
+  character(0)
+}
+.f1_wide_fill_scale <- if (length(f1_fill_palette) > 0L) {
+  ggplot2::scale_fill_manual(
+    values = f1_fill_palette,
+    limits = f1_fill_subtype_levels,
+    drop = FALSE,
+    na.value = "grey88"
+  )
+} else {
+  NULL
+}
+.f1_relevel_lab_subtype_df <- function(df) {
+  if (is.null(df) || !is.data.frame(df) || length(lev_f1_grid) < 1L) {
+    return(df)
+  }
+  if ("lab" %in% names(df)) {
+    df$lab <- factor(as.character(df$lab), levels = lev_f1_grid)
+  }
+  if ("subtype" %in% names(df) && length(f1_fill_subtype_levels) > 0L) {
+    df$subtype <- factor(as.character(df$subtype), levels = f1_fill_subtype_levels)
+  }
+  df
+}
+.f1_harmonize_plot_df_to_bcl2 <- function(df) {
+  if (is.null(df) || !is.data.frame(df) || !"depmap_id" %in% names(df) || is.null(bcl2_f1_id_map) || nrow(bcl2_f1_id_map) < 1L) {
+    return(df)
+  }
+  drop <- intersect(c("lab", "subtype", "is_nepc"), names(df))
+  base <- if (length(drop)) dplyr::select(df, -dplyr::all_of(drop)) else df
+  out <- dplyr::inner_join(base, bcl2_f1_id_map, by = "depmap_id")
+  .f1_relevel_lab_subtype_df(out)
+}
+.f1_patch_plot_data <- function(p, df) {
+  if (is.null(p) || is.null(df) || !nrow(df)) {
+    return(p)
+  }
+  tryCatch(ggplot2::`%+%`(p, df), error = function(e) p)
+}
+.theme_f1_hide_lineage_x <- ggplot2::theme(
+  axis.text.x = ggplot2::element_blank(),
+  axis.ticks.x = ggplot2::element_blank(),
+  axis.title.x = ggplot2::element_blank()
+)
+# Extra vertical gap in the 2×2 composite (t must be ≥ .f1_fig12_bracket_margin_top_2tier so labels are not clipped).
+.theme_f1_patchwork_top_row <- ggplot2::theme(
+  plot.margin = ggplot2::margin(
+    t = get0(".f1_fig12_bracket_margin_top_2tier", ifnotfound = 120L, inherits = TRUE),
+    r = 36,
+    b = 26,
+    l = 6
+  )
+)
+.theme_f1_patchwork_bottom_row <- ggplot2::theme(
+  plot.margin = ggplot2::margin(
+    t = get0(".f1_fig12_bracket_margin_top_2tier", ifnotfound = 120L, inherits = TRUE) + 8L,
+    r = 36,
+    b = 14,
+    l = 6
+  )
+)
+if (exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && nrow(bcl2_plot_df) > 0L && length(lev_f1_grid) > 0L) {
+  bcl2_plot_df <- .f1_relevel_lab_subtype_df(bcl2_plot_df)
+  if (exists("p_bcl2") && !is.null(p_bcl2)) {
+    p_bcl2 <- .f1_patch_plot_data(p_bcl2, bcl2_plot_df)
+  }
+}
+bcl2_f1_id_map <- if (exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && nrow(bcl2_plot_df) > 0L &&
+  all(c("depmap_id", "lab", "subtype", "is_nepc") %in% names(bcl2_plot_df))) {
+  bcl2_plot_df %>%
+    dplyr::distinct(.data$depmap_id, .keep_all = TRUE) %>%
+    dplyr::transmute(
+      .data$depmap_id,
+      lab = .data$lab,
+      subtype = factor(as.character(.data$subtype), levels = f1_fill_subtype_levels),
+      is_nepc = .data$is_nepc
+    )
+} else {
+  NULL
+}
+if (exists("bcl2_ceres_plot_df") && is.data.frame(bcl2_ceres_plot_df) && "depmap_id" %in% names(bcl2_ceres_plot_df)) {
+  bcl2_ceres_plot_df <- .f1_harmonize_plot_df_to_bcl2(bcl2_ceres_plot_df)
+  if (exists("p_bcl2_ceres") && !is.null(p_bcl2_ceres)) {
+    p_bcl2_ceres <- .f1_patch_plot_data(p_bcl2_ceres, bcl2_ceres_plot_df)
+  }
+}
+if (exists("dnmt1_plot_df_f2") && is.data.frame(dnmt1_plot_df_f2) && "depmap_id" %in% names(dnmt1_plot_df_f2)) {
+  dnmt1_plot_df_f2 <- .f1_harmonize_plot_df_to_bcl2(dnmt1_plot_df_f2)
+  if (exists("p_dnmt1") && !is.null(p_dnmt1)) {
+    p_dnmt1 <- .f1_patch_plot_data(p_dnmt1, dnmt1_plot_df_f2)
+  }
+}
+if (exists("dnmt1_ceres_plot_df") && is.data.frame(dnmt1_ceres_plot_df) && "depmap_id" %in% names(dnmt1_ceres_plot_df)) {
+  dnmt1_ceres_plot_df <- .f1_harmonize_plot_df_to_bcl2(dnmt1_ceres_plot_df)
+  if (exists("p_dnmt1_ceres") && !is.null(p_dnmt1_ceres)) {
+    p_dnmt1_ceres <- .f1_patch_plot_data(p_dnmt1_ceres, dnmt1_ceres_plot_df)
+  }
+}
+if (!is.null(.f1_wide_fill_scale)) {
+  if (exists("p_bcl2") && !is.null(p_bcl2)) p_bcl2 <- p_bcl2 + .f1_wide_fill_scale
+  if (exists("p_bcl2_ceres") && !is.null(p_bcl2_ceres)) p_bcl2_ceres <- p_bcl2_ceres + .f1_wide_fill_scale
+  if (exists("p_dnmt1") && !is.null(p_dnmt1)) p_dnmt1 <- p_dnmt1 + .f1_wide_fill_scale
+  if (exists("p_dnmt1_ceres") && !is.null(p_dnmt1_ceres)) p_dnmt1_ceres <- p_dnmt1_ceres + .f1_wide_fill_scale
+}
+# #region agent log
+tryCatch({
+  b_lv <- if (exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df) && is.factor(bcl2_plot_df$lab)) as.character(levels(bcl2_plot_df$lab)) else character(0)
+  d_lv <- if (exists("dnmt1_plot_df_f2") && is.data.frame(dnmt1_plot_df_f2) && is.factor(dnmt1_plot_df_f2$lab)) as.character(levels(dnmt1_plot_df_f2$lab)) else character(0)
+  b_key <- if (exists("bcl2_plot_df") && is.data.frame(bcl2_plot_df)) {
+    bcl2_plot_df %>%
+      dplyr::distinct(.data$lab, .data$subtype) %>%
+      dplyr::mutate(lab = as.character(.data$lab), subtype = as.character(.data$subtype))
+  } else {
+    data.frame(lab = character(0), subtype = character(0))
+  }
+  d_key <- if (exists("dnmt1_plot_df_f2") && is.data.frame(dnmt1_plot_df_f2)) {
+    dnmt1_plot_df_f2 %>%
+      dplyr::distinct(.data$lab, .data$subtype) %>%
+      dplyr::mutate(lab = as.character(.data$lab), subtype = as.character(.data$subtype))
+  } else {
+    data.frame(lab = character(0), subtype = character(0))
+  }
+  subtype_mismatch <- dplyr::full_join(b_key, d_key, by = "lab", suffix = c("_bcl2", "_dnmt1")) %>%
+    dplyr::filter(!is.na(.data$lab) & .data$subtype_bcl2 != .data$subtype_dnmt1)
+  focus_labs <- c("mMelanoma", "mSarcoma", "mTNBC", "NEPC")
+  .agent_dbg_ndjson(
+    runId = "pre-fix-debug2",
+    hypothesisId = "H2",
+    location = "03_Rmd:fig1_axis_alignment_snapshot",
+    message = "Expression panel axis/subtype alignment snapshot",
+    data = list(
+      bcl2_level_count = length(b_lv),
+      dnmt1_level_count = length(d_lv),
+      same_level_order = identical(b_lv, d_lv),
+      bcl2_only_levels = setdiff(b_lv, d_lv),
+      dnmt1_only_levels = setdiff(d_lv, b_lv),
+      bcl2_has_na_like = sum(grepl("^NA\\b|^\\s*$", b_lv)),
+      dnmt1_has_na_like = sum(grepl("^NA\\b|^\\s*$", d_lv)),
+      focus_in_bcl2 = b_lv[grepl(paste0("^(", paste(focus_labs, collapse = "|"), ")"), b_lv)],
+      focus_in_dnmt1 = d_lv[grepl(paste0("^(", paste(focus_labs, collapse = "|"), ")"), d_lv)],
+      subtype_mismatch_n = nrow(subtype_mismatch),
+      subtype_mismatch_head = utils::head(paste0(subtype_mismatch$lab, ": ", subtype_mismatch$subtype_bcl2, " vs ", subtype_mismatch$subtype_dnmt1), 12L),
+      bcl2_levels = b_lv,
+      dnmt1_levels = d_lv,
+      bcl2_tnbc_levels = b_lv[grepl("TNBC", b_lv, ignore.case = TRUE)],
+      dnmt1_tnbc_levels = d_lv[grepl("TNBC", d_lv, ignore.case = TRUE)],
+      bcl2_empty_base_levels = b_lv[!nzchar(trimws(sub("\\s*N=\\s*.*$", "", b_lv)))],
+      dnmt1_empty_base_levels = d_lv[!nzchar(trimws(sub("\\s*N=\\s*.*$", "", d_lv)))]
+    )
+  )
+}, error = function(e) invisible(NULL))
+# #endregion
+# Bottom row: show lineage labels on both panels (top row hides x labels only)
+p_br_dnmt <- if (exists("p_dnmt1_ceres") && !is.null(p_dnmt1_ceres)) {
+  p_dnmt1_ceres
+} else if (requireNamespace("patchwork", quietly = TRUE)) {
+  patchwork::plot_spacer()
+} else {
+  NULL
+}
+has_dnmt_bottom <- isTRUE(dnmt1_fig2_ok) && exists("p_dnmt1") && !is.null(p_dnmt1)
+use_grid_2x2 <- has_dnmt_bottom && requireNamespace("patchwork", quietly = TRUE) &&
+  (!is.null(p_bcl2) || !is.null(p_bcl2_ceres))
+if (use_grid_2x2) {
+  p_tl <- if (!is.null(p_bcl2)) {
+    p_bcl2 + .theme_f1_hide_lineage_x + .theme_f1_patchwork_top_row
+  } else {
+    patchwork::plot_spacer()
+  }
+  p_tr <- if (!is.null(p_bcl2_ceres)) {
+    p_bcl2_ceres + .theme_f1_hide_lineage_x + .theme_f1_patchwork_top_row
+  } else {
+    patchwork::plot_spacer()
+  }
+  p_bl <- if (!is.null(p_dnmt1)) p_dnmt1 + .theme_f1_patchwork_bottom_row else patchwork::plot_spacer()
+  p_br <- if (!is.null(p_br_dnmt)) p_br_dnmt + .theme_f1_patchwork_bottom_row else patchwork::plot_spacer()
+  p_lineage_all <- (p_tl | p_tr) / (p_bl | p_br) +
+    patchwork::plot_layout(widths = c(1, 1), heights = c(1, 1))
+  print(p_lineage_all)
+  h_pdf <- 26.5
+  if (dir.exists(fig_dir_lineage)) {
+    tryCatch(
+      ggplot2::ggsave(
+        file.path(fig_dir_lineage, "Figure1_BCL2_DNMT1_expression_and_dependency.pdf"),
+        p_lineage_all,
+        width = 18,
+        height = h_pdf,
+        device = "pdf"
+      ),
+      error = function(e) NULL
+    )
+    tryCatch(
+      ggplot2::ggsave(
+        file.path(fig_dir_lineage, "Figure1_BCL2_expression_and_dependency.pdf"),
+        p_lineage_all,
+        width = 18,
+        height = h_pdf,
+        device = "pdf"
+      ),
+      error = function(e) NULL
+    )
+  }
+  if (exists(".save_expanded_pdf") && ((exists("dnmti_bcl2_expanded_vector_pdf") && isTRUE(dnmti_bcl2_expanded_vector_pdf)) || (exists("hma_bcl2_master_vector_pdf") && isTRUE(hma_bcl2_master_vector_pdf)))) {
+    .save_expanded_pdf(p_lineage_all, "03_Figure1_BCL2_DNMT1_lineage_combined", 18, h_pdf)
+  }
+} else if (requireNamespace("patchwork", quietly = TRUE) && (!is.null(p_bcl2) || !is.null(p_bcl2_ceres))) {
+  # BCL2-only or partial: single row, two columns (lineage labels on both panels)
+  p_l <- if (!is.null(p_bcl2)) p_bcl2 else patchwork::plot_spacer()
+  p_r <- if (!is.null(p_bcl2_ceres)) p_bcl2_ceres else patchwork::plot_spacer()
+  p_lineage_all <- p_l | p_r
+  print(p_lineage_all)
+  h_pdf <- 12
+  if (dir.exists(fig_dir_lineage)) {
+    tryCatch(
+      ggplot2::ggsave(
+        file.path(fig_dir_lineage, "Figure1_BCL2_DNMT1_expression_and_dependency.pdf"),
+        p_lineage_all,
+        width = 18,
+        height = h_pdf,
+        device = "pdf"
+      ),
+      error = function(e) NULL
+    )
+    tryCatch(
+      ggplot2::ggsave(
+        file.path(fig_dir_lineage, "Figure1_BCL2_expression_and_dependency.pdf"),
+        p_lineage_all,
+        width = 18,
+        height = h_pdf,
+        device = "pdf"
+      ),
+      error = function(e) NULL
+    )
+  }
+  if (exists(".save_expanded_pdf") && ((exists("dnmti_bcl2_expanded_vector_pdf") && isTRUE(dnmti_bcl2_expanded_vector_pdf)) || (exists("hma_bcl2_master_vector_pdf") && isTRUE(hma_bcl2_master_vector_pdf)))) {
+    .save_expanded_pdf(p_lineage_all, "03_Figure1_BCL2_DNMT1_lineage_combined", 18, h_pdf)
+  }
+} else {
+  plots_lineage_stack <- list()
+  if (!is.null(p_bcl2)) plots_lineage_stack <- c(plots_lineage_stack, list(p_bcl2))
+  if (!is.null(p_bcl2_ceres)) plots_lineage_stack <- c(plots_lineage_stack, list(p_bcl2_ceres))
+  nl <- length(plots_lineage_stack)
+  if (nl > 0L) {
+    for (pl in plots_lineage_stack) print(pl)
+  } else {
+    p_miss <- if (exists("p_placeholder")) {
+      p_placeholder
+    } else {
+      ggplot2::ggplot() +
+        ggplot2::theme_void() +
+        ggplot2::labs(title = "Insufficient data for lineage expression/CERES figure.")
+    }
+    print(p_miss)
+  }
+}
+```
+
+```{r interpretation-03-bcl2-rationale, echo = FALSE, results = "asis", eval = !exists("hma_bcl2_tnbc_lymph_master") || !isTRUE(hma_bcl2_tnbc_lymph_master)}
+knitr::asis_output("**Interpretation**: Stem-like subtypes (SCLC, ExPulm-SCNEC) may show higher BCL2 expression than well-differentiated solid tumor comparators (NSCLC, localized prostate), with some cell lines expressing similar BCL2 RNA expression as AML. These neuroendocrine/small cell populations are the primary rationale for testing DNMTi + BCL2 inhibitor in solid tumors.")
+```
+
+```{r ne-lineages-summary-table, cache = FALSE}
+# Table 3: per-lineage (all sensitive lineages, same cohort N as two-group) + two-group summaries + Fig. 2b multi-lineage p row
+# CRISPR dependency long (cohort lines); N(CERES) can be < expression N
+crispr_bcl2_t3 <- NULL
+if (exists("crispr") && nrow(crispr) > 0L && exists("target_ids") && length(target_ids) > 0L && exists("expr_target")) {
+  crispr_bcl2_t3 <- crispr %>%
+    dplyr::filter(grepl("^BCL2\\b", .data$gene_name), .data$depmap_id %in% target_ids) %>%
+    dplyr::left_join(expr_target %>% dplyr::select(.data$depmap_id, .data$lineage_group), by = "depmap_id") %>%
+    dplyr::filter(!is.na(.data$lineage_group)) %>%
+    dplyr::transmute(.data$depmap_id, .data$lineage_group, BCL2_ceres = .data$dependency)
+}
+crispr_dnmt1_t3 <- NULL
+if (exists("crispr_dnmt1") && nrow(crispr_dnmt1) > 0L && exists("expr_target")) {
+  ids_dnmt1 <- if (exists("target_ids") && length(target_ids) > 0L) {
+    target_ids
+  } else {
+    unique(expr_target$depmap_id)
+  }
+  crispr_dnmt1_t3 <- crispr_dnmt1 %>%
+    dplyr::filter(.data$depmap_id %in% ids_dnmt1) %>%
+    dplyr::filter(!is.na(.data$lineage_group)) %>%
+    dplyr::transmute(.data$depmap_id, .data$lineage_group, DNMT1_ceres = .data$dependency)
+}
+has_dnmt1_tbl <- exists("expr_meta_dnmt1") && is.data.frame(expr_meta_dnmt1) &&
+  "DNMT1" %in% names(expr_meta_dnmt1) && nrow(expr_meta_dnmt1) > 0L
+has_dnmt1_ceres_tbl <- !is.null(crispr_dnmt1_t3) && nrow(crispr_dnmt1_t3) > 0L
+fmt_p_scalar <- function(pv) {
+  if (length(pv) != 1L || is.na(pv)) {
+    return("—")
+  }
+  if (pv < 0.001) {
+    return("<0.001")
+  }
+  format.pval(pv, digits = 2)
+}
+# Multi-lineage BCL2 / DNMT1 CERES p as on Figure 2b corner labels (NI vs AML when computed; else Kruskal)
+t3_p_bcl2_ceres_fig2b_multi <- if (exists("bcl2_ceres_ni_p") && !is.na(bcl2_ceres_ni_p)) {
+  fmt_p_scalar(bcl2_ceres_ni_p)
+} else if (exists("kw_bcl2") && inherits(kw_bcl2, "htest") && length(kw_bcl2$p.value) == 1L && !is.na(kw_bcl2$p.value)) {
+  fmt_p_scalar(unname(kw_bcl2$p.value))
+} else {
+  "—"
+}
+t3_p_dnmt1_ceres_fig2b_multi <- if (exists("dnmt1_ceres_ni_p") && !is.na(dnmt1_ceres_ni_p)) {
+  fmt_p_scalar(dnmt1_ceres_ni_p)
+} else if (exists("kw_dnmt1") && inherits(kw_dnmt1, "htest") && length(kw_dnmt1$p.value) == 1L && !is.na(kw_dnmt1$p.value)) {
+  fmt_p_scalar(unname(kw_dnmt1$p.value))
+} else {
+  "—"
+}
+# Same cohort as two-group summaries (per-lineage N sums to stem-like N)
+lineage_plastic_t3 <- if (exists("lineage_plastic_ref_canonical")) lineage_plastic_ref_canonical else c("SCLC", "ExPulm-SCNEC", "AML (control)")
+hma_t3_ext <- exists("hma_bcl2_tnbc_lymph_master") && isTRUE(hma_bcl2_tnbc_lymph_master)
+t3_use_f1_nb <- exists("f1_enriched_lineages") && length(f1_enriched_lineages) > 0L
+if (t3_use_f1_nb) {
+  lineage_plastic_t3 <- f1_enriched_lineages
+} else if (hma_t3_ext) {
+  lineage_plastic_t3 <- unique(c(lineage_plastic_t3, "DLBCL/MCL/CLL"))
+}
+plastic_lbl_t3 <- "Stem-like"
+other_lbl_t3 <- "Non-stem-like"
+expr_two_data <- expr_target
+if (exists("expr_meta_dnmt1") && "DNMT1" %in% names(expr_meta_dnmt1) && nrow(expr_meta_dnmt1) > 0L) {
+  expr_two_data <- expr_two_data %>% dplyr::left_join(expr_meta_dnmt1 %>% dplyr::select(.data$depmap_id, .data$DNMT1), by = "depmap_id")
+}
+if ("DNMT1" %in% names(expr_two_data)) {
+  expr_two_data <- expr_two_data %>% dplyr::filter(!is.na(.data$BCL2) | !is.na(.data$DNMT1))
+} else {
+  expr_two_data <- expr_two_data %>% dplyr::filter(!is.na(.data$BCL2))
+}
+if (exists("f1_enriched_lineages_ordered") && length(f1_enriched_lineages_ordered) > 0L) {
+  t3_f1_lineages_ordered <- f1_enriched_lineages_ordered[
+    as.character(f1_enriched_lineages_ordered) %in% as.character(lineage_plastic_t3)
+  ]
+} else {
+  t3_prio <- c("SCLC", "ExPulm-SCNEC", "AML (control)")
+  if (isTRUE(hma_t3_ext)) {
+    t3_prio <- c(t3_prio, "DLBCL/MCL/CLL")
+  }
+  t3_f1_lineages_ordered <- c(
+    intersect(t3_prio, as.character(lineage_plastic_t3)),
+    setdiff(as.character(lineage_plastic_t3), t3_prio)
+  )
+}
+tbl_ne_summary <- NULL
+# Stem-like lineages, per lineage (Figure 1 order; includes SCLC, ExPulm-SCNEC, AML when in arm)
+if (length(t3_f1_lineages_ordered) > 0L) {
+  t3_f1_dat <- expr_two_data %>%
+    dplyr::filter(as.character(.data$lineage_group) %in% as.character(t3_f1_lineages_ordered))
+  if (nrow(t3_f1_dat) > 0L) {
+      sum_f1 <- t3_f1_dat %>%
+        dplyr::group_by(.data$lineage_group) %>%
+        dplyr::summarise(
+          N = dplyr::n(),
+          `BCL2 median` = round(stats::median(.data$BCL2, na.rm = TRUE), 3),
+          `BCL2 IQR` = paste0(
+            round(stats::quantile(.data$BCL2, 0.25, na.rm = TRUE), 2), "–",
+            round(stats::quantile(.data$BCL2, 0.75, na.rm = TRUE), 2)
+          ),
+          .groups = "drop"
+        )
+      if (has_dnmt1_tbl && "DNMT1" %in% names(t3_f1_dat) && sum(!is.na(t3_f1_dat$DNMT1)) > 0L) {
+        d1f <- t3_f1_dat %>%
+          dplyr::group_by(.data$lineage_group) %>%
+          dplyr::summarise(
+            `DNMT1 median` = round(stats::median(.data$DNMT1, na.rm = TRUE), 3),
+            `DNMT1 IQR` = paste0(
+              round(stats::quantile(.data$DNMT1, 0.25, na.rm = TRUE), 2), "–",
+              round(stats::quantile(.data$DNMT1, 0.75, na.rm = TRUE), 2)
+            ),
+            .groups = "drop"
+          )
+        sum_f1 <- sum_f1 %>% dplyr::left_join(d1f, by = "lineage_group")
+      }
+      sum_f1 <- sum_f1 %>%
+        dplyr::mutate(`lg_ord` = match(as.character(.data$lineage_group), as.character(t3_f1_lineages_ordered))) %>%
+        dplyr::arrange(.data$`lg_ord`) %>%
+        dplyr::mutate(Lineage = gsub(" \\(control\\)", "", as.character(.data$lineage_group))) %>%
+        dplyr::select(-.data$lineage_group, -.data$`lg_ord`)
+      # CERES per lineage (sensitive arm)
+      if (!is.null(crispr_bcl2_t3) && nrow(crispr_bcl2_t3) > 0L) {
+        ceres_f1_b <- crispr_bcl2_t3 %>%
+          dplyr::filter(as.character(.data$lineage_group) %in% as.character(t3_f1_lineages_ordered)) %>%
+          dplyr::group_by(.data$lineage_group) %>%
+          dplyr::summarise(
+            `BCL2 CERES median` = round(stats::median(.data$BCL2_ceres, na.rm = TRUE), 3),
+            `BCL2 CERES IQR` = paste0(
+              round(stats::quantile(.data$BCL2_ceres, 0.25, na.rm = TRUE), 2), "–",
+              round(stats::quantile(.data$BCL2_ceres, 0.75, na.rm = TRUE), 2)
+            ),
+            .groups = "drop"
+          ) %>%
+          dplyr::mutate(Lineage = gsub(" \\(control\\)", "", as.character(.data$lineage_group))) %>%
+          dplyr::select(-.data$lineage_group)
+        sum_f1 <- sum_f1 %>% dplyr::left_join(ceres_f1_b, by = "Lineage")
+      }
+      if (!is.null(crispr_dnmt1_t3) && nrow(crispr_dnmt1_t3) > 0L) {
+        ceres_f1_d <- crispr_dnmt1_t3 %>%
+          dplyr::filter(as.character(.data$lineage_group) %in% as.character(t3_f1_lineages_ordered)) %>%
+          dplyr::group_by(.data$lineage_group) %>%
+          dplyr::summarise(
+            `DNMT1 CERES median` = round(stats::median(.data$DNMT1_ceres, na.rm = TRUE), 3),
+            `DNMT1 CERES IQR` = paste0(
+              round(stats::quantile(.data$DNMT1_ceres, 0.25, na.rm = TRUE), 2), "–",
+              round(stats::quantile(.data$DNMT1_ceres, 0.75, na.rm = TRUE), 2)
+            ),
+            .groups = "drop"
+          ) %>%
+          dplyr::mutate(Lineage = gsub(" \\(control\\)", "", as.character(.data$lineage_group))) %>%
+          dplyr::select(-.data$lineage_group)
+        sum_f1 <- sum_f1 %>% dplyr::left_join(ceres_f1_d, by = "Lineage")
+      }
+      if (!"BCL2 CERES median" %in% names(sum_f1)) {
+        sum_f1 <- sum_f1 %>% dplyr::mutate(`BCL2 CERES median` = NA_real_, `BCL2 CERES IQR` = "")
+      }
+      if (has_dnmt1_ceres_tbl && !"DNMT1 CERES median" %in% names(sum_f1)) {
+        sum_f1 <- sum_f1 %>% dplyr::mutate(`DNMT1 CERES median` = NA_real_, `DNMT1 CERES IQR` = "")
+      }
+      if (has_dnmt1_tbl && !"DNMT1 median" %in% names(sum_f1)) {
+        sum_f1 <- sum_f1 %>% dplyr::mutate(`DNMT1 median` = NA_real_, `DNMT1 IQR` = "")
+      }
+      sum_f1 <- sum_f1 %>%
+        dplyr::mutate(
+          `p (BCL2)` = "",
+          `p (BCL2 CERES)` = "",
+          `p (DNMT1)` = if (has_dnmt1_tbl) "" else NA_character_,
+          `p (DNMT1 CERES)` = if (has_dnmt1_ceres_tbl) "" else NA_character_
+        )
+      if (!has_dnmt1_tbl) {
+        sum_f1 <- sum_f1 %>% dplyr::mutate(`p (DNMT1)` = NULL)
+      }
+      if (!has_dnmt1_ceres_tbl) {
+        sum_f1 <- sum_f1 %>% dplyr::mutate(`p (DNMT1 CERES)` = NULL)
+      }
+      hdr_f1 <- tibble::tibble(
+        Lineage = "Stem-like lineages (per lineage)",
+        N = NA_integer_,
+        `BCL2 median` = NA_real_,
+        `BCL2 IQR` = "",
+        `BCL2 CERES median` = NA_real_,
+        `BCL2 CERES IQR` = ""
+      )
+      if (has_dnmt1_tbl) {
+        hdr_f1 <- hdr_f1 %>% tibble::add_column(`DNMT1 median` = NA_real_, `DNMT1 IQR` = "", .after = "BCL2 IQR")
+      }
+      if (has_dnmt1_ceres_tbl) {
+        hdr_f1 <- hdr_f1 %>% tibble::add_column(`DNMT1 CERES median` = NA_real_, `DNMT1 CERES IQR` = "", .after = "BCL2 CERES IQR")
+      }
+      hdr_f1 <- hdr_f1 %>%
+        dplyr::mutate(
+          `p (BCL2)` = "",
+          `p (BCL2 CERES)` = "",
+          `p (DNMT1)` = if (has_dnmt1_tbl) "" else NA_character_,
+          `p (DNMT1 CERES)` = if (has_dnmt1_ceres_tbl) "" else NA_character_
+        )
+      if (!has_dnmt1_tbl) {
+        hdr_f1 <- hdr_f1 %>% dplyr::mutate(`p (DNMT1)` = NULL)
+      }
+      if (!has_dnmt1_ceres_tbl) {
+        hdr_f1 <- hdr_f1 %>% dplyr::mutate(`p (DNMT1 CERES)` = NULL)
+      }
+      n_sensitive_two <- nrow(dplyr::filter(
+        expr_two_data,
+        as.character(.data$lineage_group) %in% as.character(lineage_plastic_t3)
+      ))
+      stopifnot(sum(sum_f1$N) == n_sensitive_two)
+      tbl_ne_summary <- dplyr::bind_rows(tbl_ne_summary, hdr_f1, sum_f1)
+  }
+}
+# Two-group: stem-like vs non-stem-like (expr_two_data already built above)
+rows_two_group <- NULL
+if (exists("expr_two_data") && nrow(expr_two_data) > 0L) {
+  expr_two_data <- expr_two_data %>%
+    dplyr::mutate(group_2 = dplyr::if_else(
+      as.character(.data$lineage_group) %in% as.character(lineage_plastic_t3),
+      plastic_lbl_t3,
+      other_lbl_t3
+    ))
+  rows_two_group <- expr_two_data %>%
+    dplyr::group_by(.data$group_2) %>%
+    dplyr::summarise(
+      N = dplyr::n(),
+      BCL2_median = round(stats::median(.data$BCL2, na.rm = TRUE), 3),
+      BCL2_IQR = paste0(
+        round(stats::quantile(.data$BCL2, 0.25, na.rm = TRUE), 2), "–",
+        round(stats::quantile(.data$BCL2, 0.75, na.rm = TRUE), 2)
+      ),
+      .groups = "drop"
+    )
+  if ("DNMT1" %in% names(expr_two_data) && sum(!is.na(expr_two_data$DNMT1)) > 0L) {
+    dnmt1_two <- expr_two_data %>%
+      dplyr::group_by(.data$group_2) %>%
+      dplyr::summarise(
+        DNMT1_median = round(stats::median(.data$DNMT1, na.rm = TRUE), 3),
+        DNMT1_IQR = paste0(
+          round(stats::quantile(.data$DNMT1, 0.25, na.rm = TRUE), 2), "–",
+          round(stats::quantile(.data$DNMT1, 0.75, na.rm = TRUE), 2)
+        ),
+        .groups = "drop"
+      )
+    rows_two_group <- rows_two_group %>% dplyr::left_join(dnmt1_two, by = "group_2")
+  } else if (has_dnmt1_tbl) {
+    rows_two_group <- rows_two_group %>% dplyr::mutate(DNMT1_median = NA_real_, DNMT1_IQR = "")
+  }
+  # Two-group CERES summaries
+  if (!is.null(crispr_bcl2_t3) && nrow(crispr_bcl2_t3) > 0L) {
+    ceres_two_b <- crispr_bcl2_t3 %>%
+      dplyr::inner_join(expr_two_data %>% dplyr::select(.data$depmap_id, .data$group_2), by = "depmap_id") %>%
+      dplyr::group_by(.data$group_2) %>%
+      dplyr::summarise(
+        `BCL2 CERES median` = round(stats::median(.data$BCL2_ceres, na.rm = TRUE), 3),
+        `BCL2 CERES IQR` = paste0(
+          round(stats::quantile(.data$BCL2_ceres, 0.25, na.rm = TRUE), 2), "–",
+          round(stats::quantile(.data$BCL2_ceres, 0.75, na.rm = TRUE), 2)
+        ),
+        .groups = "drop"
+      )
+    rows_two_group <- rows_two_group %>% dplyr::left_join(ceres_two_b, by = "group_2")
+  }
+  if (has_dnmt1_ceres_tbl && !is.null(crispr_dnmt1_t3) && nrow(crispr_dnmt1_t3) > 0L) {
+    ceres_two_d <- crispr_dnmt1_t3 %>%
+      dplyr::inner_join(expr_two_data %>% dplyr::select(.data$depmap_id, .data$group_2), by = "depmap_id") %>%
+      dplyr::group_by(.data$group_2) %>%
+      dplyr::summarise(
+        `DNMT1 CERES median` = round(stats::median(.data$DNMT1_ceres, na.rm = TRUE), 3),
+        `DNMT1 CERES IQR` = paste0(
+          round(stats::quantile(.data$DNMT1_ceres, 0.25, na.rm = TRUE), 2), "–",
+          round(stats::quantile(.data$DNMT1_ceres, 0.75, na.rm = TRUE), 2)
+        ),
+        .groups = "drop"
+      )
+    rows_two_group <- rows_two_group %>% dplyr::left_join(ceres_two_d, by = "group_2")
+  }
+  if (!"BCL2 CERES median" %in% names(rows_two_group)) {
+    rows_two_group <- rows_two_group %>% dplyr::mutate(`BCL2 CERES median` = NA_real_, `BCL2 CERES IQR` = "")
+  }
+  if (has_dnmt1_ceres_tbl && !"DNMT1 CERES median" %in% names(rows_two_group)) {
+    rows_two_group <- rows_two_group %>% dplyr::mutate(`DNMT1 CERES median` = NA_real_, `DNMT1 CERES IQR` = "")
+  }
+  rows_two_group <- rows_two_group %>%
+    dplyr::mutate(
+      Lineage = dplyr::if_else(.data$group_2 == plastic_lbl_t3, "Stem-like", "Non-stem-like"),
+      `p (BCL2)` = "",
+      `p (BCL2 CERES)` = "",
+      `p (DNMT1)` = if (has_dnmt1_tbl) "" else NA_character_,
+      `p (DNMT1 CERES)` = if (has_dnmt1_ceres_tbl) "" else NA_character_
+    ) %>%
+    dplyr::select(-.data$group_2)
+  if (!has_dnmt1_tbl) {
+    rows_two_group <- rows_two_group %>% dplyr::mutate(`p (DNMT1)` = NULL)
+  }
+  if (!has_dnmt1_ceres_tbl) {
+    rows_two_group <- rows_two_group %>% dplyr::mutate(`p (DNMT1 CERES)` = NULL)
+  }
+  rows_two_group <- rows_two_group %>%
+    dplyr::rename(`BCL2 median` = .data$BCL2_median, `BCL2 IQR` = .data$BCL2_IQR)
+  if (has_dnmt1_tbl) {
+    rows_two_group <- rows_two_group %>% dplyr::rename(`DNMT1 median` = .data$DNMT1_median, `DNMT1 IQR` = .data$DNMT1_IQR)
+  }
+  rows_two_group <- rows_two_group %>%
+    dplyr::select(dplyr::any_of(c(
+      "Lineage", "N", "BCL2 median", "BCL2 IQR", "DNMT1 median", "DNMT1 IQR",
+      "BCL2 CERES median", "BCL2 CERES IQR", "DNMT1 CERES median", "DNMT1 CERES IQR",
+      "p (BCL2)", "p (DNMT1)", "p (BCL2 CERES)", "p (DNMT1 CERES)"
+    )))
+}
+t3_p_row_shell <- function(lineage_lbl) {
+  pr <- tibble::tibble(
+    Lineage = lineage_lbl,
+    N = NA_integer_,
+    `BCL2 median` = NA_real_,
+    `BCL2 IQR` = "",
+    `BCL2 CERES median` = NA_real_,
+    `BCL2 CERES IQR` = ""
+  )
+  if (has_dnmt1_tbl) {
+    pr <- pr %>% tibble::add_column(`DNMT1 median` = NA_real_, `DNMT1 IQR` = "", .after = "BCL2 IQR")
+  }
+  if (has_dnmt1_ceres_tbl) {
+    pr <- pr %>% tibble::add_column(`DNMT1 CERES median` = NA_real_, `DNMT1 CERES IQR` = "", .after = "BCL2 CERES IQR")
+  }
+  pr
+}
+# Multi-lineage subpanels: same p text as BCL2/DNMT1 expression and CERES multi-lineage plots (kw_txt / kw_dnmt1_txt; NI or Kruskal for CERES)
+p_row_multi <- t3_p_row_shell("p (Fig. 2b multi-lineage)") %>%
+  dplyr::mutate(
+    `p (BCL2)` = if (exists("kw_txt")) kw_txt else "—",
+    `p (DNMT1)` = if (has_dnmt1_tbl) (if (exists("kw_dnmt1_txt")) kw_dnmt1_txt else "—") else NA_character_,
+    `p (BCL2 CERES)` = t3_p_bcl2_ceres_fig2b_multi,
+    `p (DNMT1 CERES)` = if (has_dnmt1_ceres_tbl) t3_p_dnmt1_ceres_fig2b_multi else NA_character_
+  )
+if (!has_dnmt1_tbl) {
+  p_row_multi <- p_row_multi %>% dplyr::mutate(`p (DNMT1)` = NULL)
+}
+if (!has_dnmt1_ceres_tbl) {
+  p_row_multi <- p_row_multi %>% dplyr::mutate(`p (DNMT1 CERES)` = NULL)
+}
+if (!is.null(rows_two_group) && nrow(rows_two_group) > 0L) {
+  tbl_ne_summary <- dplyr::bind_rows(tbl_ne_summary, rows_two_group, p_row_multi)
+} else {
+  tbl_ne_summary <- dplyr::bind_rows(tbl_ne_summary, p_row_multi)
+}
+t3_kable_cols <- c(
+  "Lineage", "N", "BCL2 median", "BCL2 IQR", "DNMT1 median", "DNMT1 IQR",
+  "BCL2 CERES median", "BCL2 CERES IQR", "DNMT1 CERES median", "DNMT1 CERES IQR",
+  "p (BCL2)", "p (DNMT1)", "p (BCL2 CERES)", "p (DNMT1 CERES)"
+)
+tbl_ne_summary <- tbl_ne_summary %>% dplyr::select(dplyr::any_of(t3_kable_cols))
+knitr::kable(tbl_ne_summary, caption = paste0(
+  "Table 3. BCL2 and DNMT1 RNA (log2 TPM+1) and CRISPR CERES dependency (median, IQR) in the extended cohort. ",
+  "Per-lineage section (when present): each row is one stem-like lineage in Figure 1 order; per-lineage N uses the same expression cohort as the two-group summaries ",
+  "(sum of per-lineage N equals N in the stem-like summary row). ",
+  "CERES uses DepMap lines with dependency scores (N can be smaller than RNA N). ",
+  "Two summary rows compare stem-like vs non-stem-like. ",
+  "p (Fig. 2b multi-lineage): same values as the multi-lineage subpanels in Figure 2b—BCL2 and DNMT1 RNA use the annotated expression tests ",
+  "(NI vs AML, 1-sided, when shown; else as in figure caption); BCL2 and DNMT1 CERES use the annotated multi-lineage tests ",
+  "(NI vs AML, 1-sided, when computed; otherwise Kruskal–Wallis across lineages in that panel)."
+))
+```
+
+```{r interpretation-03-table3-fig2b, echo = FALSE, results = "asis", eval = !exists("hma_bcl2_tnbc_lymph_master") || !isTRUE(hma_bcl2_tnbc_lymph_master)}
+kw_s <- if (exists("kw_txt")) kw_txt else "—"
+wx_s <- if (exists("wx_txt")) wx_txt else "—"
+kwd_s <- if (exists("kw_dnmt1_txt")) kw_dnmt1_txt else "—"
+wxd_s <- if (exists("wx_dnmt1_txt")) wx_dnmt1_txt else "—"
+knitr::asis_output(paste0(
+  "**Interpretation (Figure 2b subfigures in Figures 1 and 2)**: **BCL2:** Multi-lineage subpanel reports **non-inferior vs AML** (1-sided Wilcoxon, BCL2 stochastically ≥ AML; p = ", kw_s, "); two-group subpanel compares stem-like vs non-stem-like (**1-sided** Wilcoxon, stem-like > non-stem-like; p = ", wx_s, "). **DNMT1:** When the Fig. 1 arm applies, multi-lineage subpanel reports **non-inferior vs AML** (1-sided Wilcoxon, DNMT1 stochastically ≤ AML; p = ", kwd_s, "); otherwise Kruskal–Wallis across lineages (same p text). Two-group Wilcoxon (p = ", wxd_s, ")."
+))
+```
