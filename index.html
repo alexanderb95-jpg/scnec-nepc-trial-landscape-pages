@@ -11,7 +11,7 @@
 
 <meta name="author" content="Alex Karol" />
 
-<meta name="date" content="2026-04-27" />
+<meta name="date" content="2026-04-25" />
 
 <title>SCNEC/NEPC Interventional Trial Landscape</title>
 
@@ -1600,6 +1600,97 @@ float: none;
 .tabset-dropdown > .nav-tabs > li {
 display: none;
 }
+
+/* Trial table polish */
+.table-wrap {
+  overflow-x: auto;
+  margin: 1rem 0 1.25rem 0;
+  border: 1px solid #d9e2ec;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+}
+
+table.trial-landscape-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.35;
+  min-width: 1400px;
+}
+
+table.trial-landscape-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f7fafc;
+  border-bottom: 2px solid #cbd5e1;
+  color: #1f2937;
+  font-weight: 700;
+  text-align: left;
+  padding: 10px 10px;
+  vertical-align: bottom;
+}
+
+table.trial-landscape-table td {
+  border-top: 1px solid #e5e7eb;
+  padding: 8px 10px;
+  vertical-align: top;
+  white-space: normal;
+  word-break: break-word;
+}
+
+table.trial-landscape-table tbody tr:nth-child(even) {
+  background: #fcfdff;
+}
+
+table.trial-landscape-table tbody tr:hover {
+  background: #f1f7ff;
+}
+
+.avpc-criteria-panel {
+  margin: 0.25rem 0 1.5rem 0;
+  border: 1px solid #dbe7f5;
+  border-left: 4px solid #2563eb;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 0.85rem 1rem 0.95rem 1rem;
+}
+
+.avpc-criteria-panel h3 {
+  margin: 0 0 0.5rem 0;
+  font-size: 17px;
+}
+
+.avpc-criteria-panel p {
+  margin: 0 0 0.6rem 0;
+}
+
+.avpc-criteria-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.avpc-criteria-grid h4 {
+  margin: 0 0 0.35rem 0;
+  font-size: 14px;
+}
+
+.avpc-criteria-grid ul {
+  margin: 0;
+  padding-left: 1.15rem;
+}
+
+.avpc-criteria-grid li {
+  margin: 0.15rem 0;
+}
+
+.avpc-use-note {
+  margin-top: 0.6rem;
+  font-size: 12.5px;
+  color: #334155;
+}
 </style>
 
 <!-- code folding -->
@@ -1624,441 +1715,271 @@ display: none;
 <h1 class="title toc-ignore">SCNEC/NEPC Interventional Trial
 Landscape</h1>
 <h4 class="author">Alex Karol</h4>
-<h4 class="date">April 27, 2026</h4>
+<h4 class="date">April 25, 2026</h4>
 
 </div>
 
 
 <div id="consolidated-scnecnepc-trial-table" class="section level2">
 <h2>Consolidated SCNEC/NEPC Trial Table</h2>
-<table>
+<div class="table-wrap">
+<table class="trial-landscape-table">
 <colgroup>
-<col width="4%" />
-<col width="12%" />
-<col width="1%" />
-<col width="1%" />
-<col width="4%" />
-<col width="8%" />
+<col width="6%" />
+<col width="14%" />
+<col width="5%" />
+<col width="5%" />
+<col width="9%" />
+<col width="9%" />
+<col width="9%" />
 <col width="11%" />
-<col width="8%" />
-<col width="9%" />
-<col width="28%" />
-<col width="9%" />
+<col width="22%" />
+<col width="10%" />
 </colgroup>
 <thead>
 <tr class="header">
-<th align="left">Stratum</th>
+<th align="left">Disease</th>
 <th align="left">Study</th>
 <th align="left">NCT</th>
-<th align="left">Sites (n)</th>
-<th align="left">Phase / status</th>
-<th align="left">NEPC/AVPC required for accrual</th>
+<th align="left"># sites</th>
+<th align="left">Phase and Status</th>
 <th align="left">Accrual state</th>
-<th align="left">Sample size (planned/actual)</th>
+<th align="left">Number enrolled and target</th>
 <th align="left">Primary endpoint</th>
-<th align="left">Tumor-specific inclusion (condensed)</th>
-<th align="left">Notes</th>
+<th align="left">Inclusion criteria</th>
+<th align="left">AVPC classification used</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
-<td align="left">NEPC-specific prostate</td>
-<td align="left">PLANE-PC: pembrolizumab + lenvatinib (metastatic
-NEPC)</td>
+<td align="left">NEPC </td>
+<td align="left">PLANE-PC: pembrolizumab + lenvatinib (metastatic NEPC)</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT04848337">NCT04848337</a></td>
 <td align="left">5</td>
 <td align="left">Phase II; active-not-recruiting</td>
-<td align="left">Yes (NEPC features required)</td>
-<td align="left">Accrual complete and in follow-up (inferred; explicit
-reason not posted)</td>
-<td align="left">45 actual enrolled (protocol: 40 evaluable; up to 50
-accrual)</td>
-<td align="left">Radiographic progression-free survival at 6 months
-(rPFS)</td>
-<td align="left">Metastatic prostate cancer with required NEPC features
-(small-cell/NE morphology or NE marker/clinical-genomic phenotype); ECOG
-0-1</td>
-<td align="left">Results posted on ClinicalTrials.gov</td>
+<td align="left">Accrual complete</td>
+<td align="left">45 enrolled</td>
+<td align="left">6-month radiologic progression-free survival (rPFS)</td>
+<td align="left">Metastatic prostate cancer and at least one of A) Small-cell or NEPC B) positive staining for chromogranin and synaptophysin C) visceral metastases and a PSA&lt; 5 ng/dL.D) Serum chromogranin A level = 5_ upper limit of normal (ULN) and/or serum neuron specific enolase (NSE) = 2_ ULN. E) RB1 deletions or mutations F) Trans-differentiated or poorly-differentiated carcinoma; ECOG 0-1</td>
+<td align="left">N/A (not AVPC-typed)</td>
 </tr>
 <tr class="even">
-<td align="left">NEPC-specific prostate</td>
-<td align="left">Alisertib (MLN8237) in NEPC-enriched metastatic
-prostate cancer</td>
+<td align="left">NEPC </td>
+<td align="left">Alisertib (MLN8237) in NEPC</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT01799278">NCT01799278</a></td>
 <td align="left">8</td>
 <td align="left">Phase II; completed</td>
-<td align="left">Yes (NE-enriched eligibility required)</td>
-<td align="left">Completed</td>
+<td align="left">Accrual complete</td>
 <td align="left">60 actual treated</td>
-<td align="left">Overall response rate (ORR) by CT/MRI and bone
-scan</td>
-<td align="left">Enrollment required NEPC-enriched disease features
-(small-cell/NE histology, &gt;50% NE marker staining, liver metastases
-without PSA progression, or elevated chromogranin A/NSE); unselected
-CRPC alone was not eligible</td>
-<td align="left">Published + registry results posted</td>
+<td align="left">6-month radiologic progression-free survival (rPFS)</td>
+<td align="left">Metastatic prostate cnacer plus NEPC feature requiring one of (small-cell/NE histology, &gt;50% NE marker staining, liver metastases without PSA progression, or elevated chromogranin A/NSE)</td>
+<td align="left">N/A (not AVPC-typed)</td>
 </tr>
 <tr class="odd">
-<td align="left">NEPC-specific prostate</td>
-<td align="left">ZG006 in metastatic NEPC</td>
+<td align="left">NEPC </td>
+<td align="left">ZG006 (tri-TE) in metastatic NEPC</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT07024277">NCT07024277</a></td>
 <td align="left">1</td>
 <td align="left">Phase II; not-yet-recruiting</td>
-<td align="left">Yes (metastatic NEPC required)</td>
-<td align="left">NA</td>
+<td align="left">Not yet recuritng</td>
 <td align="left">60 estimated</td>
-<td align="left">Modified best overall response (RECIST 1.1 + PCWG3
-modifications)</td>
-<td align="left">Advanced metastatic NEPC; progression after &gt;= 1
-prior platinum-based systemic line (or intolerance); ECOG 0-1</td>
-<td align="left">Future/ongoing development program</td>
+<td align="left">Modified best overall response (RECIST 1.1 + PCWG3 modifications)</td>
+<td align="left">Advanced metastatic NEPC; progression after &gt;= 1 prior platinum-based systemic line (or intolerance); ECOG 0-1</td>
+<td align="left">N/A (not AVPC-typed)</td>
 </tr>
 <tr class="even">
-<td align="left">NEPC-specific prostate</td>
-<td align="left">DeLLpro-300: tarlatamab in de novo or
-treatment-emergent NEPC</td>
+<td align="left">NEPC </td>
+<td align="left">DeLLpro-300: tarlatamab in de novo or treatment-emergent NEPC</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT04702737">NCT04702737</a></td>
 <td align="left">21</td>
 <td align="left">Phase 1b; completed</td>
-<td align="left">Yes (de novo/t-NEPC required)</td>
-<td align="left">Not yet recruiting</td>
+<td align="left">Accrual complete</td>
 <td align="left">41 enrolled; 40 treated</td>
-<td align="left">Safety and tolerability (TEAEs/TRAEs/DLTs)</td>
-<td align="left">Metastatic de novo or treatment-emergent NEPC required
-by histology/IHC/genomics; prior systemic treatment required; measurable
-disease; ECOG &lt;= 2</td>
-<td align="left">Published efficacy signal with DLL3-stratified
-outcomes</td>
+<td align="left">Safety (TEAEs/TRAEs/DLTs) and ORR for 1b component</td>
+<td align="left">Metastaitc prostate cancer with at least one of (i) morphologic evidence of small cell NEPC (ii) positive staining for chromogranin and/or synaptophysin by IHC in &gt;50% of the tumor sample, and/or (iii) ³2 genetic alterations in tumor protein p53 (TP53), RB1, and/or PTEN observed by IHC or genomic analysis.  ECOG &lt;= 2</td>
+<td align="left">N/A (not AVPC-typed)</td>
 </tr>
 <tr class="odd">
 <td align="left">AVPC/mixed prostate small-cell</td>
-<td align="left">CHAMP: nivolumab + ipilimumab + carboplatin +
-cabazitaxel (NEPC/AVPC)</td>
+<td align="left">CHAMP: nivolumab + ipilimumab + carboplatin + cabazitaxel (NEPC/AVPC)</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT04709276">NCT04709276</a></td>
 <td align="left">3</td>
 <td align="left">Phase II; active-not-recruiting</td>
-<td align="left">Yes (histologic NEPC/small-cell OR AVPC criteria)</td>
-<td align="left">Accrual complete and in follow-up (inferred; explicit
-reason not posted)</td>
+<td align="left">Accrual complete and in follow-up </td>
 <td align="left">41 actual enrolled</td>
-<td align="left">Progression-free survival at 6 months (PFS)</td>
-<td align="left">Requires histologic NEPC/small-cell prostate cancer or
-AVPC clinical-genomic phenotype; progressive mCRPC; KPS &gt;= 70</td>
-<td align="left">Modern multi-agent chemoimmunotherapy platform</td>
+<td align="left">PFS 6 months</td>
+<td align="left">Histologic NEPC component (or aytpical histology) or mCRPC  with NEPC clincal features or pathogenic TP53RB1PTEN alterations or serum elevated neuroendocrine markers without explanation. KPS&gt;=70</td>
+<td align="left">Both (c-AVPC + m-AVPC)</td>
 </tr>
 <tr class="even">
 <td align="left">AVPC/mixed prostate small-cell</td>
-<td align="left">PICK-NEPC: avelumab monotherapy (histologic NEPC or
-AVPC phenotype)</td>
+<td align="left">PICK-NEPC: avelumab monotherapy (histologic NEPC or AVPC phenotype)</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT03179410">NCT03179410</a></td>
 <td align="left">1</td>
 <td align="left">Phase II; completed</td>
-<td align="left">Yes (histologic NEPC/small-cell OR AVPC criteria)</td>
 <td align="left">Completed</td>
 <td align="left">15 actual enrolled</td>
-<td align="left">Overall response rate (ORR) by iRECIST (modified
-PCWG3)</td>
-<td align="left">Requires histologic small-cell/NEPC or AVPC clinical
-phenotype with aggressive features; KPS &gt;= 70</td>
-<td align="left">Published + registry results posted; limited activity
-outside MSI-high case</td>
+<td align="left">ORR</td>
+<td align="left">Requires histologic small-cell/NEPC or AVPC clinical phenotype with aggressive small cell features after ADT progression (e.g  visceral emts with PSA discordence); KPS &gt;= 70</td>
+<td align="left">c-AVPC (clinical criteria)</td>
 </tr>
 <tr class="odd">
 <td align="left">AVPC/mixed prostate small-cell</td>
-<td align="left">Olaparib maintenance after cabazitaxel-carboplatin
-induction in AVPC</td>
+<td align="left">Olaparib maintenance after cabazitaxel-carboplatin induction in AVPC</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT03263650">NCT03263650</a></td>
 <td align="left">1</td>
 <td align="left">Phase II; active-not-recruiting</td>
-<td align="left">AVPC-enriched (&gt;=1 AVPC criterion required)</td>
-<td align="left">Completed (active-not-recruiting)</td>
+<td align="left">Completed</td>
 <td align="left">96 actual enrolled</td>
-<td align="left">Progression-free survival (PFS)</td>
-<td align="left">Metastatic AVPC after platinum-taxane induction;
-protocol requires AVPC criteria and correlative molecular workup</td>
-<td align="left">Randomized AVPC maintenance strategy</td>
+<td align="left">PFS 6 months</td>
+<td align="left">Metastatic prostate cancer after platinum-taxane induction with NEPC histology or clinical or molecular (TP53, RB1,PTEN) features of NEPC, ECOG 0-2</td>
+<td align="left">Both (c-AVPC + m-AVPC)</td>
 </tr>
 <tr class="even">
 <td align="left">AVPC/mixed prostate small-cell</td>
-<td align="left">Platinum-taxane-cetrelimab induction followed by
-niraparib +/- cetrelimab in AVPC</td>
+<td align="left">Platinum-taxane-cetrelimab induction followed by niraparib +/- cetrelimab in AVPC</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT04592237">NCT04592237</a></td>
 <td align="left">1</td>
 <td align="left">Phase II; active-not-recruiting</td>
-<td align="left">AVPC-enriched (protocol-defined AVPC criteria)</td>
-<td align="left">Completed (active-not-recruiting)</td>
+<td align="left">Completed?</td>
 <td align="left">120 estimated</td>
-<td align="left">Progression-free survival (PFS)</td>
-<td align="left">Aggressive variant metastatic prostate cancer with
-protocol-defined AVPC criteria and serial tissue collection</td>
-<td align="left">Randomized immune-PARP maintenance design in AVPC</td>
+<td align="left">~6 month PFS difference</td>
+<td align="left">As above</td>
+<td align="left">Both (c-AVPC + m-AVPC)</td>
 </tr>
 <tr class="odd">
-<td align="left">AVPC/mixed prostate small-cell</td>
-<td align="left">Zanzalintinib in men with AVPC (NAPOLEON;
-HCRN-GU23-655)</td>
+<td align="left">AVPC </td>
+<td align="left">Zanzalintinib in men with AVPC (NAPOLEON; HCRN-GU23-655)</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT07218666">NCT07218666</a></td>
-<td align="left">NA</td>
+<td align="left"></td>
 <td align="left">Phase II; not-yet-recruiting</td>
-<td align="left">Yes (AVPC required)</td>
-<td align="left">Not yet recruiting</td>
+<td align="left"></td>
 <td align="left">30 estimated</td>
-<td align="left">Radiographic progression-free survival (rPFS)</td>
-<td align="left">Adults with metastatic AVPC using protocol-defined
-aggressive variant criteria</td>
-<td align="left">New HCRN AVPC-focused platform; site list not yet
-posted</td>
+<td align="left">~6 month PFS </td>
+<td align="left">Adults with mCRPC after ADT with clinical or genmoic feautres of NEPC/aVPC but not pure small cell</td>
+<td align="left">Both (c-AVPC + m-AVPC)</td>
 </tr>
 <tr class="even">
-<td align="left">AVPC/mixed prostate small-cell</td>
-<td align="left">SWOG S2312: cabazitaxel +/- carboplatin in mCRPC
-stratified by aggressive-variant signature</td>
+<td align="left">AVPC</td>
+<td align="left">SWOG S2312: cabazitaxel +/- carboplatin in mCRPC stratified by aggressive-variant signature</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT06470243">NCT06470243</a></td>
 <td align="left">174</td>
 <td align="left">Phase III; recruiting</td>
-<td align="left">No (all mCRPC eligible; AV signature for
-stratification)</td>
-<td align="left">Recruiting</td>
+<td align="left"></td>
 <td align="left">528 estimated</td>
-<td align="left">Radiographic progression-free survival (rPFS)</td>
-<td align="left">mCRPC with mandatory tissue testing for
-aggressive-variant signature; stratified randomization</td>
-<td align="left">Large cooperative-group AV-signature trial</td>
+<td align="left">PFS  </td>
+<td align="left">mCRPC w/ + TP53/RB/PTEN IHC after docetaxel and visceral mets</td>
+<td align="left">m-AVPC (molecular criteria)</td>
 </tr>
 <tr class="odd">
-<td align="left">AVPC/mixed prostate small-cell</td>
-<td align="left">Cabazitaxel with or without carboplatin in mCRPC
-(anaplastic-feature eligible subgroup)</td>
+<td align="left">AVPC</td>
+<td align="left">Cabazitaxel with or without carboplatin in mCRPC (anaplastic-feature eligible subgroup)</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT01505868">NCT01505868</a></td>
 <td align="left">2</td>
 <td align="left">Phase I/II; completed</td>
-<td align="left">No (mCRPC eligible), with anaplastic/small-cell
-subgroup allowed</td>
-<td align="left">Completed</td>
-<td align="left">170 actual</td>
-<td align="left">Maximum tolerated dose/recommended phase II dose
-(MTD/RP2D)</td>
-<td align="left">mCRPC including anaplastic/aggressive-variant criteria;
-small-cell-like clinical features allowed by protocol</td>
-<td align="left">Foundational platinum-taxane AVPC regimen platform</td>
+<td align="left"></td>
+<td align="left">AVPS subgroup ~80</td>
+<td align="left">PFS</td>
+<td align="left">at least one smallc ell histology, vsiceral mets, PSA discordence, interval respone &lt;6 month progression after  ADT, LDH/CEA &gt;2x ULN (AVPC-C)</td>
+<td align="left">c-AVPC (clinical criteria)</td>
 </tr>
 <tr class="even">
 <td align="left">AVPC/mixed prostate small-cell</td>
-<td align="left">Pembrolizumab + platinum chemotherapy in
-small-cell/neuroendocrine bladder and prostate cancers</td>
+<td align="left">Pembrolizumab + platinum chemotherapy in small-cell/neuroendocrine bladder and prostate cancers</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT03582475">NCT03582475</a></td>
 <td align="left">1</td>
 <td align="left">Phase 1b; active-not-recruiting</td>
-<td align="left">Yes (small-cell/neuroendocrine histology required)</td>
-<td align="left">Recruiting</td>
-<td align="left">15 consented in interim publication</td>
-<td align="left">Safety/tolerability and efficacy signal (single-arm
-early-phase design)</td>
-<td align="left">Requires small-cell/neuroendocrine histology in bladder
-or prostate tumors (mixed GU small-cell-eligible trial)</td>
-<td align="left">Mixed GU SCNEC design with included prostate
-cohort</td>
+<td align="left">Accrual likely complete (inferred); explicit reason not posted</td>
+<td align="left">15</td>
+<td align="left">rPFS</td>
+<td align="left">Requires small-cell/neuroendocrine histology in bladder or prostate tumors (mixed GU small-cell-eligible trial), ECOG 0-1</td>
+<td align="left">N/A (not AVPC-typed)</td>
 </tr>
 <tr class="odd">
 <td align="left">AVPC/mixed prostate small-cell</td>
-<td align="left">DS3201 + ipilimumab in AVPC/urothelial/RCC metastatic
-cohorts</td>
+<td align="left">EZH2i + ipilimumab in AVPC/urothelial/RCC metastatic cohorts</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT04388852">NCT04388852</a></td>
 <td align="left">1</td>
 <td align="left">Phase I; active-not-recruiting</td>
-<td align="left">AVPC-enriched (AV molecular signature required in
-prostate cohort)</td>
-<td align="left">Dose-escalation/enrollment phase appears complete
-(inferred); explicit reason not posted</td>
-<td align="left">65 actual</td>
+<td align="left">Dose-escalation/enrollment phase appears complete (inferred); explicit reason not posted</td>
+<td align="left">65 actual (24 for AVPC)</td>
 <td align="left">Incidence of adverse events</td>
-<td align="left">Metastatic AVPC cohort plus urothelial/RCC cohorts;
-AVPC cohort requires aggressive variant features; ECOG 0-1</td>
-<td align="left">Included for AVPC cohort context; basket design</td>
+<td align="left">Metastatic AVPC genomic signature, PD on PDL-1 (RCC) and on chemo and PDL-1 (UC); ECOG 0-1</td>
+<td align="left">m-AVPC (molecular criteria)</td>
 </tr>
 <tr class="even">
 <td align="left">Extra-pulmonary small-cell</td>
-<td align="left">S2012: platinum/etoposide +/- atezolizumab in
-extrapulmonary poorly differentiated NEC</td>
+<td align="left">1st line S2012: platinum/etoposide +/- atezolizumab in extrapulmonary poorly differentiated NEC</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT05058651">NCT05058651</a></td>
 <td align="left">243</td>
 <td align="left">Phase II/III; recruiting</td>
-<td align="left">Not CRPC-based (extrapulmonary NEC trial)</td>
-<td align="left">Recruiting</td>
+<td align="left"></td>
 <td align="left">189 estimated</td>
-<td align="left">Overall survival (OS)</td>
-<td align="left">Histologically confirmed unresectable/metastatic
-extrapulmonary poorly differentiated neuroendocrine carcinoma;
-measurable disease; ECOG 0-2</td>
-<td align="left">Major cooperative-group extrapulmonary small-cell
-platform</td>
+<td align="left">Overall survival</td>
+<td align="left">Histologically confirmed unresectable/metastatic extrapulmonary poorly differentiated neuroendocrine carcinoma; measurable disease; ECOG 0-2. Asx mets okay</td>
+<td align="left">N/A (not AVPC-typed)</td>
 </tr>
 <tr class="odd">
 <td align="left">Extra-pulmonary small-cell</td>
-<td align="left">DURVASCC: durvalumab + platinum/etoposide in
-extensive-stage extrapulmonary small-cell carcinoma</td>
+<td align="left">DURVASCC: durvalumab + platinum/etoposide in extensive-stage extrapulmonary small-cell carcinoma</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT06464068">NCT06464068</a></td>
 <td align="left">1</td>
 <td align="left">Phase II; recruiting</td>
-<td align="left">Not CRPC-based (extrapulmonary small-cell trial)</td>
-<td align="left">Recruiting</td>
+<td align="left"></td>
 <td align="left">66 estimated</td>
-<td align="left">Progression-free survival (PFS)</td>
-<td align="left">Adults with extensive-stage extrapulmonary small-cell
-carcinoma in first-line treatment setting</td>
-<td align="left">Direct EPSCC regimen context</td>
+<td align="left">Progression-free survival</td>
+<td align="left">Adults with extensive-stage extrapulmonary small-cell carcinoma in first-line treatment setting. Asx brain mets okay</td>
+<td align="left">N/A (not AVPC-typed)</td>
 </tr>
 <tr class="even">
 <td align="left">Extra-pulmonary small-cell</td>
-<td align="left">Topotecan + M6620 (berzosertib) in small-cell cancers
-including extrapulmonary cohorts</td>
+<td align="left">Topotecan + M6620 (berzosertib) in small-cell cancers including extrapulmonary cohorts</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT02487095">NCT02487095</a></td>
-<td align="left">1</td>
+<td align="left">1?</td>
 <td align="left">Phase I/II; completed</td>
-<td align="left">Not CRPC-based (small-cell including extrapulmonary
-cohorts)</td>
 <td align="left">Completed</td>
-<td align="left">62 actual</td>
-<td align="left">Maximum tolerated dose/recommended phase II dose
-(MTD/RP2D)</td>
-<td align="left">Relapsed small-cell cancers including extrapulmonary
-small-cell cohorts; adults &gt;= 18 years</td>
-<td align="left">Completed translational DNA-damage targeting
-platform</td>
+<td align="left">15</td>
+<td align="left">PFS</td>
+<td align="left">Relapsed small-cell cancers including extrapulmonary small-cell cohorts; adults &gt;= 18 years</td>
+<td align="left">N/A (not AVPC-typed)</td>
 </tr>
 <tr class="odd">
 <td align="left">Extra-pulmonary small-cell</td>
-<td align="left">Topotecan +/- M6620 randomized trial in SCLC and
-small-cell cancers outside the lung</td>
+<td align="left">Topotecan +/- M6620 randomized trial in SCLC and small-cell cancers outside the lung</td>
 <td align="left"><a href="https://clinicaltrials.gov/study/NCT03896503">NCT03896503</a></td>
 <td align="left">33</td>
 <td align="left">Phase II; active-not-recruiting</td>
-<td align="left">Not CRPC-based (small-cell including extrapulmonary
-cohorts)</td>
-<td align="left">Randomized enrollment appears complete (inferred);
-explicit reason not posted</td>
-<td align="left">104 actual</td>
-<td align="left">Progression-free survival (PFS)</td>
-<td align="left">Relapsed small-cell lung cancer and extrapulmonary
-small-cell cohorts with measurable disease</td>
-<td align="left">Large randomized study with explicit extra-pulmonary
-cohort</td>
-</tr>
-<tr class="even">
-<td align="left">Extra-pulmonary small-cell</td>
-<td align="left">Atezolizumab + platinum/etoposide for localized
-small-cell neuroendocrine bladder cancer</td>
-<td align="left"><a href="https://clinicaltrials.gov/study/NCT05312671">NCT05312671</a></td>
-<td align="left">2</td>
-<td align="left">Phase II; recruiting</td>
-<td align="left">Not CRPC-based (bladder small-cell/NE trial)</td>
-<td align="left">Recruiting</td>
-<td align="left">63 estimated</td>
-<td align="left">Pathologic complete response (pCR) at cystectomy</td>
-<td align="left">Localized invasive bladder carcinoma requiring pure or
-mixed small-cell/high-grade neuroendocrine histology</td>
-<td align="left">Genitourinary extra-pulmonary small-cell trial</td>
+<td align="left">Complete</td>
+<td align="left">60</td>
+<td align="left">Progression-free survival</td>
+<td align="left">Relapsed small-cell lung cancer and extrapulmonary small-cell cohorts with measurable disease</td>
+<td align="left">N/A (not AVPC-typed)</td>
 </tr>
 </tbody>
 </table>
 </div>
-<div id="appendix-tumor-specific-inclusion-criteria-exact-mixed-crpcnepc-trials" class="section level2">
-<h2>Appendix: Tumor-Specific Inclusion Criteria (Exact, Mixed CRPC/NEPC
-Trials)</h2>
-<table>
-<colgroup>
-<col width="14%" />
-<col width="2%" />
-<col width="12%" />
-<col width="70%" />
-</colgroup>
-<thead>
-<tr class="header">
-<th align="left">Study</th>
-<th align="left">NCT</th>
-<th align="left">NEPC/AVPC required for accrual</th>
-<th align="left">Tumor-specific inclusion criteria (exact,
-condensed)</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td align="left">CHAMP</td>
-<td align="left"><a href="https://clinicaltrials.gov/study/NCT04709276">NCT04709276</a></td>
-<td align="left">Yes</td>
-<td align="left">Neuroendocrine-like prostate cancer required: either
-(1) histologically proven small-cell/intermediate atypical/mixed
-adenocarcinoma-NE histology, OR (2) adenocarcinoma with AV features
-(e.g., visceral metastases, low-PSA bulky/high-volume disease, short
-interval to CRPC, TP53/RB1/PTEN 2-of-3 alterations, NE marker
-positivity).</td>
-</tr>
-<tr class="even">
-<td align="left">PICK-NEPC</td>
-<td align="left"><a href="https://clinicaltrials.gov/study/NCT03179410">NCT03179410</a></td>
-<td align="left">Yes</td>
-<td align="left">Neuroendocrine-like phenotype required: either
-histologic small-cell/NEPC/mixed histology OR adenocarcinoma with AV
-clinical features (e.g., liver metastases, low-PSA bulky progression,
-elevated LDH after AR pathway therapy progression).</td>
-</tr>
-<tr class="odd">
-<td align="left">Olaparib maintenance after cabazitaxel-carboplatin in
-AVPC</td>
-<td align="left"><a href="https://clinicaltrials.gov/study/NCT03263650">NCT03263650</a></td>
-<td align="left">Yes (AVPC-enriched)</td>
-<td align="left">Required &gt;=1 AVPC criterion: histologic small-cell
-prostate carcinoma, exclusive visceral metastases, lytic bone
-metastases, bulky nodal/pelvic mass, low-PSA plus high-volume bone
-disease, elevated LDH/CEA, short interval to CRPC, or &gt;=2 alterations
-among TP53/RB1/PTEN.</td>
-</tr>
-<tr class="even">
-<td align="left">Platinum-taxane-cetrelimab induction then niraparib +/-
-cetrelimab</td>
-<td align="left"><a href="https://clinicaltrials.gov/study/NCT04592237">NCT04592237</a></td>
-<td align="left">Yes (AVPC-enriched)</td>
-<td align="left">Required metastatic AVPC features including small-cell
-option and/or AV molecular criteria (including TP53/RB1/PTEN-based
-aberrancy by CLIA testing / IHC / sequencing).</td>
-</tr>
-<tr class="odd">
-<td align="left">Cabazitaxel +/- carboplatin (Phase I/II)</td>
-<td align="left"><a href="https://clinicaltrials.gov/study/NCT01505868">NCT01505868</a></td>
-<td align="left">No (all mCRPC eligible; AV/anaplastic subgroup
-allowed)</td>
-<td align="left">Histologic prostate adenocarcinoma eligible broadly;
-additional ‘anaplastic’ subgroup included histologic small-cell disease
-or aggressive clinical features (exclusive visceral disease, lytic
-metastases, bulky mass, low-PSA/high-volume phenotype, elevated LDH/CEA,
-short interval to CRPC).</td>
-</tr>
-<tr class="even">
-<td align="left">Pembrolizumab + platinum in GU small-cell/NE
-cancers</td>
-<td align="left"><a href="https://clinicaltrials.gov/study/NCT03582475">NCT03582475</a></td>
-<td align="left">Yes</td>
-<td align="left">Required histologically confirmed
-small-cell/neuroendocrine histology of bladder/urethra/upper urinary
-tract OR primary small-cell/neuroendocrine prostate cancer (pure or
-mixed small-cell/NE allowed).</td>
-</tr>
-<tr class="odd">
-<td align="left">DS3201 + ipilimumab basket (prostate cohort)</td>
-<td align="left"><a href="https://clinicaltrials.gov/study/NCT04388852">NCT04388852</a></td>
-<td align="left">Yes (prostate cohort AVPC molecular-enriched)</td>
-<td align="left">Prostate cohort required CRPC plus AVPC molecular
-signature with &gt;=2 abnormalities among TP53/RB1/PTEN; variant
-histologies including small-cell/neuroendocrine prostate carcinoma were
-explicitly permitted.</td>
-</tr>
-</tbody>
-</table>
+<div class="avpc-criteria-panel">
+<h3>AVPC Criteria Reference</h3>
+<div class="avpc-criteria-grid">
+<div>
+<h4>c-AVPC (clinical AVPC)</h4>
+<ul>
+<li>Clinicopathologic definition: classified when at least 1 aggressive-variant feature is present</li>
+<li>Canonical features include: small-cell histology; visceral-only metastases; predominantly lytic bone metastases; bulky (&gt;=5 cm) nodal/pelvic disease; low PSA with high-volume metastatic burden; NE marker-positive disease with elevated LDH/CEA or hypercalcemia; rapid androgen-indifferent progression (about &lt;=6 months after hormonal therapy)</li>
+<li>Represents phenotype-based AVPC identification from presentation, pathology, and routine clinical markers</li>
+</ul>
 </div>
-
-
-
-
+<div>
+<h4>m-AVPC (molecular AVPC)</h4>
+<ul>
+<li>Genomic definition: aggressive-variant molecular signature</li>
+<li>Most commonly operationalized as combined aberrancy in at least 2 of 3 tumor suppressor pathways: TP53, RB1, PTEN</li>
+<li>Usually assigned from CLIA-grade IHC and/or sequencing data (assay/platform dependent)</li>
+</ul>
+</div>
+</div>
+</div>
+</div>
 </div>
 
 <script>
