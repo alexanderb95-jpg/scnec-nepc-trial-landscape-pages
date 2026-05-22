@@ -1,0 +1,86 @@
+# Engineered features
+
+Drug-class sensitivity screen, methylation strata, expression strata, cross-drug concordance, and composite vulnerability score (hypothesis-generating).
+
+```{r load-ws-03, include = FALSE, cache = FALSE}
+if (file.exists(STEMAI_WORKSPACE_RDS)) {
+  ws <- readRDS(STEMAI_WORKSPACE_RDS)
+  for (nm in names(ws)) assign(nm, ws[[nm]], envir = .GlobalEnv)
+}
+```
+
+```{r rcan1-expression, cache = FALSE}
+if (exists("tpm") && exists("expr_target")) {
+  rcan1_tpm <- tpm %>%
+    dplyr::filter(grepl("^RCAN1\\b", .data$gene_name)) %>%
+    dplyr::transmute(.data$depmap_id, RCAN1 = .data$rna_expression)
+  expr_target <- expr_target %>%
+    dplyr::left_join(rcan1_tpm, by = "depmap_id")
+}
+```
+
+```{r engineered-features-table, cache = FALSE}
+stemai_features <- tibble::tibble()
+if (exists("expr_target") && nrow(expr_target) > 0) {
+  stemai_features <- expr_target %>%
+    dplyr::select(
+      dplyr::any_of(c(
+        "depmap_id", "cell_line_name", "lineage_group", "stem_like_group", "stem_like_subtype",
+        "BCL2", "MCL1", "BCL2L1", "RCAN1", "validation_partition"
+      ))
+    )
+  if (exists("pair_df") && nrow(pair_df) > 0) {
+    stemai_features <- stemai_features %>%
+      dplyr::left_join(
+        pair_df %>% dplyr::select(.data$depmap_id, dplyr::any_of(c("aza_sens", "ven_sens", "HMA_sens", "BCL2i_sens"))),
+        by = "depmap_id"
+      )
+  }
+  if (exists("merged_aza") && nrow(merged_aza) > 0 && "LNIC50" %in% names(merged_aza)) {
+    stemai_features <- stemai_features %>%
+      dplyr::left_join(
+        merged_aza %>% dplyr::select(.data$depmap_id, LNIC50_DNMTi = .data$LNIC50),
+        by = "depmap_id"
+      )
+  }
+  if (exists("merged_bcl2i_gdsc") && nrow(merged_bcl2i_gdsc) > 0) {
+    stemai_features <- stemai_features %>%
+      dplyr::left_join(
+        merged_bcl2i_gdsc %>% dplyr::select(.data$depmap_id, LNIC50_BCL2i = .data$LNIC50),
+        by = "depmap_id"
+      )
+  }
+  stemai_features <- stemai_features %>%
+    dplyr::mutate(
+      expr_stratum_BCL2 = dplyr::ntile(dplyr::coalesce(.data$BCL2, NA_real_), 4),
+      dual_sensitive_flag = dplyr::if_else(
+        !is.na(.data$LNIC50_DNMTi) & !is.na(.data$LNIC50_BCL2i) &
+          .data$LNIC50_DNMTi <= stats::quantile(.data$LNIC50_DNMTi, 0.25, na.rm = TRUE) &
+          .data$LNIC50_BCL2i <= stats::quantile(.data$LNIC50_BCL2i, 0.25, na.rm = TRUE),
+        1L, 0L, missing = 0L
+      ),
+      composite_vulnerability = dplyr::coalesce(.data$BCL2, 0) -
+        dplyr::coalesce(.data$LNIC50_BCL2i, stats::median(.data$LNIC50_BCL2i, na.rm = TRUE)) -
+        dplyr::coalesce(.data$LNIC50_DNMTi, stats::median(.data$LNIC50_DNMTi, na.rm = TRUE))
+    )
+  saveRDS(stemai_features, STEMAI_FEATURES_RDS)
+  readr::write_csv(stemai_features, file.path(stemai_data_dir, "StemAI_engineered_features.csv"))
+}
+```
+
+```{r feature-summary-by-stem-like, cache = FALSE}
+if (exists("stemai_features") && nrow(stemai_features) > 0) {
+  summ <- stemai_features %>%
+    dplyr::filter(.data$stem_like_group == "Stem-like") %>%
+    dplyr::group_by(.data$stem_like_subtype) %>%
+    dplyr::summarise(
+      N = dplyr::n(),
+      BCL2_median = round(median(.data$BCL2, na.rm = TRUE), 3),
+      RCAN1_median = round(median(.data$RCAN1, na.rm = TRUE), 3),
+      dual_sensitive_n = sum(.data$dual_sensitive_flag == 1L, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(dplyr::desc(.data$N))
+  knitr::kable(summ, caption = "Engineered features by stem-like subtype (Panel 2–3 summary).")
+}
+```

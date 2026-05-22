@@ -1,0 +1,93 @@
+# Data loading (StemAI)
+
+```{r stemai-setup-01, include = FALSE}
+if (!requireNamespace("here", quietly = TRUE)) install.packages("here")
+source(here::here("scripts", "stemai_config.R"), local = TRUE)
+cohort_extended_hem <- TRUE
+cohort_rds_path <- if (requireNamespace("here", quietly = TRUE)) {
+  here::here("data", "HMA_BCL2_cohort_assignments_TNBC_Lymphoma.rds")
+} else {
+  file.path("data", "HMA_BCL2_cohort_assignments_TNBC_Lymphoma.rds")
+}
+if (!file.exists(cohort_rds_path) || file.size(cohort_rds_path) < 1000) {
+  cohort_rds_path <- if (requireNamespace("here", quietly = TRUE)) {
+    here::here("data", "HMA_BCL2_cohort_assignments.rds")
+  } else {
+    file.path("data", "HMA_BCL2_cohort_assignments.rds")
+  }
+}
+```
+
+## Open-source inputs: DepMap, GDSC, CTRP (cell-line layer)
+
+```{r load-depmap-stemai, cache = FALSE}
+if (!requireNamespace("here", quietly = TRUE)) install.packages("here")
+source(here::here("scripts", "load_depmap_for_rmd.R"), local = FALSE)
+```
+
+```{r load-cohort-tnbc-lymph, cache = FALSE}
+child_path <- here::here("rmarkdown", "01_Data_Loading_TNBC_Lymphoma.Rmd")
+if (!file.exists(child_path)) stop("Missing cohort child: ", child_path)
+knitr::knit_child(child_path, envir = environment(), quiet = TRUE)
+```
+
+```{r stem-like-labels, cache = FALSE}
+if (exists("expr_target") && nrow(expr_target) > 0) {
+  expr_target <- expr_target %>%
+    dplyr::mutate(
+      stem_like_group = assign_stem_like_group(.data$lineage_group),
+      stem_like_subtype = assign_stem_like_subtype(.data$lineage_group),
+      validation_partition = "seen"
+    )
+}
+```
+
+## TCGA (patient-tumor layer, unseen validation)
+
+```{r load-tcga-stemai, cache = FALSE}
+tcga_rds <- file.path(stemai_data_dir, "StemAI_tcga_harmonized.rds")
+if (!file.exists(tcga_rds) || file.size(tcga_rds) < 500) {
+  tryCatch(source(here::here("scripts", "load_tcga_stemai.R"), local = FALSE), error = function(e) NULL)
+}
+tcga_stemai <- tibble::tibble()
+tcga_stemai_status <- tibble::tibble()
+if (file.exists(tcga_rds)) {
+  tcga_obj <- readRDS(tcga_rds)
+  tcga_stemai <- tcga_obj$tcga
+  tcga_stemai_status <- tcga_obj$status
+}
+```
+
+## Cohort harmonization table (Panel 1)
+
+```{r tbl-cohort-harmonization}
+if (exists("expr_target") && nrow(expr_target) > 0) {
+  tbl_cohort <- expr_target %>%
+    dplyr::count(.data$stem_like_subtype, .data$stem_like_group, name = "N_expr") %>%
+    dplyr::arrange(dplyr::desc(.data$N_expr))
+  knitr::kable(tbl_cohort, caption = "Table 1. StemAI cohort after harmonization (expression layer). Stem-like subtypes include SCLC, ExPulm-SCNEC, AML, DLBCL/high-grade lymphoma, neuroblastoma.")
+} else {
+  knitr::kable(tibble::tibble(Note = "expr_target not loaded; run DepMap cache and cohort assignment."), caption = "Table 1.")
+}
+if (nrow(tcga_stemai_status) > 0) {
+  knitr::kable(tcga_stemai_status, caption = "TCGA input status (unseen validation partition).")
+}
+```
+
+```{r save-workspace-stemai-01, include = FALSE, cache = FALSE}
+obj_names <- c(
+  "expr_target", "expr_meta", "lineage_levels", "meta",
+  "tcga_stemai", "tcga_stemai_status", "gdsc_dir", "depmap_cache_path",
+  "merged_aza", "merged_bcl2i_gdsc", "pair_df", "have_gdsc", "have_ctrp", "prism_expr",
+  "STEMAI_QUERY_SCOPE", "STEMAI_STEM_LIKE_LEVELS"
+)
+obj_names <- obj_names[sapply(obj_names, exists, where = .GlobalEnv)]
+if (length(obj_names) > 0) {
+  tmp_ws <- paste0(STEMAI_WORKSPACE_RDS, ".tmp")
+  save(list = obj_names, file = tmp_ws)
+  if (file.exists(tmp_ws) && file.size(tmp_ws) > 1000) {
+    ok <- tryCatch({ readRDS(tmp_ws); TRUE }, error = function(e) FALSE)
+    if (ok) file.rename(tmp_ws, STEMAI_WORKSPACE_RDS) else unlink(tmp_ws)
+  }
+}
+```

@@ -1,0 +1,102 @@
+# Ranked outputs and validation
+
+Final ranked biomarker targets and combination hypotheses; seen vs unseen partitions; RCAN1 sentinel reproducibility (diagnostic, non-forcing).
+
+```{r load-ws-06, include = FALSE, cache = FALSE}
+source(here::here("scripts", "stemai_config.R"), local = TRUE)
+source(here::here("scripts", "stemai_helpers.R"), local = TRUE)
+if (!exists("ranked_mechanistic") && file.exists(STEMAI_FEATURES_RDS)) {
+  # ranked_mechanistic created in child 04; reload features if needed
+}
+if (file.exists(STEMAI_EVIDENCE_RDS)) {
+  ev_obj <- readRDS(STEMAI_EVIDENCE_RDS)
+  evidence_pkgs <- ev_obj$packages
+  evidence_qc_tbl <- ev_obj$qc
+}
+if (file.exists(STEMAI_FEATURES_RDS)) stemai_features <- readRDS(STEMAI_FEATURES_RDS)
+```
+
+```{r ranked-outputs, cache = FALSE}
+ranked_targets <- tibble::tibble()
+if (exists("ranked_mechanistic") && nrow(ranked_mechanistic) > 0) {
+  ranked_targets <- ranked_mechanistic %>%
+    dplyr::mutate(rank = dplyr::row_number(), query_scope = STEMAI_QUERY_SCOPE) %>%
+    dplyr::left_join(
+      evidence_qc_tbl %>% dplyr::select(.data$target_id, evidence_qc_ok = .data$qc_ok),
+      by = "target_id"
+    )
+}
+ranked_combinations <- tibble::tibble(
+  rank = 1L,
+  combination = "DNMTi (HMA) + selective BCL2i",
+  primary_lineages = "SCLC, ExPulm-SCNEC, AML benchmark, DLBCL/high-grade lymphoma, neuroblastoma",
+  biomarker_anchor = "RCAN1 methylation/expression + BCL2 context",
+  validation_partition = "seen",
+  query_scope = STEMAI_QUERY_SCOPE
+)
+if (exists("evidence_qc_tbl")) {
+  failed <- evidence_qc_tbl %>% dplyr::filter(!.data$qc_ok)
+  if (nrow(failed) > 0) {
+    ranked_targets <- ranked_targets %>%
+      dplyr::mutate(
+        rank_status = dplyr::if_else(.data$target_id %in% failed$target_id, "incomplete_for_ranking", "ok")
+      )
+  } else {
+    ranked_targets <- ranked_targets %>% dplyr::mutate(rank_status = "ok")
+  }
+}
+saveRDS(
+  list(
+    ranked_targets = ranked_targets,
+    ranked_combinations = ranked_combinations,
+    query_scope = STEMAI_QUERY_SCOPE
+  ),
+  STEMAI_RANKED_RDS
+)
+readr::write_csv(ranked_targets, file.path(stemai_data_dir, "StemAI_ranked_targets.csv"))
+readr::write_csv(ranked_combinations, file.path(stemai_data_dir, "StemAI_ranked_combinations.csv"))
+```
+
+```{r display-ranked}
+knitr::kable(ranked_targets, caption = "Panel 6a. Ranked biomarker targets (hypothesis-generating).")
+knitr::kable(ranked_combinations, caption = "Panel 6b. Ranked combination hypotheses.")
+```
+
+## Seen vs unseen validation
+
+```{r validation-split-summary}
+part_tbl <- tibble::tibble(
+  Partition = STEMAI_VALIDATION_PARTITIONS,
+  Data = c(
+    paste(STEMAI_SEEN_SOURCES, collapse = ", "),
+    paste(STEMAI_UNSEEN_SOURCES, collapse = ", "),
+    "PubMed + slide-deck corroboration"
+  )
+)
+knitr::kable(part_tbl, caption = "Dataset-level validation split (default).")
+```
+
+## RCAN1 sentinel reproducibility (scope-locked)
+
+```{r rcan1-sentinel-qc, cache = FALSE}
+expr_for_sentinel <- if (exists("stemai_features")) stemai_features else NULL
+current_snap <- build_rcan1_sentinel_snapshot(expr_for_sentinel, ranked_targets, evidence_pkgs)
+saveRDS(current_snap, STEMAI_RCAN1_LAST_RUN_RDS)
+baseline_snap <- if (file.exists(STEMAI_RCAN1_BASELINE_RDS)) readRDS(STEMAI_RCAN1_BASELINE_RDS) else NULL
+repro <- compare_rcan1_sentinel(baseline_snap, current_snap)
+if (is.null(baseline_snap) || identical(repro$status, "no_baseline")) {
+  saveRDS(current_snap, STEMAI_RCAN1_BASELINE_RDS)
+  repro$message <- paste(repro$message, "Baseline saved.")
+}
+saveRDS(repro, STEMAI_REPRO_REPORT_RDS)
+knitr::kable(
+  tibble::tibble(
+    Check = c("Query scope", "Status", "Message"),
+    Result = c(STEMAI_QUERY_SCOPE, repro$status, repro$message)
+  ),
+  caption = "RCAN1 sentinel reproducibility (diagnostic; does not force RCAN1 ranking)."
+)
+if (length(repro$warnings) > 0) {
+  knitr::asis_output(paste0("\n\n**Warnings:** ", paste(repro$warnings, collapse = ", "), "\n"))
+}
+```

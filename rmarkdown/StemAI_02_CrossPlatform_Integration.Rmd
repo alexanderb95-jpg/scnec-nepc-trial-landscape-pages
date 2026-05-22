@@ -1,0 +1,45 @@
+# Cross-platform integration
+
+Cell-line harmonization (DepMap ID / name mapping) and drug-class aggregation (HMA, BCL2i) follow the same rules as HMA_BCL2_Expanded. This section documents **data availability by source** for the StemAI stem-like framework.
+
+```{r integration-status, cache = FALSE}
+if (!requireNamespace("here", quietly = TRUE)) install.packages("here")
+source(here::here("scripts", "stemai_config.R"), local = TRUE)
+if (file.exists(STEMAI_WORKSPACE_RDS) && file.size(STEMAI_WORKSPACE_RDS) > 1000) {
+  ws <- tryCatch(readRDS(STEMAI_WORKSPACE_RDS), error = function(e) NULL)
+  if (!is.null(ws)) for (nm in names(ws)) assign(nm, ws[[nm]], envir = .GlobalEnv)
+}
+
+have_gdsc <- exists("gdsc_raw") && is.data.frame(gdsc_raw) && nrow(gdsc_raw) > 0
+have_ctrp <- exists("have_ctrp") && isTRUE(have_ctrp)
+have_prism <- exists("prism_expr") && nrow(prism_expr) > 0
+
+if (exists("expr_target") && nrow(expr_target) > 0) {
+  t2 <- expr_target %>%
+    dplyr::group_by(.data$stem_like_subtype, .data$stem_like_group) %>%
+    dplyr::summarise(N_cohort = dplyr::n(), .groups = "drop")
+  if (exists("pair_df") && nrow(pair_df) > 0) {
+    t2 <- t2 %>%
+      dplyr::left_join(
+        pair_df %>% dplyr::count(.data$lineage_group, name = "N_PRISM"),
+        by = c("stem_like_subtype" = "lineage_group")
+      )
+  }
+  knitr::kable(t2, caption = "Table 2. Cross-platform integration: cohort lines by stem-like subtype (PRISM/GDSC/CTRP loaded in upstream 01 child when cache present).")
+}
+
+sources_tbl <- tibble::tibble(
+  Source = c(STEMAI_SEEN_SOURCES, STEMAI_UNSEEN_SOURCES),
+  Partition = c(rep("seen", length(STEMAI_SEEN_SOURCES)), rep("unseen", length(STEMAI_UNSEEN_SOURCES))),
+  Role = c(
+    "Expression, CRISPR, PRISM",
+    "Dose-response LNIC50",
+    "Dose-response AAC",
+    "Methylation strata",
+    "Patient tumor RNA signatures",
+    "AML patient RNA",
+    "Literature triangulation"
+  )
+)
+knitr::kable(sources_tbl, caption = "Open-source input map (PowerPoint-aligned).")
+```

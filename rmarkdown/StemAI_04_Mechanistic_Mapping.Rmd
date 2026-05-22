@@ -1,0 +1,68 @@
+# Mechanistic vulnerability mapping
+
+Identify biomarker-coordinated vulnerabilities and rational combinations (RCAN1–DNMTi–BCL2i axis emphasis).
+
+```{r load-ws-04, include = FALSE, cache = FALSE}
+if (file.exists(STEMAI_FEATURES_RDS)) {
+  stemai_features <- readRDS(STEMAI_FEATURES_RDS)
+} else if (file.exists(STEMAI_WORKSPACE_RDS)) {
+  ws <- readRDS(STEMAI_WORKSPACE_RDS)
+  for (nm in names(ws)) assign(nm, ws[[nm]], envir = .GlobalEnv)
+}
+```
+
+```{r rcan1-stem-vs-nonstem, fig.cap="Panel 4a. RCAN1 expression by stem-like group (log2 TPM+1).", cache = FALSE}
+if (exists("stemai_features") && nrow(stemai_features) > 0 && "RCAN1" %in% names(stemai_features)) {
+  p_rcan1 <- ggplot2::ggplot(
+    stemai_features %>% dplyr::filter(!is.na(.data$RCAN1), !is.na(.data$stem_like_group)),
+    ggplot2::aes(x = .data$stem_like_group, y = .data$RCAN1, fill = .data$stem_like_group)
+  ) +
+    ggplot2::geom_boxplot(outlier.size = 0.8) +
+    ggplot2::labs(x = NULL, y = "RCAN1 expression (log2 TPM+1)", title = "RCAN1 by stem-like vs comparator") +
+    ggplot2::theme_minimal(base_size = 14) +
+    ggplot2::theme(legend.position = "none", axis.text.x = ggplot2::element_text(angle = 25, hjust = 1))
+  print(p_rcan1)
+  ggplot2::ggsave(file.path(stemai_figures_dir, "RCAN1_by_stem_like_group.png"), p_rcan1, width = 7, height = 5, dpi = 300)
+} else {
+  knitr::asis_output("RCAN1 expression not available in engineered features.")
+}
+```
+
+```{r rcan1-dnmti-bcl2i-scatter, fig.cap="Panel 4b. RCAN1 vs pooled DNMTi sensitivity (GDSC LNIC50) in stem-like lines; lower LNIC50 = more sensitive.", cache = FALSE}
+if (exists("stemai_features") && "RCAN1" %in% names(stemai_features) && "LNIC50_DNMTi" %in% names(stemai_features)) {
+  df_sl <- stemai_features %>%
+    dplyr::filter(.data$stem_like_group == "Stem-like", !is.na(.data$RCAN1), !is.na(.data$LNIC50_DNMTi))
+  if (nrow(df_sl) >= 5) {
+    ct <- tryCatch(cor.test(df_sl$RCAN1, df_sl$LNIC50_DNMTi, method = "spearman", exact = FALSE), error = function(e) NULL)
+    rho_lab <- if (!is.null(ct)) sprintf("Spearman rho = %s, p = %s", round(ct$estimate, 2), format.pval(ct$p.value, 2)) else ""
+    p_sc <- ggplot2::ggplot(df_sl, ggplot2::aes(x = .data$RCAN1, y = .data$LNIC50_DNMTi, color = .data$stem_like_subtype)) +
+      ggplot2::geom_point(size = 2.5, alpha = 0.85) +
+      ggplot2::labs(x = "RCAN1 (log2 TPM+1)", y = "DNMTi LNIC50 (lower = more sensitive)", title = paste("RCAN1 vs DNMTi sensitivity", rho_lab)) +
+      ggplot2::theme_minimal(base_size = 14)
+    print(p_sc)
+    ggplot2::ggsave(file.path(stemai_figures_dir, "RCAN1_vs_DNMTi_LNIC50_stem_like.png"), p_sc, width = 8, height = 5, dpi = 300)
+  }
+}
+```
+
+```{r target-priority-scores, cache = FALSE}
+ranked_mechanistic <- tibble::tibble()
+if (exists("stemai_features") && nrow(stemai_features) > 0) {
+  sl <- stemai_features %>% dplyr::filter(.data$stem_like_group == "Stem-like")
+  score_rcan1 <- if ("RCAN1" %in% names(sl)) median(sl$RCAN1, na.rm = TRUE) else NA_real_
+  score_bcl2 <- if ("BCL2" %in% names(sl)) median(sl$BCL2, na.rm = TRUE) else NA_real_
+  ranked_mechanistic <- tibble::tibble(
+    target_id = c("RCAN1", "BCL2", "DNMT1", "MCL1"),
+    mechanistic_score = c(score_rcan1, score_bcl2, NA_real_, NA_real_),
+    rationale = c(
+      "Methylation-linked DNMTi response; apoptotic priming to BCL2i",
+      "Lineage-plastic BCL2 dependence",
+      "On-target epigenetic enzyme; pairs with HMA class",
+      "Resistance bypass context in some lineages"
+    )
+  ) %>%
+    dplyr::arrange(dplyr::desc(.data$mechanistic_score))
+  assign("ranked_mechanistic", ranked_mechanistic, envir = .GlobalEnv)
+  knitr::kable(ranked_mechanistic, caption = "Mechanistic mapping: target priority scores (stem-like median expression / context).")
+}
+```

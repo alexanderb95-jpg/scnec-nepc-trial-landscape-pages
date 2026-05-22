@@ -1,0 +1,126 @@
+---
+title: "StemAI: Epigenetic Combination Co-Scientist (HMA+BCL2 in Stem-like Cancers)"
+subtitle: "Parallel pipeline to HMA_BCL2_Expanded — Master + children"
+author: "Alex Karol"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+always_allow_html: true
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+    fig_caption: true
+    self_contained: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 5,
+  fig.show = "asis",
+  dev = "png",
+  dpi = 150,
+  cache = TRUE,
+  cache.path = if (requireNamespace("here", quietly = TRUE)) here::here("_cache", "StemAI_") else "_cache/StemAI_"
+)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+if (!requireNamespace("here", quietly = TRUE)) install.packages("here")
+if (requireNamespace("here", quietly = TRUE)) knitr::opts_knit$set(root.dir = here::here())
+source(here::here("scripts", "stemai_config.R"), local = TRUE)
+source(here::here("scripts", "stemai_helpers.R"), local = TRUE)
+gdsc_dir <- if (dir.exists("data")) "data" else file.path("..", "data")
+```
+
+# Human input
+
+**Query scope (fixed for this build):** `r STEMAI_QUERY_SCOPE`
+
+Epigenetic-based combination therapy inquiry for stem-like cancers: identify biomarker-coordinated vulnerabilities and rational HMA + BCL2i (and related) combinations using open-source pharmacogenomics, with TCGA and literature as unseen validation layers.
+
+## How to run
+
+| Environment | Command |
+|-------------|---------|
+| **Cloud agent (recommended)** | `Rscript scripts/render_stemai_cloud.R` |
+| Local | `Rscript scripts/render_stemai_cloud.R` or knit this file |
+
+**Prerequisites:** `Rscript scripts/load_depmap_cache.R`; optional `Rscript scripts/download_tcga_prad.R` and `Rscript scripts/download_tcga_laml.R`. For extended stem-like cohort (DLBCL, neuroblastoma): knit `Cell_Line_Assignment_Verification_TNBC_Lymphoma.Rmd` first or use its RDS.
+
+```{r workflow-schematic, fig.cap="StemAI workflow (PowerPoint-aligned). Inputs → integration → engineered features → mapping → ranked outputs + evidence."}
+if (requireNamespace("DiagrammeR", quietly = TRUE)) {
+  DiagrammeR::grViz("
+digraph stemai {
+  graph [layout = dot, rankdir = LR, bgcolor = white]
+  node [shape = box, style = 'rounded,filled', fontname = Helvetica]
+  human [label = 'Human input\\nEpigenetic combination inquiry', fillcolor = '#E8F4FF']
+  subgraph cluster_in {
+    label = 'Open-source inputs'
+    depmap [label = 'DepMap\\nRNA + CRISPR + PRISM', fillcolor = '#DBEAFE']
+    gdsc [label = 'GDSC\\nDose-response', fillcolor = '#DCFCE7']
+    ctrp [label = 'CTRPv2\\nDose-response', fillcolor = '#EDE9FE']
+    gse [label = 'GSE68379\\nMethylation', fillcolor = '#FEE2E2']
+    tcga [label = 'TCGA\\nPRAD + LAML', fillcolor = '#FEF3C7']
+  }
+  integrate [label = 'Cross-platform integration\\nHarmonization + drug-class aggregation', fillcolor = '#FFF7ED']
+  features [label = 'Engineered features\\nSensitivity strata, concordance, composite score', fillcolor = '#ECFDF5', style = 'rounded,dashed']
+  map [label = 'Mechanistic vulnerability mapping', fillcolor = '#E0F2FE']
+  out [label = 'Final output\\nRanked targets + combinations\\nPubMed evidence', fillcolor = '#D1FAE5']
+  human -> depmap
+  depmap -> integrate
+  gdsc -> integrate
+  ctrp -> integrate
+  gse -> integrate
+  tcga -> integrate
+  integrate -> features
+  features -> map
+  map -> out
+}
+")
+} else {
+  svg_path <- here::here("outputs", "simple_hma_bcl2_workflow_schematic.svg")
+  if (file.exists(svg_path)) {
+    knitr::include_graphics(normalizePath(svg_path, winslash = "/"))
+  } else {
+    knitr::asis_output("Install DiagrammeR for inline workflow schematic, or add outputs/simple_hma_bcl2_workflow_schematic.svg.")
+  }
+}
+```
+
+```{r child-01, cache = FALSE, child = 'rmarkdown/StemAI_01_Data_Loading.Rmd'}
+```
+
+```{r child-02, cache = FALSE, child = 'rmarkdown/StemAI_02_CrossPlatform_Integration.Rmd'}
+```
+
+```{r child-03, cache = FALSE, child = 'rmarkdown/StemAI_03_Feature_Engineering.Rmd'}
+```
+
+```{r child-04, cache = FALSE, child = 'rmarkdown/StemAI_04_Mechanistic_Mapping.Rmd'}
+```
+
+```{r child-05, cache = FALSE, child = 'rmarkdown/StemAI_05_Evidence_Packages.Rmd'}
+```
+
+```{r child-06, cache = FALSE, child = 'rmarkdown/StemAI_06_Ranked_Outputs_and_Validation.Rmd'}
+```
+
+# Session info
+
+```{r session-info}
+knitr::kable(
+  tibble::tibble(Item = c("Query scope", "Workspace RDS", "Features RDS", "Evidence RDS"),
+                 Value = c(STEMAI_QUERY_SCOPE, STEMAI_WORKSPACE_RDS, STEMAI_FEATURES_RDS, STEMAI_EVIDENCE_RDS)),
+  caption = "StemAI artifact paths."
+)
+if (requireNamespace("sessioninfo", quietly = TRUE)) {
+  print(sessioninfo::session_info())
+}
+```
